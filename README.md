@@ -45,11 +45,24 @@ This installation guide will walk you through the process of setting up UltraDar
    - Locate the downloaded Anaconda installer executable (.exe) file and run it. During installation, make sure to set the installation path to `c:/DarkFusion/anaconda`.
 
 5. **Execute fusion_install.bat**:
-   - Once Anaconda is installed, locate the `fusion_install.bat` file in your UltraDarkFusion directory and right-click on it. Choose "Run as administrator" to execute the script.
+   - Once Anaconda is installed, locate the `fusion_install.bat` file in your DarkFusion directory and right-click on it. Choose "Run as administrator" to execute the script.
 
 This completes the basic installation for using DNN on OpenCL without CUDA. The second part of the installation, which includes CUDA installation, CMake, Visual Studio, and other steps, will be covered separately.
 
-Once Anaconda is installed, locate the fusion_install.bat file in your UltraDarkFusion directory and right-click on it. Choose "Run as administrator" to execute the script.
+###Recommended: Use Visual Studio Code for a smoother experience with the program.### Download it here https://code.visualstudio.com/Download
+
+If you prefer not to use Visual Studio Code:
+
+Open Anaconda Prompt.
+Activate the fusion environment by running:
+```conda activate fusion```
+Navigate to the UltraDarkFusion directory:
+bash
+Copy code
+```cd C:\DarkFusion\UltraDarkFusion```
+Use the Tab key to auto-complete and select UltraDarkFusion_X.py, then press Enter to start the program.
+For further instructions, refer to the help tab in the program or join the Discord community.
+
 
 # UltraDarkFusion Installation Guide (Part 2: with DNN with CUDA)
 
@@ -71,7 +84,6 @@ To ensure a smooth installation process when setting up OpenCV with CUDA support
 
 6. **Ensure you have at least 30 GB of free space for the installation.**
 
-7. **Recommend using Visual Studio Code**: It can make your life a little easier. Download it [here](https://www.bing.com/search?q=visual+studio+code).
 
 ## Installation Steps
 
