@@ -67,7 +67,6 @@ from qt_material import apply_stylesheet, list_themes
 matplotlib.use("TkAgg")
 from logging.handlers import RotatingFileHandler
 from multiprocessing import Pool
-from TensorRT import *
 from segment_anything import sam_model_registry, SamPredictor
 import pybboxes as pbx
 import yolov5
