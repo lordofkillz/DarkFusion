@@ -24,27 +24,23 @@ So in summary, UltraDarkFusion streamlines the training workflow for YOLO-based 
 
 This installation guide will walk you through the process of setting up UltraDarkFusion for DNN (Deep Neural Network) operations using OpenCL without CUDA. Follow the numbered steps below for a basic installation:
 
-1. **Install Git**:
-   - If you don't already have Git installed, you can install it using the following command in your command prompt:
-     ```bash
-     winget install git.git
-     ```
 
-2. **Clone UltraDarkFusion Repository**:
+1. **Clone UltraDarkFusion Repository**:
    - Navigate to your preferred installation directory (e.g., `C:/`) using the command prompt and run the following commands to clone the UltraDarkFusion repository:
      ```bash
+     winget install git.git
      cd C:/
      git clone https://github.com/lordofkillz/DarkFusion.git
      cd darkFusion
      ```
 
-3. **Download Anaconda**:
+2. **Download Anaconda**:
    - Visit the official Anaconda website at [https://www.anaconda.com/products/distribution](https://www.anaconda.com/products/distribution) and download the appropriate version of Anaconda.
 
-4. **Run the Anaconda Installer**:
+3. **Run the Anaconda Installer**:
    - Locate the downloaded Anaconda installer executable (.exe) file and run it. During installation, make sure to set the installation path to `c:/DarkFusion/anaconda`.
 
-5. **Execute fusion_install.bat**:
+4. **Execute fusion_install.bat**:
    - Once Anaconda is installed, locate the `fusion_install.bat` file in your DarkFusion directory and right-click on it. Choose "Run as administrator" to execute the script.
 
 This completes the basic installation for using DNN on OpenCL without CUDA. The second part of the installation, which includes CUDA installation, CMake, Visual Studio, and other steps, will be covered separately.
