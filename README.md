@@ -34,8 +34,10 @@ This installation guide will walk you through the process of setting up UltraDar
      cd darkFusion
      mkdir anaconda
      ```
-   ###NOT OPTIONAL### download the sam folder https://drive.google.com/file/d/1Dxhu3qv8Je-NSMp1Xcn6_rD_EPI5OasK/view?usp=sharing extract to c:/darkfusion/ultradarkfusion or you will need to change source code.
-   other wise in the ultradarkfusion folder create a folder called SAM and download the checkpoitns from. [https://github.com/facebookresearch/segment-anything](https://github.com/facebookresearch/segment-anything)
+   **NOT OPTIONAL** download the sam folder https://drive.google.com/file/d/1Dxhu3qv8Je-NSMp1Xcn6_rD_EPI5OasK/view?usp=sharing extract to c:/darkfusion/ultradarkfusion or you will need to change source code.
+
+   **Option 2:**: In the `ultradarkfusion` folder, create a folder called `Sam` and download the checkpoints from [this link](https://github.com/facebookresearch/segment-anything#model-checkpoints).
+
 
    ###OPTIONAL### download my weights folder collection of mscoco pretrained .weights, .cfg and .pt its https://drive.google.com/file/d/1hMwNzGi2DnA19SbQdoA0OXCYzk8LwOPP/view?usp=sharing
 
