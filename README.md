@@ -34,14 +34,19 @@ This installation guide will walk you through the process of setting up UltraDar
      cd darkFusion
      mkdir anaconda
      ```
+   ###NOT OPTIONAL### download the sam folder https://drive.google.com/file/d/1Dxhu3qv8Je-NSMp1Xcn6_rD_EPI5OasK/view?usp=sharing extract to c:/darkfusion/ultradarkfusion or you will need to change source code.
+   other wise in the ultradarkfusion folder create a folder called SAM and download the checkpoitns from. [https://github.com/facebookresearch/segment-anything](https://github.com/facebookresearch/segment-anything)
 
-2. **Download Anaconda**:
+   ###OPTIONAL### download my weights folder collection of mscoco pretrained .weights, .cfg and .pt its https://drive.google.com/file/d/1hMwNzGi2DnA19SbQdoA0OXCYzk8LwOPP/view?usp=sharing
+
+
+3. **Download Anaconda**:
    - Visit the official Anaconda website at [https://www.anaconda.com/products/distribution](https://www.anaconda.com/products/distribution) and download the appropriate version of Anaconda.
 
-3. **Run the Anaconda Installer**:
+4. **Run the Anaconda Installer**:
    - Locate the downloaded Anaconda installer executable (.exe) file and run it. During installation, make sure to set the installation path to `c:/DarkFusion/anaconda`.
 
-4. **Execute fusion_install.bat**:
+5. **Execute fusion_install.bat**:
    - Once Anaconda is installed, locate the `fusion_install.bat` file in your DarkFusion directory and right-click on it. Choose "Run as administrator" to execute the script.
 
 This completes the basic installation for using DNN on OpenCL without CUDA. The second part of the installation, which includes CUDA installation, CMake, Visual Studio, and other steps, will be covered separately.
