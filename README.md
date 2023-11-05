@@ -34,7 +34,7 @@ This installation guide will walk you through the process of setting up UltraDar
    - Navigate to your preferred installation directory (e.g., `C:/`) using the command prompt and run the following commands to clone the UltraDarkFusion repository:
      ```bash
      cd C:/
-     git clone https://github.com/ultraDarkFusion
+     git clone https://github.com/lordofkillz/DarkFusion.git
      cd darkFusion
      ```
 
@@ -51,9 +51,11 @@ This completes the basic installation for using DNN on OpenCL without CUDA. The 
 
 Once Anaconda is installed, locate the fusion_install.bat file in your UltraDarkFusion directory and right-click on it. Choose "Run as administrator" to execute the script.
 
-# UltraDarkFusion Installation Guide (Part 2: with CUDA)
+# UltraDarkFusion Installation Guide (Part 2: with DNN with CUDA)
 
-Before diving into the installation steps, make sure to evaluate your current development environment. If you already have a working setup with OpenCV and CUDA support alongside PyTorch, please refer to the `requirements.txt` for a list of necessary packages—install only what you need.
+Before proceeding with the installation, it's essential to assess your existing development environment. If you have a functioning setup with OpenCV and CUDA support, along with PyTorch, please consult the requirements.txt file for a list of required packages—install only the necessary ones.
+
+Caution: It's recommended to run the program using OpenCL as there isn't a significant performance boost when utilizing .weights and .cfg files on CUDA, and the setup can be challenging. While PyTorch is installed and all .pt files are utilizing CUDA from PyTorch, compiling with opencv_cuda can be quite intricate.
 
 ## Prerequisites: Clean Your PC
 
@@ -85,6 +87,8 @@ To ensure a smooth installation process when setting up OpenCV with CUDA support
      cd C:/
      git clone https://github.com/ultraDarkFusion
      cd darkFusion
+     winget opencv-4.7.0
+     winget opencv-contrilb 4.7.0
      ```
 
 ### 3. Download Anaconda:
