@@ -34,7 +34,7 @@ This installation guide will walk you through the process of setting up UltraDar
      cd darkFusion
      mkdir anaconda
      ```
-   **NOT OPTIONAL** download the sam folder https://drive.google.com/file/d/1Dxhu3qv8Je-NSMp1Xcn6_rD_EPI5OasK/view?usp=sharing extract to c:/darkfusion/ultradarkfusion or you will need to change source code.
+   **NOT OPTIONAL** download the sam folder https://drive.google.com/file/d/1Dxhu3qv8Je-NSMp1Xcn6_rD_EPI5OasK/view?usp=sharing extract to `c:/darkfusion/ultradarkfusion` or you will need to change source code.
 
    **Option 2:**: In the `ultradarkfusion` folder, create a folder called `Sam` and download the checkpoints from [this link](https://github.com/facebookresearch/segment-anything#model-checkpoints).
 
@@ -95,27 +95,28 @@ To ensure a smooth installation process when setting up OpenCV with CUDA support
    Warning: If a different version of OpenCV and contrib are already installed in your environment, ensure they are updated to match the required version for UltraDarkFusion.
 
    Begin by navigating to your desired installation directory (e.g., C:/) using the command prompt. Following that, execute the commands below to clone the UltraDarkFusion repository and the specified versions of OpenCV and contrib:
-```fix
-winget install git.git
-cd C:/
-git clone https://github.com/lordofkillz/DarkFusion.git
-cd DarkFusion
-git clone --branch 4.7.0 https://github.com/opencv/opencv.git opencv-4.7.0
-git clone --branch 4.7.0 https://github.com/opencv/opencv_contrib.git opencv_contrib-4.7.0
-mkdir anaconda build install 
-```
+   ```fix
+   winget install git.git
+   winget install Kitware.CMake
+   cd C:/
+   git clone https://github.com/lordofkillz/DarkFusion.git
+   cd DarkFusion
+   git clone --branch 4.7.0 https://github.com/opencv/opencv.git opencv-4.7.0
+   git clone --branch 4.7.0 https://github.com/opencv/opencv_contrib.git opencv_contrib-4.7.0
+   mkdir anaconda build install 
+   ```
 
 
-### 3. Download Anaconda:
+### 2. Download Anaconda:
    - Visit the official Anaconda website at [https://www.anaconda.com/products/distribution](https://www.anaconda.com/products/distribution) and download the appropriate version of Anaconda.
 
-### 4. Run the Anaconda Installer:
+### 3. Run the Anaconda Installer:
    - Locate the downloaded Anaconda installer executable (.exe) file and run it. During installation, make sure to set the installation path to `c:/DarkFusion/anaconda`.
 
-### 5. Execute fusion_install.bat:
+### 4. Execute fusion_install.bat:
    - Once Anaconda is installed, locate the `fusion_install.bat` file in your UltraDarkFusion directory and right-click on it. Choose "Run as administrator" to execute the script.
 
-### 6. Install Visual Studio 2022:
+### 5. Install Visual Studio 2022:
    - Run the following command:
      ```bash
      winget install Microsoft.VisualStudio.2022.Community
@@ -124,16 +125,12 @@ mkdir anaconda build install
 
      > **Note**: It's crucial to install Visual Studio before CUDA. If you change your Visual Studio version later, you'll need to reinstall CUDA.
 
-### 7. Install CUDA:
-   - Install CUDA 11.8.0 Download it [here](https://developer.nvidia.com/cuda-11-8-0-download-archive).
+### 6. Install CUDA and Cudnn:
+   - Install CUDA 11.8.0. Download it [here](https://developer.nvidia.com/cuda-11-8-0-download-archive).
+   - Download cuDNN 8.7.0 from [NVIDIA Developer](https://developer.nvidia.com/cudnn). Extract the contents to `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8`.
+   - Optionally, download directly from my Google Drive [here](https://drive.google.com/file/d/1PIdG6qZnyfhNFF7vUVNoX5fDMtwgy5uJ/view?usp=sharing).
 
-### 8. CMake:
-   - Install Git and CMake using the following commands:
-     ```bash
-     winget install Kitware.CMake
-     ```
-
-### 9. Compile OpenCV with CUDA:
+### 7. Compile OpenCV with CUDA:
    - Run the `cuda.bat` script to compile OpenCV with CUDA support.
 
 # Darknet Options
