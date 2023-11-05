@@ -21,28 +21,22 @@ IF %ERRORLEVEL% EQU 0 (
 :: Define Paths
 SET "DFPATH=C:\DarkFusion"
 SET "ANACONDAP=%DFPATH%\anaconda"
-SET "CUDAPATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8"
-SET "CUDNNPATH=%DFPATH%\cudnn 11.8"
 
 :: Echo Paths for confirmation
 echo Anaconda Path: %ANACONDAP%
 echo DarkFusion Path: %DFPATH%
-echo CUDA Path: %CUDAPATH%
-echo cuDNN Path: %CUDNNPATH%
+
 
 pause
 
-:: Copy cuDNN files
-xcopy /f /s "%CUDNNPATH%" "%CUDAPATH%" /y
 
 :: Setup Environment Variables
-setx /M CUDA_HOME "%CUDAPATH%"
 setx /M OPENCV_OCL4DNN_CONFIG_PATH "%USERPROFILE%\AppData\Local\Temp\opencv\4.7\opencl_cache" 
 
 :: Update System PATH
 set pathkey="HKEY_LOCAL_MACHINE\System\CurrentControlSet\Control\Session Manager\Environment"
 for /F "usebackq skip=2 tokens=2*" %%A IN (`reg query %pathkey% /v Path`) do (
-    reg add %pathkey% /f /v Path /t REG_SZ /d "%%B;C:\DarkFusion\anaconda\env\gpu\lib;C:\DarkFusion\anaconda\env\fusion\Library;C:\DarkFusion\anaconda\env\gpu\Library\bin;C:\Darknet\anaconda\env\fusion;%CUDAPATH%\bin"
+    reg add %pathkey% /f /v Path /t REG_SZ /d "%%B;C:\DarkFusion\anaconda\env\gpu\lib;C:\DarkFusion\anaconda\env\fusion\Library;C:\DarkFusion\anaconda\env\gpu\Library\bin;C:\Darknet\anaconda\env\fusion;"
 )
 
 
