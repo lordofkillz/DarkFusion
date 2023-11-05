@@ -82,14 +82,17 @@ To ensure a smooth installation process when setting up OpenCV with CUDA support
      ```
 
 ### 2. Clone UltraDarkFusion Repository:
-   - Navigate to your preferred installation directory (e.g., `C:/`) using the command prompt and run the following commands to clone the UltraDarkFusion repository:
-     ```bash
-     cd C:/
-     git clone https://github.com/ultraDarkFusion
-     cd darkFusion
-     winget opencv-4.7.0
-     winget opencv-contrilb 4.7.0
-     ```
+   Warning: If a different version of OpenCV and contrib are already installed in your environment, ensure they are updated to match the required version for UltraDarkFusion.
+
+   Begin by navigating to your desired installation directory (e.g., C:/) using the command prompt. Following that, execute the commands below to clone the UltraDarkFusion repository and the specified versions of OpenCV and contrib:
+   ```bash
+   Copy code
+   cd C:/
+   git clone https://github.com/lordofkillz/DarkFusion.git
+   cd DarkFusion
+   git clone --branch 4.7.0 https://github.com/opencv/opencv.git opencv-4.7.0
+   git clone --branch 4.7.0 https://github.com/opencv/opencv_contrib.git opencv_contrib-4.7.0
+   ```
 
 ### 3. Download Anaconda:
    - Visit the official Anaconda website at [https://www.anaconda.com/products/distribution](https://www.anaconda.com/products/distribution) and download the appropriate version of Anaconda.
@@ -159,4 +162,4 @@ Outside of Darknet and Ultralytics, I used SAM. See GitHub: [https://github.com/
 
 
 
-"# DarkFusion" 
+"# DarkFusion"
