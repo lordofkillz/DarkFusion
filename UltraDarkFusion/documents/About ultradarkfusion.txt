@@ -1,0 +1,172 @@
+UltraDarkFusion - Object Detection and Image Annotation Tool
+Overview
+UltraDarkFusion is a graphical user interface software built with PyQt for performing object detection on images and videos using pretrained models like YOLO, generating object detection annotations, and training custom object detection models.
+
+The key features include:
+
+Object detection on images using OpenCV and PyTorch models
+Video processing - extract frames and run detection
+Dataset manipulation tools - move, copy, filter images and labels
+View, edit and auto-generate annotations for images
+Customizable GUI with different themes
+Model training routines for YOLO and Ultralytics using Darknet and PyTorch
+Dataset analysis tools - statistics, graphs, scans
+Model conversion between formats (PyTorch, ONNX, CoreML)
+Requirements
+The software requires the following dependencies to run:
+
+Python 3.6 or higher
+PyQt5
+Numpy
+OpenCV
+PyTorch
+Ultralytics YOLO
+Darknet
+Skimage
+Matplotlib
+The object detection functions also require:
+
+Pretrained object detection models such as YOLOv3, YOLOv5 etc.
+The training functions require:
+
+CUDA enabled GPU (for accelerated training)
+Darknet framework
+Dataset containing images and labels
+Installation
+Follow these steps to set up the software:
+
+Clone the repository:
+<!---->
+Copy code
+
+git clone https://github.com/<username>/UltraDarkFusion
+2.  Install the required packages:
+
+<!---->
+Copy code
+
+pip install -r requirements.txt
+3.  Download pretrained object detection models such as YOLOv3, YOLOv5 etc.
+4.  Run the application:
+
+<!---->
+Copy code
+
+python UltraDarkFusion.py
+Usage
+The software provides an intuitive graphical interface for performing various object detection and annotation tasks.
+
+Object Detection
+To run object detection on an image:
+
+Click on File > Open Image and select an image file
+Click on Model > Load Model and pick a pretrained model file such as YOLOv3 weights
+Click on Model > Detect to run inference and display bounding boxes
+You can tweak the confidence threshold and NMS threshold values to get better detections.
+
+For videos, you can extract frames in batch and run detection on the extracted frames.
+
+Dataset Management
+The software provides tools to filter, move and copy images and labels in a dataset:
+
+Click on View > Load Dataset to open a folder containing images and labels
+In the sidebar, type a class name to only display images containing that class
+Right click on an entry to delete the corresponding label
+Click on buttons to move or clear labels of a particular class
+Annotation
+To annotate images:
+
+Load a folder containing images via View > Load Dataset
+Open an image and use the toolbar to draw bounding boxes
+Set the class for the box via the dropdown
+Save the annotations to .txt labels file
+Annotations can be loaded and edited later
+For automated annotation, detection models can be used to generate annotations in batch.
+
+Training
+The software provides utilities to prepare dataset and train YOLO models:
+
+Click on Data > Output to generate .txt files for training
+Click on Model > Train and provide paths to data, cfg and weights file to start training
+Training logs including loss, mAP etc. are displayed real-time
+The trained model is saved to the output weights file
+Interface Guide
+The software follows a simple and intuitive workflow:
+
+Menu Bar
+The menu bar provides access to all the core features:
+
+File: Open/import images and videos
+View: Explore datasets and annotations
+Model: Load models and run inference
+Data: Tools for preparing dataset for training
+Tools: Utility functions for dataset analysis, format conversion etc.
+Sidebar
+The sidebar provides quick access to:
+
+Model Details: Details of loaded model like type, parameters etc.
+Dataset Viewer: List and filter images in dataset
+Output: Text logs and outputs
+Actions: Quick actions to filter classes, delete labels etc.
+Main Window
+The large central window is used to display images, videos, detections results, progress bars and more.
+
+Status Bar
+Displays handy information like current image name, model details, inference stats etc.
+
+Examples
+YOLOv5 inference on webcam feed
+python
+
+Copy code
+
+import torch
+model = torch.hub.load('ultralytics/yolov5', 'yolov5s')  
+
+# Load video capture device 
+cap = cv2.VideoCapture(0) 
+
+while True:
+    # Capture frame-by-frame
+    ret, frame = cap.read()  
+
+    # Run inference
+    results = model(frame)
+    
+    # Draw bounding boxes on frame
+    for *box, conf, cls in results.xywhn[0]:
+        cv2.rectangle(frame, (int(box[0]), int(box[1])), (int(box[2]), int(box[3])), (0, 255, 0), 2)
+        
+    cv2.imshow('Detected Objects', frame)
+
+    if cv2.waitKey(1) == ord('q'):
+        break
+        
+cap.release()
+cv2.destroyAllWindows()
+This performs real-time object detection on the webcam feed using YOLOv5.
+
+Training custom YOLOv5 model on COCO dataset
+python
+
+Copy code
+
+import torch
+from ultralytics import YOLO
+
+# Load pretrained base model 
+model = YOLO("yolov5s.pt")  
+
+# Load COCO dataset annotations
+dataset = LoadCOCODataset(annotations_json, img_dir)
+
+# Train the model  
+model.train(dataset, img_size=640, epochs=100, batch_size=16) 
+
+# Evaluate the model
+results = model.test(dataset) 
+
+# Save the trained model
+torch.save(model, 'my_custom_model.pt')
+This shows how to take a pretrained YOLOv5 model, train it on a custom dataset like COCO and evaluate the trained model.
+

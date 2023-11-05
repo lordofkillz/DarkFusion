@@ -1,0 +1,15 @@
+ create train files 
+The snippet does not define a class but contains two main methods:
+
+import_images(self): This method is responsible for opening a dialog that allows users to select a directory from which images and class labels are imported. The imported images and classes are stored in the self.images and self.classes attributes, respectively.
+
+output_paths(self): This method handles the process of saving output files, such as the paths of the imported images, class labels, and other configuration files needed for YOLO training. The saved paths include train.txt, valid.txt, obj.names, obj.data, obj.yaml, and a backup folder.
+
+Button Connections
+The following buttons are connected to the above methods:
+
+Import Button: Connected to the import_images method. When clicked, it will prompt the user to select a directory containing image files (.jpg, .png, .jpeg, .gif) and an optional classes.txt file containing class labels. The selected paths will be stored in the self.images attribute, and the class labels will be stored in the self.classes attribute.
+
+Output Button: Connected to the output_paths method. When clicked, it will prompt the user to select the output file's name and path. It will then write the paths of the imported images and other related configurations to the specified output files. Additionally, it will create necessary directories (e.g., backup) and show an information message once the process is completed.
+
+this is mandatory for trianing in darknet. and ultralytics. 

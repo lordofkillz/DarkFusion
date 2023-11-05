@@ -1,0 +1,109 @@
+QWidget {
+    background-color: #FFFFFF;
+}
+
+QToolTip {
+    border: 1px solid black;
+    background-color: #FF0000;
+    padding: 1px;
+    border-radius: 3px;
+    opacity: 100;
+}
+
+QWidget:disabled {
+    color: #404040;
+    background-color: #FFFFFF;
+}
+
+QWidget:item:hover, QMenuBar::item:selected, QMenu::item:selected, QDockWidget::title, QDockWidget::close-button:hover, QDockWidget::float-button:hover, QMainWindow::separator:hover, QMenu::separator {
+    background-color: #0000FF;
+    color: #FFFFFF;
+}
+
+QWidget:item:selected {
+    background-color: #FF0000;
+}
+
+QMenuBar::item, QMenuBar::item:selected, QMenuBar::item:pressed {
+    background-color: #FFFFFF;
+}
+
+QMenu::item {
+    padding: 2px 20px 2px 20px;
+}
+
+QLineEdit, QComboBox, QAbstractItemView, QScrollBar:horizontal, QScrollBar:vertical {
+    background-color: #FFFFFF;
+    border: 1px solid #FF0000;
+    border-radius: 5px;
+}
+
+QPushButton, QComboBox::drop-down, QScrollBar::add-line, QScrollBar::sub-line {
+    background-color: #FF0000;
+    color: #FFFFFF;
+    border: 1px solid #FFFFFF;
+    border-radius: 6px;
+}
+
+QPushButton:hover, QComboBox:hover {
+    border: 2px solid #0000FF;
+}
+
+QComboBox::down-arrow {
+    image: url(:/down_arrow.png);
+}
+
+QPushButton:pressed {
+    background-color: #0000FF;
+}
+
+QHeaderView::section {
+    background-color: #0000FF;
+    color: #FFFFFF;
+    padding-left: 4px;
+    border: 1px solid #FFFFFF;
+}
+
+QGroupBox:focus, QTextEdit:focus, QScrollArea:focus {
+    border: 2px solid #0000FF;
+}
+
+QScrollBar:horizontal, QScrollBar:vertical {
+    background-color: #FF0000;
+    border: 1px solid #FFFFFF;
+}
+
+QScrollBar::handle:horizontal, QScrollBar::handle:vertical {
+    background-color: #FFFFFF;
+    border-radius: 2px;
+}
+
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal, QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    background-color: #FFFFFF;
+    border-radius: 2px;
+}
+
+QScrollBar::up-arrow:vertical, QScrollBar::down-arrow:vertical {
+    background-color: #FFFFFF;
+}
+
+QDockWidget::title, QDockWidget::close-button, QDockWidget::float-button {
+    background-color: #0000FF;
+    color: #FFFFFF;
+}
+
+QMainWindow::separator, QMenu::separator {
+    background-color: #0000FF;
+    color: #FFFFFF;
+    padding-left: 4px;
+    border: 1px solid #FFFFFF;
+}
+
+QToolBar {
+    border: 1px transparent #FFFFFF;
+    background: 1px solid #0000FF;
+}
+
+QToolBar::handle {
+    background: url(:/images/handle.png);
+}

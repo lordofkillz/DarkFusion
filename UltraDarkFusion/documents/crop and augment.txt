@@ -1,0 +1,62 @@
+Class Definitions and Button Connections
+Import Images Button
+Button Connection: self.import_images_button.clicked.connect(self.import_images_triggered)
+
+Function: import_images_triggered()
+
+Purpose: This button allows users to select a directory containing image files for import. The selected images and corresponding label files are stored for further processing.
+
+Scan Annotations Button
+Button Connection: self.scan_button.clicked.connect(self.scan_annotations.scan_annotations)
+
+Function: scan_annotations.scan_annotations()
+
+Purpose: This button triggers the scanning of annotation files in the current directory. It is assumed that the scan_annotations object has a method named scan_annotations for this functionality.
+
+Image Augmentation Methods
+Apply Glass Effect
+Function: apply_glass_effect(image)
+
+Purpose: Applies a bubbled glass effect to the input image. This method involves multiple steps to create a realistic glass distortion effect, including Gaussian blur, bubbled image creation, streaks pattern, specular highlight, blending, reflection-like effect, and color tint.
+
+Apply Motion Blur Effect
+Function: apply_motion_blur_effect(image, kernel_size=15, angle=0)
+
+Purpose: Applies a motion blur effect to the input image with a specified kernel size and angle. This method creates a motion blur kernel, rotates it, and convolves it with the image to achieve the motion blur effect.
+
+Apply Flashbang Effect
+Function: apply_flashbang_effect(image, intensity=0.8)
+
+Purpose: Applies a flashbang effect to the input image with a specified intensity. This method blends the image with a white mask to create the flash effect, simulating a flashbang explosion.
+
+Apply Smoke Effect
+Function: apply_smoke_effect(image, intensity=0.1, radius_ratio=1.5, speed=0.1)
+
+Purpose: Applies a smoke effect to the input image with adjustable parameters such as intensity, radius ratio, and speed. The method generates a smoke mask based on Perlin noise and blends it with the image to create a smoky appearance.
+
+Create Circular Mask
+Function: create_circular_mask(image, center, outer_radius_ratio=0.95, inner_radius_ratio=0.945, line_thickness=1)
+
+Purpose: Creates a circular mask with specified parameters, such as center, outer and inner radii ratios, and line thickness. The mask is designed to simulate a crosshair sight.
+
+Image Processing and Augmentation
+The provided code includes methods for applying various effects to images, such as the glass effect, motion blur effect, flashbang effect, smoke effect, and circular sight mask. These effects are controlled through checkboxes in the UI. The methods combine image manipulation techniques to achieve the desired visual effects.
+
+CheckBox State Change Handlers
+Methods such as glass_checkbox_state_changed, motion_blur_checkbox_state_changed, flash_checkbox_changed, smoke_checkbox_changed, and sight_picture_checkbox_changed handle the state changes of corresponding checkboxes. These methods update the state of the effects based on user interactions.
+
+Image Processing and Augmentation Triggers
+Process Images Button
+Function: process_images_triggered()
+
+Purpose: This button triggers the image processing and augmentation pipeline. It processes imported images with various augmentation effects based on user settings and saves the augmented images along with updated label files.
+
+Import Images Trigger
+Function: import_images_triggered()
+
+Purpose: This function is executed when the "Import Images" button is clicked. It opens a file dialog for users to select a directory containing images and label files. The selected images and labels are stored for later processing.
+
+Conclusion
+This code snippet showcases an image augmentation tool that allows users to import images and apply various visual effects such as the glass effect, motion blur effect, flashbang effect, smoke effect, and circular sight mask. The UI features checkboxes for each effect, enabling users to customize the augmentation process. The "Process Images" button triggers the augmentation pipeline and saves the augmented images along with updated label files. The "Import Images" button facilitates the selection of image directories for processing.
+
+Please note that this documentation assumes proper initialization of the UI elements, import statements for required libraries (e.g., cv2, np, QMessageBox, etc.), and the presence of a scan_annotations object with a suitable scan_annotations method.

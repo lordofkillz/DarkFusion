@@ -1,0 +1,24 @@
+Review Tab
+
+The "Review" function in your label maker software provides an efficient way to review and correct labeled images. This guide will explain how to use the "Review" feature step by step.
+
+1. Image Directory Selection
+
+Function: Choose an image directory and adjust labels as needed.
+Usage: Click on "img_dir" to select an image directory. You can then make adjustments to labels' positions by moving them left, right, up, or down, and making them taller or wider. Once adjustments are made in the main display, press "Adjust All" to apply these adjustments to all labels in the selected directory. This feature is particularly useful for correcting datasets by refining label positions for improved accuracy.
+2. Reviewing Labeled Images
+
+Function: Display a list of labeled images for review.
+Usage: Activate the "Review" function to pull up a list of labeled images. This list will be displayed on the user interface (UI), allowing you to scroll through it quickly. The purpose of this feature is to help you identify and correct any mistakes in labeled images efficiently.
+3. Image Display and Interaction
+
+Function: Show labeled images on the UI for inspection.
+Usage: When using the "Review" function, you can click on an image in the list to display it on the main display area for closer inspection. This allows you to thoroughly review the labels applied to the image.
+4. Removing Labels and Images
+
+Function: Remove labels and associated images from the list.
+Usage: To remove a label and its corresponding image from the list, right-click on the image in the list. This action will remove the label and image from further review.
+5. Thumbnail Size Adjustment
+
+Function: Modify the size of the image thumbnails.
+Usage: Use the slider provided to adjust the size of the thumbnail images displayed in the "Review" interface. This allows you to customize the thumbnail size according to your preferences.

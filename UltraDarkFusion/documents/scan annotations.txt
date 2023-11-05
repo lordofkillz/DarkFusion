@@ -1,0 +1,58 @@
+Class Definitions and Connections:
+
+Button Connection for Image Processing:
+Connection: self.process_files_button.clicked.connect(self.process_files)
+Function process_files:
+Handles the button click event and initiates the processing of annotation files and image files.
+
+Class ScanAnnotations:
+This class manages the processing of image annotation files and corresponding image files. It provides methods for validating annotations, categorizing label sizes, and managing files with issues.
+
+Function process_files:
+Handles the processing of individual annotation files, validating their content, categorizing label sizes, and managing problematic files.
+
+Parameters:
+
+file_name (str): The name of the annotation file being processed.
+annotation_folder (str): The folder path containing the annotation files.
+image_folder (str): The folder path containing the corresponding image files.
+review_folder (str): The folder path for storing problematic files.
+statistics (dict): A dictionary to store statistics and issues related to files.
+label_sizes (dict): A dictionary to track the counts of small, medium, and large labels.
+Button Connections and Functions:
+
+import_images_button: Connects to import_images_triggered function. Opens a dialog to import image files.
+scan_button: Connects to scan_annotations.scan_annotations function. Initiates the scanning of annotation files.
+import_classes_button: Connects to a lambda function that triggers the importing of class names.
+Function import_classes:
+Allows the user to import class names from a file. Updates the valid classes for annotation validation.
+
+Function check_annotation_file:
+Checks an annotation file for issues such as incorrect formatting and invalid bounding boxes. Returns a list of issues and information about whether the file should be moved.
+
+Function move_files:
+Moves an annotation file and its corresponding image file to the 'review' folder.
+
+Function create_blanks_folder:
+Creates a folder to store blank annotation files.
+
+Function move_blanks:
+Moves blank annotation files and their corresponding images to the blanks folder.
+
+Function handle_blanks_after_review:
+Manages blank annotation files and provides options to move them to subfolders based on label size.
+
+Function categorize_label_size:
+Categorizes label sizes as small, medium, or large based on bounding box dimensions.
+
+Function process_files (within ImageProcessingThread):
+Processes a single image annotation file, validates annotations, categorizes label sizes, and manages problematic files.
+
+Function is_valid_image:
+Checks if an image file is valid based on its content.
+
+Function update_progress_bar:
+Updates the progress bar during the image conversion process.
+
+Conclusion:
+This code snippet defines a class ScanAnnotations that handles various tasks related to image annotation processing. The associated GUI buttons allow importing images, scanning annotation files, and managing classes. The class provides methods for validating annotations, managing problematic files, and categorizing label sizes. The process_files function manages the processing of individual annotation files, including validation, label size categorization, and file management. The functions and button connections are aimed at creating a robust annotation processing workflow within the GUI application. Note that this documentation assumes the presence of other classes and dependencies based on the context provided.

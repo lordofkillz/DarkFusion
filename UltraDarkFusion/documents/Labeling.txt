@@ -1,0 +1,30 @@
+Label Maker User Guide
+The label maker tool is designed to assist you in labeling objects within images, making it a handy utility for creating data sets for machine learning, image analysis, and other applications. Below, you'll find an easy-to-follow guide on how to use the key features of the label maker.
+
+Zooming In and Out
+Zoom In: Hold down the Ctrl key and scroll the mouse wheel upwards to zoom in on a particular area of the image.
+Zoom Out: Hold down the Ctrl key and scroll the mouse wheel downwards to zoom out.
+Creating Bounding Boxes
+Bounding boxes are rectangular frames that can be drawn around objects to label them within the image.
+
+Start Drawing: Simply click on the point where you want the bounding box to start.
+Draw the Bounding Box: Drag your mouse to size the box as needed.
+Finish Drawing: Release the mouse button to complete the box.
+Selecting and Moving Bounding Boxes
+Select a Box: Double-click on a bounding box to select it.
+Move a Box: Hold down the Ctrl key and drag the selected bounding box to move it around.
+Changing the Size of Bounding Boxes
+Use the provided slider to set the minimum and maximum size for the bounding boxes. This ensures that you create bounding boxes that fit within your specific requirements.
+
+Deleting Bounding Boxes
+Delete a Box: Right-click on a bounding box to delete it. A shotgun sound will be played to confirm the deletion.
+Crosshair Functionality
+Show/Hide Crosshair: You can toggle the crosshair on/off, which helps in aligning and positioning the bounding boxes. Use the checkbox provided to control this feature.
+Change Crosshair Color: Click on the color picker to choose a different color for the crosshair.
+Mute Sound Effects
+Mute/Unmute: Use the provided checkbox to mute or unmute the sound effects (e.g., the sound played when deleting a bounding box).
+Saving Your Work
+All the bounding boxes you draw are saved automatically. You can continue to work on your project without worrying about losing your progress.
+
+Miscellaneous
+Resizing the View: If you resize the application window, the view of the image will automatically adjust to fit the new size, maintaining the aspect ratio.

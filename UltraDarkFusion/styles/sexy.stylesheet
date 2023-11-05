@@ -1,0 +1,114 @@
+/* General setup for QWidget */
+QWidget {
+    background-color: #FFC0CB; /* Light Pink */
+    color: #000000; /* Black */
+}
+
+/* Dock Widget */
+QDockWidget {
+    background-color: #FFFFFF; /* White */
+}
+
+/* Headers */
+QHeaderView::section {
+    background-color: #FFC0CB; /* Light Pink */
+    color: #000000; /* Black */
+}
+
+/* Push Buttons */
+QPushButton {
+    background-color: #FF69B4; /* Hot Pink */
+    border: none;
+    color: #FFFFFF; /* White */
+    padding: 5px;
+}
+
+QPushButton:hover {
+    background-color: #FF1493; /* Deep Pink */
+}
+
+QPushButton:pressed {
+    background-color: #C71585; /* Medium Violet Red */
+}
+
+/* Checkboxes */
+QCheckBox {
+    color: #FFC0CB; /* Light Pink */
+}
+
+/* Radio Buttons */
+QRadioButton {
+    color: #FFC0CB; /* Light Pink */
+}
+
+/* Line Edits */
+QLineEdit {
+    background-color: #FFB6C1; /* Light Coral */
+    color: #000000; /* Black */
+}
+
+/* Spin Boxes */
+QSpinBox {
+    background-color: #FFB6C1; /* Light Coral */
+    color: #000000; /* Black */
+}
+
+/* Combo Boxes */
+QComboBox {
+    background-color: #FFB6C1; /* Light Coral */
+    color: #000000; /* Black */
+}
+
+/* Progress Bars */
+QProgressBar {
+    background-color: #FFB6C1; /* Light Coral */
+    color: #000000; /* Black */
+    border: none;
+}
+
+QProgressBar::chunk {
+    background-color: #FFC0CB; /* Light Pink */
+}
+
+/* Sliders */
+QSlider::groove:horizontal {
+    background: #FFB6C1; /* Light Coral */
+    height: 5px;
+}
+
+QSlider::handle:horizontal {
+    background: #FFC0CB; /* Light Pink */
+    width: 15px;
+}
+
+/* Labels */
+QLabel {
+    color: #FFC0CB; /* Light Pink */
+}
+
+/* Scroll Bars */
+QScrollBar:horizontal {
+    border: none;
+    background: #FFB6C1; /* Light Coral */
+    height: 15px;
+    margin: 0px;
+}
+
+QScrollBar::handle:horizontal {
+    background: #FFC0CB; /* Light Pink */
+    min-width: 20px;
+}
+
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+    width: 0px;
+}
+
+/* Red Text */
+QLabel#Text {
+    color: #FFC0CB; /* Light Pink */
+}
+
+
+
+
+

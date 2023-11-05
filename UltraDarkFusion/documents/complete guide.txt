@@ -1,0 +1,162 @@
+UltraDarkFusion - Complete Guide
+Overview
+UltraDarkFusion is an all-in-one toolkit for object detection and image annotation tasks. The key capabilities include:
+
+Object detection using pre-trained models
+Video processing and frame extraction
+Dataset organization and management
+Image annotation and label editing
+Automated dataset analysis
+Custom model training with Darknet
+Model conversion between formats
+Customizable and themeable UI
+Object Detection
+UltraDarkFusion supports running inference on images and videos using pre-trained object detection models.
+
+Supported Models
+The following models are supported:
+
+YOLOv3-7 .weights,.cfg - Using Darknet framework and OpenCV DNN module
+YOLOv5,8 .pt - Using PyTorch and Ultralytics YOLO library
+ONNX - Using OpenCV DNN module
+Running Inference
+To run object detection on an image:
+
+Click on File > Open Image and pick an image
+Load a model via Model > Load Model
+Click on Model > Detect to run inference
+For videos:
+
+EXTRACT FRAMES USING THE VIDEO PROCESSING MODULE
+Run detection on extracted frames in batch
+Configuration
+The detection parameters can be tuned under Model > Settings:
+
+Confidence Threshold - Minimum confidence score to show detections
+NMS Threshold - Non-max suppression threshold for removing overlapping boxes
+Video Processing
+UltraDarkFusion provides a module to extract frames from videos for processing.
+
+Adding Videos
+Click on Video > Add Video and select the video files. Up to 5 videos can be added at once.
+
+Settings
+The following parameters can be configured:
+
+Extract All Frames - Extract every frame sequentially
+Custom Frame Count - Extract a fixed number of frames randomly
+Custom Frame Size - Resize extracted frames
+Image Format - Format to save extracted frames (JPG, PNG etc.)
+Extracting Frames
+Click on Video > Extract Frames to begin extraction. A progress bar is shown during processing.
+
+Extracted frames are saved in a new folder named Extracted_Frames_{TIMESTAMP} within the video directory.
+
+Dataset Management
+UltraDarkFusion provides tools to explore, filter and manipulate datasets containing images and labels.
+
+Loading Dataset
+Click View > Load Dataset and select the root folder containing images and labels.
+
+This loads the folder contents into the sidebar dataset viewer.
+
+Filtering Images
+Type a class name into the Filter by Class input to only display images containing that class.
+
+Checkbox to only show images with labels.
+
+Annotations
+Right click an entry to delete its label.
+
+Use buttons to move or clear labels of a specific class.
+
+Image Annotation
+UltraDarkFusion provides an interface to view, edit and auto-generate annotations.
+
+Manual Annotation
+To annotate images:
+
+Load images via View > Load Dataset
+Open an image, zoom as needed
+Draw bounding boxes using the toolbar
+Set class for each box via the dropdown
+Click save to write annotations to .txt label file
+Rectangles can be resized by double clicking or using CTRL + scroll.
+
+Viewing Annotations
+When opening annotated images, existing labels are loaded and displayed.
+
+Use toolbar to edit, copy or delete boxes.
+
+Automated Annotation
+Click on Model > Auto Label Current Image to run inference and generate annotations automatically.
+
+Folder-wise auto-annotation is also supported.
+
+Dataset Analysis
+UltraDarkFusion provides utilities to gather statistics and insights about the dataset.
+
+Scan Annotations
+The Tools > Scan Annotations tool scans all labels in a dataset and highlights:
+
+Missing or invalid image files
+Label issues like invalid bounding boxes
+Moves problematic images and labels to a review folder
+Generates JSON report containing summary statistics and a breakdown of all issues.
+
+Plot Labels
+The View > Plot Labels tool analyzes annotations and generates graphs:
+
+Class distribution bar chart
+Scatter plot of box positions
+Distribution of box sizes
+Graphs are saved within a graphs sub-folder.
+
+Training YOLO Models
+UltraDarkFusion integrates utilities to train custom YOLO models using the Darknet framework.
+
+Data Preparation
+Click on Data > Output to generate .txt and .data files required for training.
+
+Starting Training
+Go to Model > Train Darknet and provide:
+
+Path to .data file
+Path to .cfg file
+Path to .weights file
+Click Train to begin the training process.
+
+Monitoring Training
+The training logs are displayed real-time in the app:
+
+Total loss
+Mean Average Precision (mAP)
+Iterations completed
+Time remaining
+Graphs like loss curves can also be visualized.
+
+Saving and Loading
+The final trained model is saved to the path specified in .data file.
+
+To resume training, load the last .weights file via the file picker.
+
+Model Conversion
+UltraDarkFusion supports converting models between different frameworks:
+
+YOLO: Darknet <-> PyTorch <-> ONNX <-> CoreML
+PyTorch: torch <-> ONNX
+For YOLO models, click on Tools > Model Conversion and pick input and output formats.
+
+The PyTorch library used provides export functions to handle conversion.
+
+Customizing the Interface
+The app interface is customizable using the following options:
+
+Themes
+Go to View > Themes to pick between light, dark or custom CSS themes.
+
+Hide Labels
+Use the Hide Labels checkbox to toggle label visibility.
+
+Label Display
+Customize label box colors, opacity, fonts via the settings panel.

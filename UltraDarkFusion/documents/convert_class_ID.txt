@@ -1,0 +1,27 @@
+Button Connections and Methods
+Select Images Button:
+
+Button Connection: self.select_images.clicked.connect(self.select_images_function)
+Method select_images_function: Prompts the user to select a directory containing YOLO annotation files (with .txt extension). It then scans the directory for all text files except classes.txt, adding them to self.yolo_files.
+Convert Class Button:
+
+Button Connection: self.convert_class.clicked.connect(self.convert_class_function)
+Method convert_class_function: Performs the conversion of class IDs within the selected YOLO files. Specifically, it changes occurrences of a source class ID (specified by self.from_class.value()) to a destination class ID (specified by self.to_class.value()). This method reads each YOLO file line by line, splitting each line to identify the current class ID. If the current class ID matches the source class ID, it is replaced with the destination class ID, and the updated line is written back to the file.
+How the Class Conversion Works
+The class conversion is performed by reading each line of the selected YOLO files, identifying the class ID at the beginning of the line, and checking if it matches the specified source class ID. If it does, the class ID is replaced with the destination class ID, and the updated line is written back to the file.
+
+The class IDs are specified through the GUI, possibly using some form of input widgets (like spin boxes or combo boxes) to capture the values for from_class and to_class. The method self.from_class.value() retrieves the source class ID, and self.to_class.value() retrieves the destination class ID.
+
+Example of Class Conversion
+Consider a line in a YOLO file with the source class ID 2:
+
+Copy code
+2 0.458333 0.625000 0.291667 0.375000
+If the user specifies the source class ID as 2 and the destination class ID as 5, the line would be updated to:
+
+Copy code
+5 0.458333 0.625000 0.291667 0.375000
+Additional Remarks
+This code snippet is a straightforward way to perform bulk class ID conversions across multiple YOLO annotation files. It assumes that the selected directory contains the relevant YOLO files, and that the class IDs are specified correctly through the GUI. Proper error handling and user feedback (e.g., success or failure messages) might be included elsewhere in the code.
+
+This functionality can be useful in scenarios where class IDs need to be reorganized or consolidated, especially when dealing with large datasets and multiple annotation files.

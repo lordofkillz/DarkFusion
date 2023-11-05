@@ -1,0 +1,63 @@
+Label Tab:
+
+In this section, we will elucidate the fundamental operations of the label maker and expound upon the purpose of each corresponding button:
+
+Images Button: This function is designed to locate both images and labels. Upon locating them, the software will search for a file named "classes.txt." Should this file be absent, the system will generate one, initially populated with predefined classes, primarily those associated with individuals.
+
+Cfg Button: By activating this option, the software will load the configuration file (denoted by the ".cfg" extension) specific to Darknet YOLO.
+
+Weights Button: This feature serves to load both the weight file (with a ".weights" extension) and the corresponding configuration file (".cfg") to facilitate automated labeling.
+
+Current Label Button: It is possible to assign a keybind to the "current label" action. When this keybind is triggered, the software will promptly assign a label to the presently displayed image.
+
+Label All Button: This action is programmed to iterate through all available images, applying labels to each one based on the information obtained from the weight, configuration, and classes files.
+
+Pt. Auto Button: Notably, this function is only compatible with ".pt" weights. It is essential to ensure that all images have been labeled with the "save_txt: true" setting enabled. This parameter must be configured at the following path: "C:\Anaconda3\envs\eal_gpu\Lib\site-packages\ultralytics\yolo\cfg\default.yaml".
+
+Delete Image Button: Activating this button will result in the removal of the currently displayed image.
+
+Next Button: Utilizing this button will advance to the subsequent image. Custom keybinds can also be configured to facilitate this action.
+
+Previous Button: Upon activation, this button will navigate to the preceding image. Similar to the "Next" button, custom keybinds can be established to streamline this process.
+
+Extra Label Checkbox: When this checkbox is selected, the user gains the ability to generate supplementary labels. These additional labels can be configured with specific attributes such as width, height, left, right, up, and down percentages.
+
+Input Field: Within this field, it is feasible to search for a particular class. If the specified class does not currently exist, the system will generate it.
+
+Classes Dropdown: This dropdown menu showcases the contents of the "classes.txt" file, displaying all recognized classes.
+
+Remove Button: Should a class be selected from the dropdown menu, clicking the "Remove" button will initiate the deletion of the chosen class.
+
+Styles Button: Accessing this button allows the user to modify visual styles. These styles are located within the "styles" folder, situated in the working directory.
+
+GIF Button: By selecting this button, the user can access the "gif" folder, located within the working directory.
+
+Graphs Button: This button is designated to generate three distinct graphs: a label distribution graph, a plot diagram, and an additional dataset distribution graph.
+
+Set Point Size: Utilize this slider to establish the minimum size for generated boxes. The default setting is 6x6 pixels.
+
+Crop Checkbox: Upon activating this checkbox, in conjunction with specifying network height and width, the software will conduct center cropping of images during automated labeling.
+
+Shade Checkbox: By enabling this checkbox, users can manipulate shading using the accompanying slider. Conversely, when the checkbox is not selected, the slider alters the label's brightness or darkness.
+
+Grey Scale Checkbox: Toggling this option results in the display appearing in grayscale. The slider is responsible for adjusting the display's brightness or darkness.
+
+Edge Checkbox: Activating this checkbox will enable the display of edge detection, regulated by the slider.
+
+Label Size Slider: Utilizing this slider permits the user to modify the size of class labels.
+
+Threshold Slider: This slider governs the threshold parameter. A value of 0 will detect entities in close proximity to class names, while a value of 10 will initiate detection based on more exact criteria.
+
+NMS: Abbreviation for "Non-Maximum Suppression," this function is responsible for post-processing object detection results, ensuring the removal of redundant bounding boxes.
+
+Class Filter: This option allows users to search for a specific class, thereby facilitating efficient data filtering.
+
+Filter Blanks Button: Upon clicking this button, the software will filter out files lacking labels.
+
+Move All Button: By activating this button, all filtered classes will be relocated as per the defined parameters.
+
+Clear All Button: Initiation of this button will result in the removal of all filtered classes.
+
+Search Field: This field is employed for searching by index number.
+
+Image Index: The final section corresponds to each image's index. Clicking on these indices enables swift navigation to the respective images.

@@ -1,0 +1,49 @@
+Image Label Adjustment Tool
+Load Images and Labels Button
+Button Connection: self.images_button.clicked.connect(self.load_images_and_labels)
+
+Function: load_images_and_labels()
+
+Purpose: This button triggers the loading of images and their corresponding label files from a selected folder. Supported image formats include jpg, jpeg, png, bmp, tiff, and tif. The image and label file paths are stored for further processing.
+
+Adjust Labels Button
+Button Connection: self.adjust_label.clicked.connect(self.adjust_and_show_message)
+
+Function: adjust_and_show_message()
+
+Purpose: This button triggers the adjustment of label coordinates based on user-defined adjustments for x, y, height, and width. After adjusting the labels, a message is displayed to inform the user of the applied adjustments.
+
+Update Preview
+Function: update_preview()
+
+Purpose: This function updates the preview of the image by applying adjusted label coordinates to the image and drawing bounding boxes around the objects based on the adjusted labels. It also updates the displayed image in the QGraphicsView widget.
+
+Adjust Labels
+Function: adjust_labels()
+
+Purpose: This function iterates through the loaded label files and adjusts the label coordinates based on user-defined adjustments for x, y, height, and width. The adjusted labels are saved back to their respective label files.
+
+Show Adjustment Message
+Function: show_adjustment_message()
+
+Purpose: This function displays a message box to inform the user that the labels have been adjusted with the input values for x, y, height, and width adjustments.
+
+Workflow Explanation
+Load Images and Labels: When the "Load Images and Labels" button is pressed, users can select a folder containing image files. The tool loads all supported image files and their corresponding label files (excluding 'classes.txt') from the selected folder. The first image and its label are used for the preview.
+
+Adjust Labels: After loading images and labels, users can adjust the labels using the x, y, height, and width adjustment sliders. The "Adjust Labels" button is pressed to apply these adjustments to all labels. A message box is displayed to confirm the adjustments.
+
+Update Preview: The preview is updated based on the first loaded image and its adjusted labels. The preview shows bounding boxes around objects based on the adjusted labels. Users can observe the effect of label adjustments visually.
+
+UI Components
+x_axis: Slider for adjusting x-coordinate.
+y_axis: Slider for adjusting y-coordinate.
+height_pos: Slider for adjusting height.
+width_position: Slider for adjusting width.
+images_button: Button for loading images and labels from a selected folder.
+adjust_label: Button for adjusting labels and displaying a message.
+screen_view: QGraphicsView widget for displaying the image preview.
+Conclusion
+This code snippet presents an image label adjustment tool that allows users to load images and their corresponding label files, adjust label coordinates, and visualize the effects through a preview. The tool offers sliders for adjusting x, y, height, and width values, and buttons for loading images, adjusting labels, and displaying adjustment messages.
+
+Please note that this documentation assumes proper initialization of the UI elements, import statements for required libraries (e.g., cv2, Image, os, QFileDialog, QMessageBox, etc.), and the presence of the appropriate event handling connections.

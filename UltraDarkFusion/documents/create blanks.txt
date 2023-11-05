@@ -1,0 +1,47 @@
+Class Definitions and Connections:
+Button Connection for Image Processing:
+Connection: self.process_image_button.clicked.connect(self.on_button_click)
+Function on_button_click: Handles the button click event and triggers the image processing process.
+Thread ImageProcessingThread for Image Processing:
+Description: Defines a QThread subclass that performs the actual image processing, allowing this work to be done in a separate thread to keep the GUI responsive.
+Methods:
+on_button_click:
+
+Opens a dialog to select a folder containing images and YOLO annotation files.
+Determines an available folder name for saving output.
+Retrieves selected percentage (from combo box) to limit blank images.
+Retrieves selected image format (from combo box).
+Finds image files and corresponding YOLO annotation files.
+Creates an ImageProcessingThread and starts it.
+select_directory:
+
+Opens a dialog to select a directory and identifies valid image files in the selected directory.
+convert_images:
+
+Converts images in the selected directory to a different format, updating a progress bar as it goes.
+update_progress_bar:
+
+Updates the progress bar for the image conversion.
+process_single_image (within ImageProcessingThread class):
+
+Processes a single image and corresponding YOLO annotation file. Involves reading the image, parsing YOLO data, labeling the image, filling cropped areas, and saving negative images based on certain criteria.
+save_image_with_limit (within ImageProcessingThread class):
+
+Saves an image if it meets certain criteria based on random selection and limit percentage.
+fill_cropped_area (within ImageProcessingThread class):
+
+Inpaints an image using different methods and parameters and returns the best inpainted image based on Structural Similarity Index (SSIM).
+Thread:
+ImageProcessingThread Class:
+This class is a subclass of QThread, responsible for handling the processing of images and corresponding YOLO annotation files.
+The run method loops through all image files and annotation files and calls process_single_image on each.
+The process_single_image method handles the processing of each individual image and annotation file.
+The save_image_with_limit method decides whether to save the negative image based on the given percentage limit.
+The fill_cropped_area method inpaints the image using different methods and parameters, choosing the best based on SSIM comparison.
+Image Processing Details:
+The image processing part of this code reads an image and the corresponding YOLO annotation file, extracts the bounding boxes, and creates a negative image by removing the objects in the bounding boxes. The inpainting technique is used to fill the removed areas with suitable pixels. Multiple inpainting methods and radius values are used, and the best inpainted image is selected based on SSIM comparison. The negative image and corresponding empty annotation file are saved in a specific folder.
+
+Conclusion:
+This code snippet is an elaborate solution for image processing that includes loading images, processing them, and converting them. It's specifically tailored to work with images and YOLO annotations, and it uses multithreading to ensure a smooth user experience.
+
+It's worth noting that there are some dependencies that need to be imported, such as OpenCV (cv2), NumPy (np), and PyQt5 classes (QThread, QFileDialog, pyqtSignal, etc.), and the compare_ssim function. Without seeing the full code, these dependencies and some class attributes and methods are assumed based on the context provided.

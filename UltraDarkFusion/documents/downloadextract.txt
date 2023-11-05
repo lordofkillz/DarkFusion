@@ -1,0 +1,46 @@
+Download/Extract Section
+This section allows you to manage the extraction of frames from video inputs as well as the downloading of files from online sources. Follow the steps below to effectively perform these tasks:
+
+Extracting Files from Video Inputs
+To extract frames from video inputs, follow these steps:
+
+Add and Remove Video Files:
+
+Click "Add" to search for video files in the specified directory.
+Use "Remove" to eliminate unwanted video files from the list.
+Frame Extraction Configuration:
+
+Enable "Every" to define the frequency of frame extraction (e.g., every 10 frames).
+Select the desired format (e.g., JPG, PNG, etc.).
+Choose "Custom" to set a specific size for extracted frames using height and width.
+Display Input:
+
+Select the input source from the dropdown menu: camera input, capture card, webcam, or display.
+Check "Activate Extract on Live Display" to initiate frame extraction from the chosen display input.
+Executing the Extraction:
+
+Click "Extract" to initiate the frame extraction process.
+Use "Stop" to halt the extraction process when needed.
+Select Extraction Location:
+
+Choose the target location where extracted frames will be saved.
+Extracting Up to 5 Frames:
+
+This feature allows you to extract frames up to a maximum of five frames.
+Downloading Files from Online Sources
+To download files from online sources, follow these steps:
+
+Get a Shareable Link:
+
+Visit the source (e.g., YouTube) and obtain a shareable link to the desired content.
+Downloading Process:
+
+Paste the obtained URL into the provided bar.
+Click "Download" to initiate the download process.
+Managing Downloaded Links:
+
+To remove downloaded links, select the link from the table widget and press "Remove."
+Downloading Up to 5 Files:
+
+Utilize this functionality to download up to a maximum of five files.
+By following these instructions, you can efficiently perform frame extraction from video inputs and downloading files from online sources.

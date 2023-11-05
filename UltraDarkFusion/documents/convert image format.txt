@@ -1,0 +1,46 @@
+Class Definitions and Button Connections
+Directory Selection Button
+Button Connection: self.image_select.clicked.connect(self.select_directory)
+
+Function: select_directory()
+
+Purpose: This button enables users to select a directory that contains the image files intended for conversion. The selected directory will be scanned to identify valid image files with supported extensions.
+
+Method Details
+The select_directory() method is responsible for managing the selection of the source directory for image files. It opens a dialog that allows users to choose a directory from their filesystem.
+The method filters the list of files in the selected directory to identify valid image files with extensions supported by QImageReader.
+The list of valid image files is stored for subsequent processing.
+Image Conversion Button
+Button Connection: self.convert_image.clicked.connect(self.convert_images)
+
+Function: convert_images()
+
+Purpose: This button triggers the process of converting the selected image files to a chosen target format. The conversion process takes place in the background using separate threads for each image.
+
+Method Details
+The convert_images() method orchestrates the conversion of selected image files to a specified target format.
+It initializes the progress bar and iterates through each selected image file for conversion.
+A separate thread is created for each image file conversion to ensure efficient processing and responsiveness of the application.
+Upon the completion of each image conversion, the progress bar is updated to reflect the progress of the overall conversion process.
+Update Progress Bar Method
+Function: update_progress_bar()
+
+Purpose: This method is responsible for updating the progress bar, providing visual feedback on the advancement of the image format conversion process.
+
+Thread and Runnable
+ImageConverterRunnable Class
+Class Definition: Represents a worker thread responsible for converting individual image files in the background.
+
+Runnable: ImageConverterRunnable
+
+Purpose: Each instance of ImageConverterRunnable handles the conversion of a single image file to the target format. Upon completion, it emits a signal to indicate the finishing of the conversion process.
+
+Signal:
+
+finished: This signal is emitted when the image conversion process for an individual image is completed. It provides synchronization and updates the progress bar.
+Conclusion
+This code excerpt showcases a section of a graphical user interface (GUI) application focused on the conversion of image formats. Two crucial buttons, namely "Directory Selection" and "Image Conversion," facilitate the selection of source directories and the initiation of image format conversion. The select_directory() function meticulously handles the directory selection process, filtering out valid image files based on recognized extensions. On the other hand, the convert_images() function expertly manages the image conversion procedure, leveraging a multithreading approach for efficient and responsive execution.
+
+The provided update_progress_bar() function ensures that users receive real-time feedback on the progress of the image format conversion process, enhancing the user experience.
+
+Please note that this documentation assumes the availability of certain PyQt5 classes (QImageReader, QThreadPool, etc.) and properly configured thread handling for a smooth execution of the provided code segment.

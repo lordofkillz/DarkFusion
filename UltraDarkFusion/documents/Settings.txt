@@ -1,0 +1,31 @@
+Keyboard Shortcut Handling and Settings
+Setting Up Buttons
+settingsButton: This button is presumably used to open the settings dialog. When clicked, it connects to the function openSettingsDialog.
+Loading Settings
+self.settings: This variable holds the loaded settings using the loadSettings function. It is likely a dictionary containing various key-value pairs related to keyboard shortcuts and application settings.
+Keyboard Shortcut Handling
+keyPressEvent(self, event): This function is called whenever a key is pressed. It processes the key press event and handles different key combinations based on the user-defined settings.
+
+The function checks if the pressed key matches the defined next, previous, or delete button keys in the settings dictionary.
+It also considers keyboard modifiers like the Control key to trigger different actions.
+If an unmatched key is pressed, it adds the key to a buffer and starts a timer to process the keys in the buffer.
+processKeyPresses(self): This function processes the key presses stored in the keyBuffer after a certain interval.
+
+It performs actions similar to keyPressEvent, such as navigating to the next or previous frame, deleting the current image, plotting labels, auto-labeling the current image, and handling class hotkeys.
+Settings Dialog
+openSettingsDialog(self): This function is called when the "Settings" button is clicked. It creates and displays a dialog box for configuring keyboard shortcuts and settings.
+
+A SettingsDialog instance is created and displayed using the exec_() function.
+loadSettings(self): This function loads settings from a JSON file named 'settings.json'. If the file doesn't exist, default settings are returned.
+
+The loaded settings are used to populate various input fields in the settings dialog.
+Last-used paths for weights, configuration files, and directories are also loaded.
+saveSettings(self): This function saves the updated settings back to the 'settings.json' file.
+
+It retrieves the input values from the settings dialog's input fields.
+Hotkeys for each class are saved, along with other settings such as next/previous buttons, delete button, plot labels, and auto-label.
+After saving, the function also calls saveSettings of the parent class to ensure the updated settings are kept in memory.
+Settings Dialog GUI
+The SettingsDialog class handles the graphical user interface (GUI) for the settings dialog.
+It creates input fields for various settings, including next/previous buttons, delete button, plot labels, auto-label, and class hotkeys.
+When the "Save" button is clicked, the entered settings are saved.

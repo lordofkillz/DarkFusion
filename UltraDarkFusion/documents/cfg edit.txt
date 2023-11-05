@@ -1,0 +1,27 @@
+
+CFG Edit Tab
+
+The "CFG Edit" Tab in your label maker software provides functionalities to edit and customize configuration files for your object detection model. This guide will take you through each feature available in this tab, step by step.
+
+1. Search for CFG
+
+Function: Locate and display your configuration (cfg) file in a table.
+Usage: Use this function to search for and select your configuration file (cfg). The selected cfg file will be displayed in a table for further editing.
+2. Editing CFG File
+
+Function: Modify various parameters in the configuration file.
+Usage: Within the displayed cfg table, you can make changes to several parameters. These include altering the number of classes, adjusting the max batches (which will affect the number of steps), and any other customization that you require for your model.
+3. Search for YAML
+
+Function: Find the default.yaml file in the Anaconda Ultralytics folder.
+Usage: This function enables you to locate and access the default.yaml file, typically stored in the Anaconda Ultralytics folder. This file is automatically saved and can be used for your model configuration.
+4. Calculate Anchors
+
+Function: Calculate anchors for your object detection model.
+Usage: Enter the path to your images and label directory. The height of images is loaded from the cfg file by default, along with the number of clusters (anchors). You can also specify the width of your images, which is automatically loaded from the cfg. The graph checkbox allows you to visualize the graph, and the hide activation checkbox hides activation layers. Click the "Calculate" button to use the k-means algorithm to determine the average size of your labels and compute the anchors.
+5. Save Configuration Changes
+
+Function: Save changes made to your cfg.
+Usage: After editing your cfg file and calculating the anchors, you can click the "Save" button to save your configuration changes. This ensures that your modified configuration is retained for your object detection model.
+
+https://github.com/hank-ai/darknet
