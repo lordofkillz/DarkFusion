@@ -135,7 +135,7 @@ Discord: [https://discord.gg/Jhqb8MDD](https://discord.gg/Jhqb8MDD)
 
 ---
 
-UltraDarkFusion Discord: [Your Discord ID](https://discord.gg/tSRy2YPD)
+UltraDarkFusion Discord: https://discord.gg/MN2GpHXGhp
 
 Many thanks to all who had input on this. and all my testers see Discord for links to their Discord servers and websites.
 
