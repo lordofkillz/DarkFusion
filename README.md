@@ -32,6 +32,7 @@ This installation guide will walk you through the process of setting up UltraDar
      cd C:/
      git clone https://github.com/lordofkillz/DarkFusion.git
      cd darkFusion
+     mkdir anaconda
      ```
 
 2. **Download Anaconda**:
@@ -87,16 +88,16 @@ To ensure a smooth installation process when setting up OpenCV with CUDA support
    Warning: If a different version of OpenCV and contrib are already installed in your environment, ensure they are updated to match the required version for UltraDarkFusion.
 
    Begin by navigating to your desired installation directory (e.g., C:/) using the command prompt. Following that, execute the commands below to clone the UltraDarkFusion repository and the specified versions of OpenCV and contrib:
-   ```bash
-   winget install git.git
-   cd C:/
-   git clone https://github.com/lordofkillz/DarkFusion.git
-   cd DarkFusion
-   git clone --branch 4.7.0 https://github.com/opencv/opencv.git opencv-4.7.0
-   git clone --branch 4.7.0 https://github.com/opencv/opencv_contrib.git opencv_contrib-4.7.0
-   mkdir build 
-   mkdir install 
-   ```
+```fix
+winget install git.git
+cd C:/
+git clone https://github.com/lordofkillz/DarkFusion.git
+cd DarkFusion
+git clone --branch 4.7.0 https://github.com/opencv/opencv.git opencv-4.7.0
+git clone --branch 4.7.0 https://github.com/opencv/opencv_contrib.git opencv_contrib-4.7.0
+mkdir anaconda build install 
+```
+
 
 ### 3. Download Anaconda:
    - Visit the official Anaconda website at [https://www.anaconda.com/products/distribution](https://www.anaconda.com/products/distribution) and download the appropriate version of Anaconda.
