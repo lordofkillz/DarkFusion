@@ -166,11 +166,11 @@ Insanity
 Main inspiration was from DarkMark, a Linux-based label maker maintained by Stephane, the current developer for the Hank-AI Darknet repo.
 [DarkMark GitHub](https://github.com/stephanecharette/DarkMark)
 
-Label Maker Pro
+Label Maker Pro (thanks EAL)!
 [Label Maker Pro Search](https://www.bing.com/search?q=easy+aimlock&form=ANNTH1&refig=6fdaa64b5fde434e9316148327c3c0a5&pc=EDGEDB)
 
 Outside of Darknet and Ultralytics, I used SAM. See GitHub: [https://github.com/facebookresearch/segment-anything](https://github.com/facebookresearch/segment-anything)
 
 
 
-"# DarkFusion"
+"DarkFusion"
