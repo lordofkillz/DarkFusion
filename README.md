@@ -69,6 +69,8 @@ Copy code
 Use the Tab key to auto-complete and select UltraDarkFusion_X.py, then press Enter to start the program.
 For further instructions, refer to the help tab in the program or join the Discord community.
 
+* DONT FORGET TO INSTALL DARKNET * see page about darknet.
+
 
 # UltraDarkFusion Installation Guide (Part 2: with DNN with CUDA)
 
