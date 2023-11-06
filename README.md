@@ -63,9 +63,7 @@ Open Anaconda Prompt.
 Activate the fusion environment by running:
 `conda activate fusion`
 Navigate to the UltraDarkFusion directory:
-bash
-Copy code
-```cd C:\DarkFusion\UltraDarkFusion```
+`cd C:\DarkFusion\UltraDarkFusion`
 Use the Tab key to auto-complete and select UltraDarkFusion_X.py, then press Enter to start the program.
 For further instructions, refer to the help tab in the program or join the Discord community.
 
