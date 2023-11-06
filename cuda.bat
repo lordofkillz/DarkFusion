@@ -55,6 +55,7 @@ set "pathToAnaconda=%ANACONDAP%/envs/gpu"
 set "buildType=Release"
 set "generator=Ninja"
 set "pyVer=38"
+set "CMAKE_FIND_DEBUG_MODE=TRUE"
 
 :: Echo Paths for confirmation
 echo OpenCVSource: %openCvSource%
