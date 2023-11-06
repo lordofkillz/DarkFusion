@@ -59,7 +59,7 @@ This installation guide will walk you through the process of setting up UltraDar
 
 This completes the basic installation for using DNN on OpenCL without CUDA. The second part of the installation, which includes CUDA installation, CMake, Visual Studio, and other steps, will be covered separately.
 
-###Recommended: Use Visual Studio Code for a smoother experience with the program.### Download it here https://code.visualstudio.com/Download
+*Recommended:* Use Visual Studio Code for a smoother experience with the program.### Download it here https://code.visualstudio.com/Download
 
 If you prefer not to use Visual Studio Code:
 
@@ -161,12 +161,9 @@ Discord: [https://discord.gg/Jhqb8MDD](https://discord.gg/Jhqb8MDD)
 
 UltraDarkFusion Discord: https://discord.gg/MN2GpHXGhp
 
-Many thanks to all who had input on this. and all my testers see Discord for links to their Discord servers and websites.
-
-Many thanks to all who helped.
-Long call #1 tester, many thanks for all your help.
-Sapi
-Insanity
+Many thanks to all who helped and to all who had input on this. 
+Long call #1 tester, thanks for all your help.
+see Discord for links to their Discord servers and websites.
 
 
 Main inspiration was from DarkMark, a Linux-based label maker maintained by Stephane, the current developer for the Hank-AI Darknet repo.
@@ -179,4 +176,4 @@ Outside of Darknet and Ultralytics, I used SAM. See GitHub: [https://github.com/
 
 
 
-"DarkFusion"
+*DarkFusion*
