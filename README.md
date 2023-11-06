@@ -1,5 +1,5 @@
 # UltraDarkFusion
-![UltraDarkFusion GUI](https://raw.githubusercontent.com/lordofkillz/DarkFusion/[branch]/path/to/fusion.gif)
+![DarkFusion GUI](https://raw.githubusercontent.com/lordofkillz/DarkFusion/[branch]/path/to/fusion.gif)
 
 UltraDarkFusion is a powerful and customizable graphical user interface (GUI) application for object detection, image processing, and computer vision workflows. It provides an intuitive drag-and-drop interface for labeling images, tools for dataset preparation and augmentation, model training capabilities, and real-time inference visualization.
 
