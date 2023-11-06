@@ -66,6 +66,7 @@ Navigate to the UltraDarkFusion directory:
 `cd C:\DarkFusion\UltraDarkFusion`
 Use the Tab key to auto-complete and select UltraDarkFusion_X.py, then press Enter to start the program.
 For further instructions, refer to the help tab in the program or join the Discord community.
+or simply just double click the .py
 
 [*DONT FORGET TO INSTALL DARKNET*](https://github.com/lordofkillz/DarkFusion#darknet-options)
 
