@@ -26,6 +26,10 @@ So in summary, UltraDarkFusion streamlines the training workflow for YOLO-based 
 
 This installation guide will walk you through the process of setting up UltraDarkFusion for DNN (Deep Neural Network) operations using OpenCL without CUDA. Follow the numbered steps below for a basic installation:
 
+> **Note to Users:**
+>
+> While I'm aware that the installation and setup process can be fully automated using batch files, executables, or other methods, the intention behind providing manual installation steps is educational. It's important to me that users have the opportunity to understand the underlying processes that are often abstracted away by automation. By engaging with the setup manually, you gain insight into how the components fit together and how the "gears work" behind the scenes. This approach is designed to foster learning and provide transparency into the installation process.
+
 
 1. **Clone UltraDarkFusion Repository**:
    - Navigate to your preferred installation directory using the command prompt and run the following commands to clone the UltraDarkFusion repository:
