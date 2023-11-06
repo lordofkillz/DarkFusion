@@ -32,9 +32,6 @@ from pathlib import Path
 from typing import Type
 from ultralytics import YOLO
 import torch
-import matplotlib
-import matplotlib.patches as mpatches
-import matplotlib.pyplot as plt
 import numpy as np
 import yaml
 import copy
@@ -64,13 +61,15 @@ from PyQt5 import QtWidgets, QtGui
 from skimage.metrics import structural_similarity as compare_ssim
 from sklearn.cluster import KMeans
 from qt_material import apply_stylesheet, list_themes
-matplotlib.use("TkAgg")
 from logging.handlers import RotatingFileHandler
 from multiprocessing import Pool
 from segment_anything import sam_model_registry, SamPredictor
 import pybboxes as pbx
 import yolov5
 import io
+import matplotlib
+matplotlib.use('Qt5Agg')
+import matplotlib.pyplot as plt
 
 # Create or get the root logger
 root_logger = logging.getLogger()
