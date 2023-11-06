@@ -52,7 +52,7 @@ This installation guide will walk you through the process of setting up UltraDar
    - Visit the official Anaconda website at [https://www.anaconda.com/products/distribution](https://www.anaconda.com/products/distribution) and download the appropriate version of Anaconda.
 
 4. **Run the Anaconda Installer**:
-   - Locate the downloaded Anaconda installer executable (.exe) file and run it. During installation, make sure to set the installation path to `c:/DarkFusion/anaconda`.
+   - Locate the downloaded Anaconda installer executable (.exe) file and run it. During installation, make sure to set the installation path to `c:\DarkFusion\anaconda`.
 
 5. **Execute fusion_install.bat**:
    - Once Anaconda is installed, locate the `fusion_install.bat` file in your DarkFusion directory and right-click on it. Choose "Run as administrator" to execute the script.
@@ -119,7 +119,7 @@ To ensure a smooth installation process when setting up OpenCV with CUDA support
    - Visit the official Anaconda website at [https://www.anaconda.com/products/distribution](https://www.anaconda.com/products/distribution) and download the appropriate version of Anaconda.
 
 ### 3. Run the Anaconda Installer:
-   - Locate the downloaded Anaconda installer executable (.exe) file and run it. During installation, make sure to set the installation path to `c:/DarkFusion/anaconda`.
+   - Locate the downloaded Anaconda installer executable (.exe) file and run it. During installation, make sure to set the installation path to `c:\DarkFusion\anaconda`.
 
 ### 4. Execute fusion_install.bat:
    - Once Anaconda is installed, locate the `fusion_install.bat` file in your UltraDarkFusion directory and right-click on it. Choose "Run as administrator" to execute the script.
