@@ -61,7 +61,7 @@ If you prefer not to use Visual Studio Code:
 
 Open Anaconda Prompt.
 Activate the fusion environment by running:
-```conda activate fusion```
+`conda activate fusion`
 Navigate to the UltraDarkFusion directory:
 bash
 Copy code
