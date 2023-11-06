@@ -27,7 +27,7 @@ This installation guide will walk you through the process of setting up UltraDar
 
 1. **Clone UltraDarkFusion Repository**:
    - Navigate to your preferred installation directory using the command prompt and run the following commands to clone the UltraDarkFusion repository:
-     ```bash
+     ```fix
      winget install git.git
      cd C:/
      git clone https://github.com/lordofkillz/DarkFusion.git
@@ -39,7 +39,7 @@ This installation guide will walk you through the process of setting up UltraDar
    **Option 2:**: In the `ultradarkfusion` folder, create a folder called `Sam` and download the checkpoints from [this link](https://github.com/facebookresearch/segment-anything#model-checkpoints).
 
 
-   ###OPTIONAL### download my weights folder collection of mscoco pretrained .weights, .cfg and .pt its https://drive.google.com/file/d/1hMwNzGi2DnA19SbQdoA0OXCYzk8LwOPP/view?usp=sharing
+**OPTIONAL** download my weights folder collection of mscoco pretrained .weights, .cfg and .pt its https://drive.google.com/file/d/1hMwNzGi2DnA19SbQdoA0OXCYzk8LwOPP/view?usp=sharing
 
 
 3. **Download Anaconda**:
