@@ -9,8 +9,8 @@ Key features:
 Customizable bounding box annotation with automatic YOLO format conversion
 Dataset organization and preparation tools like duplicate image removal and splitter
 Image augmentation with effects like motion blur, noise, lighting, and more
-Integration with various object detection frameworks like YOLO, detectron2, ultralytics
-Model training capabilities for frameworks like YOLO and detectron2
+Integration with various object detection frameworks like YOLO, darknet, ultralytics
+Model training capabilities for frameworks like YOLO and darknet
 Real-time visualization for pose estimation, instance segmentation, and detection models
 Detailed metrics and visualizations for monitoring training progress
 Support for multiple hardware acceleration backends like CUDA, OpenCL, and CPU
