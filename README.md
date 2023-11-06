@@ -159,7 +159,7 @@ Many thanks to all who helped.
 Long call #1 tester, many thanks for all your help.
 Sapi
 Insanity
-Cougar Panzer
+
 
 Main inspiration was from DarkMark, a Linux-based label maker maintained by Stephane, the current developer for the Hank-AI Darknet repo.
 [DarkMark GitHub](https://github.com/stephanecharette/DarkMark)
