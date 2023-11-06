@@ -1,5 +1,5 @@
-#For converting models Install at your own risk if it fails pip install --user <package-name> put here then put C:\Users\jdini\AppData\Roaming\Python\Python38\Scripts
-C:\Users\jdini\AppData\Roaming\Python\Python38\site-packages
+#For converting models Install at your own risk if it fails pip install --user <package-name> put here then put %AppData\Roaming\Python\Python38\Scripts
+%AppData\Roaming\Python\Python38\site-packages
 in system environment variable path. 
 # to convert to .engine or .tflite you must have pip install protobuf==3.20.3 installed
 
