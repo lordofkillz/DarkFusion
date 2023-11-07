@@ -31,7 +31,7 @@ pause
 
 
 :: Setup Environment Variables
-setx /M OPENCV_OCL4DNN_CONFIG_PATH "%USERPROFILE%\AppData\Local\Temp\opencv\4.7\opencl_cache" 
+setx /M OPENCV_OCL4DNN_CONFIG_PATH "%USERPROFILE%\AppData\Local\Temp\opencv\4.7\opencl_cache"
 
 :: Update System PATH
 set pathkey="HKEY_LOCAL_MACHINE\System\CurrentControlSet\Control\Session Manager\Environment"
