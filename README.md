@@ -1,45 +1,38 @@
-# UltraDarkFusion
 ![UltraDarkFusion GUI](fusion.gif)
 
+**UltraDarkFusion** is an advanced GUI application tailored for object detection, image processing, and computer vision. It simplifies workflows collection, labeling, dataset management, model training, and visualization of real-time inferences.
 
-UltraDarkFusion is a powerful and customizable graphical user interface (GUI) application for object detection, image processing, and computer vision workflows. It provides an intuitive drag-and-drop interface for labeling images, tools for dataset preparation and augmentation, model training capabilities, and real-time inference visualization.
+## Features
 
-Key features:
+- **Annotation Tools**: Customizable bounding box annotation with YOLO format conversion.
+- **Dataset Management**: Duplicate removal, image splitting, and dataset preparation functionalities.
+- **Image Augmentation**: Apply effects such as motion blur, noise, and lighting adjustments.
+- **Framework Integration**: Compatible with YOLO, Darknet, and Ultralytics frameworks.
+- **Model Training**: In-built training capabilities for Ultralytics and Darknet models.
+- **Visualization**: Real-time visual feedback for pose estimation, segmentation, and detection.
+- **Performance Metrics**: Detailed analytics to monitor and optimize training progress.
+- **Hardware Acceleration**: Supports CUDA, OpenCL, and CPU backends for improved performance.
+- **Customizable UI**: Flexible interface with themes, styling, and user-defined shortcuts.
+- ** Download ytube videos extract frames or collect images from screen directly.
 
-Customizable bounding box annotation with automatic YOLO format conversion
-Dataset organization and preparation tools like duplicate image removal and splitter
-Image augmentation with effects like motion blur, noise, lighting, and more
-Integration with various object detection frameworks like YOLO, darknet, ultralytics
-Model training capabilities for frameworks like YOLO and darknet
-Real-time visualization for pose estimation, instance segmentation, and detection models
-Detailed metrics and visualizations for monitoring training progress
-Support for multiple hardware acceleration backends like CUDA, OpenCL, and CPU
-Highly customizable UI with support for styling, themes, and user-defined shortcuts
-UltraDarkFusion aims to provide an all-in-one solution for computer vision and deep learning practitioners to streamline their workflows. Its modular design allows integrating new algorithms, models, and features with ease.
-For dataset preparation, it allows quickly labeling images with customizable bounding boxes and automatically converting annotations to YOLO format. Robust duplication removal, train-test splitting, and powerful image augmentation prepare datasets for better generalizability.
-Once a dataset is prepared, UltraDarkFusion provides seamless integration for training YOLO models in Darknet or Ultralytics YOLOv8. It generates the necessary data files and configuration with optimal parameters to kickstart training with a single click.
-During training, key metrics like loss, mAP, and progress are visualized in real-time. Detailed graphs and visualizations provide insights into the training dynamics. The training process can also be controlled on-the-fly with options to stop, resume or finetune.
-UltraDarkFusion reduces the complexities of setting up datasets and configurations for YOLO training. Its automation and visualizations aid in faster experimentation by allowing users to gauge the impact of different augmentation and hyperparameter settings. By handling the heavy-lifting of data curation and model training, it enables practitioners to focus on building better datasets and models.
-So in summary, UltraDarkFusion streamlines the training workflow for YOLO-based detection models through its specialized tools for annotation, augmentation, automation and visualization. This makes it easy even for new users to train performant object detectors.
+UltraDarkFusion is designed to be modular, enabling easy integration of new algorithms and features, streamlining the end-to-end process from dataset preparation to model training.
 
-# UltraDarkFusion Installation Guide (Part 1: OpenCL without CUDA)
+## Installation Guide
 
-This installation guide will walk you through the process of setting up UltraDarkFusion for DNN (Deep Neural Network) operations using OpenCL without CUDA. Follow the numbered steps below for a basic installation:
+### Part 1: OpenCL without CUDA
 
-> **Note to Users:**
->
-> While I'm aware that the installation and setup process can be fully automated using batch files, executables, or other methods, the intention behind providing manual installation steps is educational. It's important to me that users have the opportunity to understand the underlying processes that are often abstracted away by automation. By engaging with the setup manually, you gain insight into how the components fit together and how the "gears work" behind the scenes. This approach is designed to foster learning and provide transparency into the installation process.
+This guide outlines the installation of UltraDarkFusion using OpenCL, bypassing the need for CUDA.
 
+#### Initial Setup
 
-1. **Clone UltraDarkFusion Repository**:
-   - Navigate to your preferred installation directory using the command prompt and run the following commands to clone the UltraDarkFusion repository:
-     ```fix
-     winget install git.git
-     cd C:/
-     git clone https://github.com/lordofkillz/DarkFusion.git
-     cd darkFusion
-     mkdir anaconda
-     ```
+1. Clone the repository:
+   ```shell
+   winget install git.git
+   cd C:/
+   git clone https://github.com/lordofkillz/DarkFusion.git
+   cd DarkFusion
+   mkdir anaconda
+   ```
    **NOT OPTIONAL** download the sam folder https://drive.google.com/file/d/1Dxhu3qv8Je-NSMp1Xcn6_rD_EPI5OasK/view?usp=sharing extract to `c:/darkfusion/ultradarkfusion` or you will need to change source code.
 
    **Option 2:**: In the `ultradarkfusion` folder, create a folder called `Sam` and download the checkpoints from [this link](https://github.com/facebookresearch/segment-anything#model-checkpoints).
