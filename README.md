@@ -16,7 +16,13 @@
 - ** Download ytube videos extract frames or collect images from screen directly.
 
 UltraDarkFusion is designed to be modular, enabling easy integration of new algorithms and features, streamlining the end-to-end process from dataset preparation to model training.
+🚀 Getting Started with Installation
 
+Before diving into the code, let's set up your environment with the necessary build tools. Open up a command prompt and execute the following commands to download Git and CMake. These are essential tools for version control and building the project, respectively Install Git, Install CMake
+   ```sh
+   winget install git.git
+   winget install Kitware.CMake
+   ```
 ## Installation Guide
 
 ### Part 1: OpenCL without CUDA
