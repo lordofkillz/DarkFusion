@@ -32,8 +32,7 @@ This guide outlines the installation of UltraDarkFusion using OpenCL, bypassing 
 #### Initial Setup
 
 1. Clone the repository:
-   ```shell
-   winget install git.git
+   ```sh
    cd C:/
    git clone https://github.com/lordofkillz/DarkFusion.git
    cd DarkFusion
@@ -102,9 +101,7 @@ To ensure a smooth installation process when setting up OpenCV with CUDA support
    Warning: If a different version of OpenCV and contrib are already installed in your environment, ensure they are updated to match the required version for UltraDarkFusion.
 
    Begin by navigating to your desired installation directory (e.g., C:/) using the command prompt. Following that, execute the commands below to clone the UltraDarkFusion repository and the specified versions of OpenCV and contrib:
-   ```fix
-   winget install git.git
-   winget install Kitware.CMake
+   ```sh
    cd C:/
    git clone https://github.com/lordofkillz/DarkFusion.git
    cd DarkFusion
@@ -139,6 +136,8 @@ To ensure a smooth installation process when setting up OpenCV with CUDA support
 
 ### 7. Compile OpenCV with CUDA:
    - Run the `cuda.bat` script to compile OpenCV with CUDA support.
+   - 
+[*DONT FORGET TO INSTALL DARKNET*](https://github.com/lordofkillz/DarkFusion#darknet-options)
 
 # Darknet Options
 
