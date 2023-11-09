@@ -158,7 +158,7 @@ Discord: [https://discord.gg/Jhqb8MDD](https://discord.gg/Jhqb8MDD)
 
 ---
 
-UltraDarkFusion Discord: https://discord.gg/MN2GpHXGhp
+UltraDarkFusion Discord: https://discord.gg/kGaWChbUtR
 
 Many thanks to all who helped and to all who had input on this. 
 Long call #1 tester, thanks for all your help.
