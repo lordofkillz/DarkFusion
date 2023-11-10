@@ -1,0 +1,28 @@
+Label Images:
+
+Begin by labeling your images. Ensure you have between 1,500 to 2,000 labeled images to provide a substantial dataset for training your model.
+Create Training Files:
+
+Go to the 'Create Files' tab and find 'Create Train Files'.
+a. Image Location: Choose the directory containing your images and corresponding .txt files (label files).
+b. train.txt: This file, which lists paths to your training images, will be generated for you.
+c. Save the Configuration: Save the files in a designated directory. This will include train.txt, obj.data (which contains paths to your training and validation datasets, number of classes, and where to save weights), obj.names (listing your classes), and obj.yaml (a configuration file for your dataset), as well as a backup folder for storing the weights during training.
+Edit Configuration (cfg):
+
+Navigate to the 'cfg Edit' tab and select the configuration file you wish to use. Focus on the highlighted sections for editing:
+batch: The number of images the network processes at one time. Larger batch sizes require more memory.
+subdivisions: The number of images passed through the network at once. This should not exceed the batch size.
+width and height: The dimensions to which all your images will be resized during training. It's recommended to collect and train images at the same size for consistency.
+max_batches: Specifies the total number of training iterations. Set this to at least 2,000 times the number of classes.
+classes: The number of different classes present in your dataset.
+Save the configuration file under a new name if necessary.
+Start Training:
+
+Open the 'Darknet Training' tab.
+Select the obj.data file you created in Step 2, the edited .cfg file from Step 3, and the corresponding pre-trained weights (e.g., 'tiny-yolov4.weights' for a Tiny YOLOv4 configuration).
+If you want to train from scratch, select 'clear_weights' before starting.
+Click 'train' to initiate the training process. You can monitor progress in the terminal window and visualize it through the chart.png in your UltraDarkFusion directory.
+Post-Training:
+
+Upon completion, the trained weights will be saved in the backup folder specified in Step 2.
+Use the .cfg file that corresponds to your trained weights to perform inference tests on your model.
