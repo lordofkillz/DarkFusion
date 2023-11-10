@@ -1,22 +1,24 @@
 ![UltraDarkFusion GUI](fusion.gif)
 
-**UltraDarkFusion** is an advanced GUI application tailored for object detection, image processing, and computer vision. It simplifies workflows collection, labeling, dataset management, model training, and visualization of real-time inferences.
+**UltraDarkFusion** is an advanced GUI application tailored for object detection, image processing, and computer vision. It simplifies workflows for collection, labeling, dataset management, model training, and visualization of real-time inferences.
 
 ## Features
 
 - **Annotation Tools**: Customizable bounding box annotation with YOLO format conversion.
-- **Dataset Management**: Duplicate removal, image splitting, and dataset preparation functionalities.
+- **Dataset Management**: Tools for duplicate removal, image splitting, and dataset preparation.
 - **Image Augmentation**: Apply effects such as motion blur, noise, and lighting adjustments.
-- **Framework Integration**: Compatible with YOLO, Darknet, and Ultralytics frameworks.
+- **Framework Integration**: Compatible with Darknet and Ultralytics frameworks.
 - **Model Training**: In-built training capabilities for Ultralytics and Darknet models.
-- **Visualization**: Real-time visual feedback for pose estimation, segmentation, and detection.
-- **Performance Metrics**: Detailed analytics to monitor and optimize training progress.
-- **Hardware Acceleration**: Supports CUDA, OpenCL, and CPU backends for improved performance.
-- **Customizable UI**: Flexible interface with themes, styling, and user-defined shortcuts.
-- ** Download ytube videos extract frames or collect images from screen directly.
+- **Visualization**: Automatic labeling and visualization using pre-trained `.weights` 
+  or `.pt` files for efficient model evaluation.
+- **Performance Metrics**: Analytics to monitor and optimize training progress.
+- **Hardware Acceleration**: Support for CUDA, OpenCL, and CPU backends.
+- **Customizable UI**: Themes, styling, and user-defined shortcuts.
+- **Video Processing**: Download YouTube videos, extract frames, or collect images from the screen directly.
 
-UltraDarkFusion is designed to be modular, enabling easy integration of new algorithms and features, streamlining the end-to-end process from dataset preparation to model training.
-🚀 Getting Started with Installation
+UltraDarkFusion is designed to be modular, enabling easy integration of new algorithms and streamlining the process from dataset preparation to model training.
+
+## 🚀 Getting Started with Installation
 
 Before diving into the code, let's set up your environment with the necessary build tools. Open up a command prompt and execute the following commands to download Git and CMake. These are essential tools for version control and building the project, respectively Install Git and cmake close the terminal after your done this allows it to refresh otherwise you may recieve and error.
 
@@ -39,12 +41,12 @@ This guide outlines the installation of UltraDarkFusion using OpenCL, bypassing 
    cd DarkFusion
    mkdir anaconda
    ```
-   **NOT OPTIONAL** download the sam folder https://drive.google.com/file/d/1Dxhu3qv8Je-NSMp1Xcn6_rD_EPI5OasK/view?usp=sharing extract to `c:/darkfusion/ultradarkfusion` or you will need to change source code.
+2. **NOT OPTIONAL** download the sam folder https://drive.google.com/file/d/1Dxhu3qv8Je-   NSMp1Xcn6_rD_EPI5OasK/view?usp=sharing extract to `c:/darkfusion/ultradarkfusion` or you will need to change source code.
 
-   **Option 2:**: In the `ultradarkfusion` folder, create a folder called `Sam` and download the checkpoints from [this link](https://github.com/facebookresearch/segment-anything#model-checkpoints).
+   **Option 2:** In the `ultradarkfusion` folder, create a folder called `Sam` and download the checkpoints from [this link](https://github.com/facebookresearch/segment-anything#model-checkpoints).
 
 
-**OPTIONAL** download my weights folder collection of mscoco pretrained .weights, .cfg and .pt its https://drive.google.com/file/d/1hMwNzGi2DnA19SbQdoA0OXCYzk8LwOPP/view?usp=sharing
+  **OPTIONAL** download my weights folder collection of mscoco pretrained .weights, .cfg and .pt its https://drive.google.com/file/d/1hMwNzGi2DnA19SbQdoA0OXCYzk8LwOPP/view?usp=sharing
 
 
 3. **Download Anaconda**:
