@@ -178,7 +178,7 @@ After setting up Ultralytics, you may need to install TensorRT from source for a
    ```sh
    conda activate fusion
    cd C:\DarkFusion\UltraDarkFusion\TensorRT-8.6.1.6
-   pip install protobuf==3.20.3
+  
 
 4.Install the required TensorRT wheels using pip. Make sure to install them in the following order:
   ```aql
@@ -186,6 +186,7 @@ After setting up Ultralytics, you may need to install TensorRT from source for a
   pip install graphsurgeon\graphsurgeon-0.4.6-py2.py3-none-any.whl
   pip install uff\uff-0.6.9-py2.py3-none-any.whl
   pip install onnx_graphsurgeon\onnx_graphsurgeon-0.3.12-py2.py3-none-any.whl
+  pip install protobuf==3.20.3
   ```
 
 
