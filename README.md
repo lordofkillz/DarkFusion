@@ -156,7 +156,32 @@ To ensure a smooth installation process when setting up OpenCV with CUDA support
 # Ultralytics
 
 Ultralytics is pre-installed as part of this package. For documentation, visit the [Ultralytics documentation site](https://docs.ultralytics.com/).
-Discord: [https://discord.gg/Jhqb8MDD](https://discord.gg/Jhqb8MDD)
+
+Discord: [Join Ultralytics on Discord](https://discord.gg/Jhqb8MDD)
+
+# Installing TensorRT from Source
+
+After setting up Ultralytics, you may need to install TensorRT from source for advanced optimizations. Follow these steps to install TensorRT into the `C:\DarkFusion\UltraDarkFusion` directory:
+
+1. Download the TensorRT zip file from NVIDIA: 
+   [TensorRT-8.6.1.6 for Windows 10](https://developer.nvidia.com/downloads/compute/machine-learning/tensorrt/secure/8.6.1/zip/TensorRT-8.6.1.6.Windows10.x86_64.cuda-11.8.zip)
+
+2. Extract the contents of the zip file to `C:\DarkFusion\UltraDarkFusion`.
+
+3. Open a command prompt and change the directory to the TensorRT folder:
+   ```sh
+   cd C:\DarkFusion\UltraDarkFusion\TensorRT-8.6.1.6
+
+4.Install the required TensorRT wheels using pip. Make sure to install them in the following order:
+  ```aql
+  pip install python\tensorrt-8.6.1-cp38-none-win_amd64.whl
+  pip install graphsurgeon\graphsurgeon-0.4.6-py2.py3-none-any.whl
+  pip install uff\uff-0.6.9-py2.py3-none-any.whl
+  pip install onnx_graphsurgeon\onnx_graphsurgeon-0.3.12-py2.py3-none-any.whl
+  ```
+
+
+
 
 ---
 
@@ -173,7 +198,7 @@ Main inspiration was from DarkMark, a Linux-based label maker maintained by Step
 Label Maker Pro (thanks EAL)!
 [Label Maker Pro Search](https://www.bing.com/search?q=easy+aimlock&form=ANNTH1&refig=6fdaa64b5fde434e9316148327c3c0a5&pc=EDGEDB)
 
-Outside of Darknet and Ultralytics, I used SAM. See GitHub: [https://github.com/facebookresearch/segment-anything](https://github.com/facebookresearch/segment-anything)
+Outside of Darknet and Ultralytics, I utilized SAM. See GitHub: [SAM - Segment Anything Model](https://github.com/facebookresearch/segment-anything) and [GroundingDINO](https://github.com/IDEA-Research/GroundingDINO) for additional tools used in my projects.
 
 
 
