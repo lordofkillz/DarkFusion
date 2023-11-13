@@ -60,7 +60,7 @@ This guide outlines the installation of UltraDarkFusion using OpenCL, bypassing 
 
 This completes the basic installation for using DNN on OpenCL without CUDA. The second part of the installation, which includes CUDA installation, CMake, Visual Studio, and other steps, will be covered separately.
 
-*Recommended:* Use Visual Studio Code for a smoother experience with the program.### Download it here https://code.visualstudio.com/Download
+*Recommended:* Use Visual Studio Code for a smoother experience with the program.Download it here https://code.visualstudio.com/Download
 
 If you prefer not to use Visual Studio Code:
 
@@ -89,7 +89,7 @@ To ensure a smooth installation process when setting up OpenCV with CUDA support
 
 1. **Uninstall Python**: Remove any existing Python installations from the Control Panel.
 
-2. **Delete Python Cache**: Navigate to `%USERPROFILE%\AppData\Local\Programs\python` and remove the cache.
+2. **Delete Python Cache**: Navigate to `%USERPROFILE%\AppData\Local\Programs\python` and remove python.
 
 4. **Remove CUDA 11.x**: Uninstall all versions of CUDA 11.x from the Control Panel. If the folder `C:\Program Files\NVIDIA GPU Computing Toolkit` remains, delete it.
 
@@ -125,7 +125,7 @@ To ensure a smooth installation process when setting up OpenCV with CUDA support
 
 ### 5. Install Visual Studio 2022:
    - Run the following command:
-     ```bash
+     ```sh
      winget install Microsoft.VisualStudio.2022.Community
      ```
      After installation, modify your setup to include Desktop development with C++ and Python development. A system restart may be required.
