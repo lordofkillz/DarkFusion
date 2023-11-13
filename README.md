@@ -191,21 +191,26 @@ After setting up Ultralytics, you may need to install TensorRT from source for a
 
 ---
 
-UltraDarkFusion Discord: https://discord.gg/kGaWChbUtR
+**CONTRIBUTIONS AND SUPPORT**
+
+A special shoutout to everyone who has contributed to the development and improvement of UltraDarkFusion. Your insights and support have been invaluable.
+
+**UltraDarkFusion Discord:** Join us for discussions, support, and community updates: [https://discord.gg/kGaWChbUtR](https://discord.gg/kGaWChbUtR)
 
 Many thanks to all who helped and to all who had input on this. 
 Long call #1 tester, thanks for all your help.
 see Discord for links to their Discord servers and websites.
 
-
 Main inspiration was from DarkMark, a Linux-based label maker maintained by Stephane, the current developer for the Hank-AI Darknet repo.
-[DarkMark GitHub](https://github.com/stephanecharette/DarkMark)
+**DarkMark GitHub:** [https://github.com/stephanecharette/DarkMark](https://github.com/stephanecharette/DarkMark)
 
 Label Maker Pro (thanks EAL)!
-[Label Maker Pro Search](https://www.bing.com/search?q=easy+aimlock&form=ANNTH1&refig=6fdaa64b5fde434e9316148327c3c0a5&pc=EDGEDB)
+**Label Maker Pro Search:** [https://www.bing.com/search?q=easy+aimlock](https://www.bing.com/search?q=easy+aimlock)
 
-Outside of Darknet and Ultralytics, I utilized SAM. See GitHub: [SAM - Segment Anything Model](https://github.com/facebookresearch/segment-anything) and [GroundingDINO](https://github.com/IDEA-Research/GroundingDINO) for additional tools used in my projects.
+Outside of Darknet and Ultralytics, I utilized SAM. See GitHub:
+**SAM - Segment Anything Model:** [https://github.com/facebookresearch/segment-anything](https://github.com/facebookresearch/segment-anything) 
+**GroundingDINO:** [https://github.com/IDEA-Research/GroundingDINO](https://github.com/IDEA-Research/GroundingDINO) for additional tools used in my projects.
+
+**DarkFusion**
 
 
-
-*DarkFusion*
