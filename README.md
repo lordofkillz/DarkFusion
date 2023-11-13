@@ -3,18 +3,21 @@
 **UltraDarkFusion** is an advanced GUI application tailored for object detection, image processing, and computer vision. It simplifies workflows for collection, labeling, dataset management, model training, and visualization of real-time inferences.
 
 ## Features
+- <b>Annotation Tools:</b> Customizable bounding box annotation with YOLO format conversion.
+- <b>Dataset Management:</b> Tools for duplicate removal, image splitting, and dataset preparation.
+- <b>Image Augmentation:</b> Apply effects such as motion blur, noise, and lighting adjustments.
+- <b>Framework Integration:</b> Compatible with Darknet and Ultralytics frameworks.
+- <b>Model Training:</b> In-built training capabilities for Ultralytics and Darknet models.
+- <b>Visualization:</b> Automatic labeling and visualization using pre-trained .weights or .pt files for efficient model evaluation.
+- <b>Performance Metrics:</b> Analytics to monitor and optimize training progress.
+- <b>Hardware Acceleration:</b> Support for CUDA, OpenCL, and CPU backends.
+- <b>Customizable UI:</b> Themes, styling, and user-defined shortcuts.
+- <b>Video Processing:</b> Download YouTube videos, extract frames, or collect images from the screen directly.
+- <b>Segment Anything:</b> Correct bounding boxes to fit around your objects.
+- <b>Grounding-DINO:</b> Label anything in your classes.txt.
+- <b>TensorRT Support:</b> Support for .engine on Ultralytics YOLOv8.
 
-- **Annotation Tools**: Customizable bounding box annotation with YOLO format conversion.
-- **Dataset Management**: Tools for duplicate removal, image splitting, and dataset preparation.
-- **Image Augmentation**: Apply effects such as motion blur, noise, and lighting adjustments.
-- **Framework Integration**: Compatible with Darknet and Ultralytics frameworks.
-- **Model Training**: In-built training capabilities for Ultralytics and Darknet models.
-- **Visualization**: Automatic labeling and visualization using pre-trained `.weights` 
-  or `.pt` files for efficient model evaluation.
-- **Performance Metrics**: Analytics to monitor and optimize training progress.
-- **Hardware Acceleration**: Support for CUDA, OpenCL, and CPU backends.
-- **Customizable UI**: Themes, styling, and user-defined shortcuts.
-- **Video Processing**: Download YouTube videos, extract frames, or collect images from the screen directly.
+
 
 UltraDarkFusion is designed to be modular, enabling easy integration of new algorithms and streamlining the process from dataset preparation to model training.
 
