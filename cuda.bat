@@ -28,7 +28,17 @@ mkdir "%OPENCVP%/build"
 mkdir "%OPENCVP%/install"
 
 :: Opening Visual Studio builder
-call "%HOMEDRIVE%/Program Files/Microsoft Visual Studio/2022/Community/VC/Auxiliary/Build/vcvars64.bat"
+IF EXIST "%HOMEDRIVE%/Program Files/Microsoft Visual Studio/2022/Community/VC/Auxiliary/Build/vcvars64.bat" (
+    echo VS 2022 Detected
+    call "%HOMEDRIVE%/Program Files/Microsoft Visual Studio/2022/Community/VC/Auxiliary/Build/vcvars64.bat"
+) ELSE IF EXIST "%HOMEDRIVE%/Program Files (x86)/Microsoft Visual Studio/2019/Community/VC/Auxiliary/Build/vcvars64.bat" (
+    echo VS 2019 Detected
+    call "%HOMEDRIVE%/Program Files (x86)/Microsoft Visual Studio/2019/Community/VC/Auxiliary/Build/vcvars64.bat"
+) ELSE (
+    echo Neither VS 2022 nor VS 2019 was found.
+    pause
+    exit
+)
 
 :: Setting up environment variables
 set "openCvSource=%OPENCVP%/opencv-4.7.0"
