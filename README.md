@@ -41,9 +41,12 @@ This guide outlines the installation of UltraDarkFusion using OpenCL, bypassing 
    cd DarkFusion
    mkdir anaconda
    ```
-2. **NOT OPTIONAL** download the sam folder https://drive.google.com/file/d/1Dxhu3qv8Je-   NSMp1Xcn6_rD_EPI5OasK/view?usp=sharing extract to `c:/darkfusion/ultradarkfusion` or you will need to change source code.
+2. **NOT OPTIONAL**: Download the SAM folder for Grounding DINO and SAM weights. This complete folder can be obtained from the following source: [SAM Folder Google Drive](https://drive.google.com/file/d/1uHNMjLWSE0foJQkhar1U9Qh6PEPyQshm/view?usp=sharing). Extract it to `c:/darkfusion/ultradarkfusion` or you will need to change the source code.
 
-   **Option 2:** In the `ultradarkfusion` folder, create a folder called `Sam` and download the checkpoints from [this link](https://github.com/facebookresearch/segment-anything#model-checkpoints).
+   **Option 2**: In the `ultradarkfusion` folder, create a folder called `Sam` and download the checkpoints from [SAM Model Checkpoints](https://github.com/facebookresearch/segment-anything#model-checkpoints).
+   
+For Grounding DINO checkpoints: [Grounding DINO GitHub](https://github.com/IDEA-Research/GroundingDINO).
+
 
 
   **OPTIONAL** download my weights folder collection of mscoco pretrained .weights, .cfg and .pt its https://drive.google.com/file/d/1hMwNzGi2DnA19SbQdoA0OXCYzk8LwOPP/view?usp=sharing
