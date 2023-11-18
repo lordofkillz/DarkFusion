@@ -72,9 +72,7 @@ matplotlib.use('Qt5Agg')
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 from dino import run_groundingdino
-import torch
 
-from models.experimental import attempt_load
 # Create or get the root logger
 root_logger = logging.getLogger()
 # Remove any existing handlers on the root logger to prevent duplicate messages
