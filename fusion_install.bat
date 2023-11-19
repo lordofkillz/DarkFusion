@@ -36,7 +36,7 @@ setx /M OPENCV_OCL4DNN_CONFIG_PATH "%USERPROFILE%\AppData\Local\Temp\opencv\4.7\
 :: Update System PATH
 set pathkey="HKEY_LOCAL_MACHINE\System\CurrentControlSet\Control\Session Manager\Environment"
 for /F "usebackq skip=2 tokens=2*" %%A IN (`reg query %pathkey% /v Path`) do (
-    reg add %pathkey% /f /v Path /t REG_SZ /d "%%B;C:\DarkFusion\anaconda\env\fusion;C:\DarkFusion\UltraDarkFusion\TensorRT-8.6.1.6;C:\src\Darknet\build\src\Release\Darknet.exe;C:\Program Files\Darknet\bin\darknet.exe;C:\src\darknet.exe;"
+    reg add %pathkey% /f /v Path /t REG_SZ /d "%%B;C:\DarkFusion\anaconda\env\fusion;C:\DarkFusion\UltraDarkFusion\TensorRT-8.6.1.6;C:\DarkFusion\UltraDarkFusion\TensorRT;C:\src\Darknet\build\src\Release\Darknet.exe;C:\Program Files\Darknet\bin\darknet.exe;C:\src\darknet.exe;"
 )
 
 
