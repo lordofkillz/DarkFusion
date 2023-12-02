@@ -23,7 +23,9 @@ jobs:
         run: doxygen docs/doxyfile.in
 
       - name: Deploy to GitHub Pages
-        uses: JamesIves/github-pages-deploy-action@4.3.1
+        uses: JamesIves/github-pages-deploy-action@<latest_version>
+    
+
         with:
           branch: gh-pages # Target branch for GitHub Pages
           folder: docs/html # Replace with the path to your Doxygen output
