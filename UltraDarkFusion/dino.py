@@ -102,7 +102,7 @@ def run_groundingdino(image_directory_path: str):
     image_paths = [p for ext in image_formats for p in image_directory.glob(ext)]
 
     # Assuming you're processing images in batches of 4
-    batch_size = 100
+    batch_size = 5
     for i in range(0, len(image_paths), batch_size):
         batch = image_paths[i:i+batch_size]
     asyncio.run(process_images(image_directory_path, model, TEXT_PROMPT, class_names, BOX_THRESHOLD, TEXT_THRESHOLD))
