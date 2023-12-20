@@ -83,7 +83,7 @@ or simply just double click the .py
 
 
 
-# UltraDarkFusion Installation Guide (Part 2: DNN with CUDA)
+# UltraDarkFusion Installation Guide (Part 2: DNN with CUDA * if you completed step one u can ingore the same steps in part 2)
 
 Before proceeding with the installation, it's essential to assess your existing development environment. If you have a functioning setup with OpenCV and CUDA support, along with PyTorch, please consult the requirements.txt file for a list of required packages—install only the necessary ones.
 
