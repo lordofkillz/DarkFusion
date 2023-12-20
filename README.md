@@ -119,7 +119,6 @@ To ensure a smooth installation process when setting up OpenCV with CUDA support
    mkdir anaconda build install 
    ```
 
-
 ### 2. Download Anaconda:
    - Visit the official Anaconda website at [https://www.anaconda.com/products/distribution](https://www.anaconda.com/products/distribution) and download the appropriate version of Anaconda.
 
@@ -134,10 +133,17 @@ To ensure a smooth installation process when setting up OpenCV with CUDA support
      ```sh
      winget install Microsoft.VisualStudio.2022.Community
      ```
-     After installation, modify your setup to include Desktop development with C++ and Python development. A system restart may be required.
+     
 
      > **Note**: It's crucial to install Visual Studio before CUDA. If you change your Visual Studio version later, you'll need to reinstall CUDA.
-
+    
+      click on the "Windows Start" menu and run "Visual Studio Installer"
+      click on Modify
+      select Desktop Development With C++
+      select python development
+      click on Modify in the bottom-right corner, and then click on Yes
+      After installation, A system restart is required.
+     
 ### 6. Install CUDA and Cudnn:
    - Install CUDA 11.8.0. Download it [here](https://developer.nvidia.com/cuda-11-8-0-download-archive).
    - Download cuDNN 8.7.0 from [NVIDIA Developer](https://developer.nvidia.com/cudnn). Extract the contents to `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8`.
