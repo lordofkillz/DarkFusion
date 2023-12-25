@@ -24,16 +24,28 @@ UltraDarkFusion is designed to be modular, enabling easy integration of new algo
 ## 🚀 Getting Started with Installation
 
 Before diving into the code, let's set up your environment with the necessary build tools. Open up a command prompt and execute the following commands to download Git and CMake. These are essential tools for version control and building the project, respectively Install Git and cmake close the terminal after your done this allows it to refresh otherwise you may recieve and error.
-
-   ```sh
-   winget install git.git
-   winget install Kitware.CMake
-   ```
 ## Installation Guide
 
 ### Part 1: OpenCL without CUDA
 
 This guide outlines the installation of UltraDarkFusion without opencv_cuda.
+
+   ```sh
+   winget install git.git
+   winget install Kitware.CMake
+   winget install Microsoft.VisualStudio.2022.Community
+  ```
+ 
+
+ **Note**: It's crucial to install Visual Studio before CUDA. If you change your Visual Studio version later, you'll need to reinstall CUDA.
+    
+      click on the "Windows Start" menu and run "Visual Studio Installer"
+      click on Modify
+      select Desktop Development With C++
+      select python development
+      click on Modify in the bottom-right corner, and then click on Yes
+      After installation, A system restart is required.  ```
+
 
 #### Initial Setup
 
