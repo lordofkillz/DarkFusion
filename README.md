@@ -208,7 +208,7 @@ After setting up Ultralytics, you may need to install TensorRT from source for a
   pip install onnx_graphsurgeon\onnx_graphsurgeon-0.3.12-py2.py3-none-any.whl
   pip install protobuf==3.20.3
   ```
-
+5. `copy the files from tensorrt-8.6.1.6\lib folder to C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8\bin`
 
 
 
