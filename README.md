@@ -56,7 +56,7 @@ This guide outlines the installation of UltraDarkFusion without opencv_cuda.
    cd DarkFusion
    mkdir anaconda
    ```
-2. **NOT OPTIONAL**: Download the SAM folder for Grounding DINO and SAM weights. This complete folder can be obtained from the following source: [SAM Folder Google Drive](https://drive.google.com/file/d/1uHNMjLWSE0foJQkhar1U9Qh6PEPyQshm/view?usp=sharing). Extract it to `c:/darkfusion/ultradarkfusion` or you will need to change the source code.
+2. **NOT OPTIONAL**: Download the SAM folder for Grounding DINO and SAM weights. This complete folder can be obtained from the following source: [SAM Folder Google Drive](https://drive.google.com/drive/folders/1GHcul0EQgNnSwjMSr_mKsxMqmtOJN_EB?usp=sharing). Extract it to `c:/darkfusion/ultradarkfusion` or you will need to change the source code.
 
    **Option 2**: In the `ultradarkfusion` folder, create a folder called `Sam` and download the checkpoints from [SAM Model Checkpoints](https://github.com/facebookresearch/segment-anything#model-checkpoints).
    
