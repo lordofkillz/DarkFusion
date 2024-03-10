@@ -34,15 +34,14 @@ install neccessary build tools
   ```
 
  **Note**: It's crucial to install Visual Studio before CUDA. If you change your Visual Studio version later, you'll need to reinstall CUDA.
- 
-       ```
+
       click on the "Windows Start" menu and run "Visual Studio Installer"
       click on Modify
       select Desktop Development With C++
       select python development
       click on Modify in the bottom-right corner, and then click on Yes
       After installation, A system restart is required. 
-      ```
+   
       
  Clone UltraDarkFusion Repository:
    Warning: If a different version of OpenCV and contrib are already installed in your environment, ensure they are updated to match the required version for UltraDarkFusion.
