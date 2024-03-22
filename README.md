@@ -57,7 +57,7 @@ install neccessary build tools
    mkdir anaconda build install 
    ```
 
-**NOT OPTIONAL**: Download the SAM folder for Grounding DINO and SAM weights. This complete folder can be obtained from the following source: [SAM Folder Google Drive](https://drive.google.com/file/d/1JLH7kMc6FXdKz1fmoxO5AfLhASDzmpw8/view?usp=sharing). Extract it to `c:/darkfusion/ultradarkfusion` or you will need to change the source code.
+**NOT OPTIONAL**: Download the SAM folder for Grounding DINO and SAM weights. This complete folder can be obtained from the following source: [SAM Folder Google Drive](https://drive.google.com/file/d/1Tux3ncgLcCagQ0N3cC25XP4O_UwsjXbP/view?usp=sharing). Extract it to `c:/darkfusion/ultradarkfusion` or you will need to change the source code.
 
 **OPTIONAL** download my weights folder collection of mscoco pretrained .weights, .cfg and .pt its (https://drive.google.com/file/d/1hMwNzGi2DnA19SbQdoA0OXCYzk8LwOPP/view?usp=sharing).
 
