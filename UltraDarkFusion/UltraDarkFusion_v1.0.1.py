@@ -54,8 +54,7 @@ from PyQt5.QtWidgets import (QApplication, QFileDialog,
                              QGraphicsScene, QGraphicsTextItem, QGraphicsView,
                              QLabel, QMessageBox, QProgressBar,
                              QTableWidgetItem, QColorDialog, QMenu,QSplashScreen,QTableView, QVBoxLayout,QWidget,QHeaderView)
-from pytubefix import YouTube
-from pytubefix.cli import on_progress
+from pytube import YouTube
 from PyQt5 import QtWidgets, QtGui
 from skimage.metrics import structural_similarity as compare_ssim
 from sklearn.cluster import KMeans
