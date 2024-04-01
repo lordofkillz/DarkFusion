@@ -134,9 +134,20 @@ Main inspiration was from DarkMark, a Linux-based label maker maintained by Step
 Label Maker Pro (thanks EAL)!
 **Label Maker Pro Search:** [https://www.bing.com/search?q=easy+aimlock](https://www.bing.com/search?q=easy+aimlock)
 
-Outside of Darknet and Ultralytics, I utilized SAM. See GitHub:
-**SAM - Segment Anything Model:** [https://github.com/facebookresearch/segment-anything](https://github.com/facebookresearch/segment-anything) 
-**GroundingDINO:** [https://github.com/IDEA-Research/GroundingDINO](https://github.com/IDEA-Research/GroundingDINO) for additional tools used in my projects.
+# Acknowledgments
+
+This project makes use of several open-source packages and models. We would like to acknowledge the contributions of the following works:
+
+- **SAM - Segment Anything Model:** Developed by Facebook Research, SAM is an advanced tool for segmentation tasks that greatly enhanced our project's capabilities in distinguishing complex patterns in images. For more information on SAM, visit their GitHub repository: [SAM - Segment Anything Model](https://github.com/facebookresearch/segment-anything).
+
+- **GroundingDINO:** Provided by IDEA Research, GroundingDINO is an innovative approach to visual grounding, and it has been instrumental in improving the interpretability of our models. Additional details can be found at their GitHub repository: [GroundingDINO](https://github.com/IDEA-Research/GroundingDINO).
+
+- **Ultralytics YOLO:** Ultralytics' YOLO (You Only Look Once) models are state-of-the-art for object detection tasks. We've incorporated these models to provide fast and accurate detection capabilities for our project. More information on Ultralytics' YOLO can be found on their GitHub page: [Ultralytics YOLO](https://github.com/ultralytics).
+
+- **Darknet by Hank-AI:** Darknet is an open-source neural network framework that serves as the foundation for real-time object detection systems. The Hank-AI team has provided contributions that improve upon the original framework. For more details on their implementation, visit the GitHub repository: [Darknet by Hank-AI](https://github.com/hank-ai/darknet).
+
+
+
 
 **DarkFusion**
 
