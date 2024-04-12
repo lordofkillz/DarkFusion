@@ -2888,7 +2888,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.height_spin_slider.valueChanged.connect(self.update_roi)
         self.x_spin_slider.valueChanged.connect(self.update_roi)
         self.y_spin_slider.valueChanged.connect(self.update_roi)
-
+        self.stop_labeling = False
         self.current_item_index = None  # CHECK THIS
         self.thumbnail_index = 0      
         self.show()
