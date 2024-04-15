@@ -95,7 +95,7 @@ By following these steps, you will have Anaconda installed and configured, ready
    [TensorRT-8.6.1.6 for Windows 10](https://developer.nvidia.com/downloads/compute/machine-learning/tensorrt/secure/8.6.1/zip/TensorRT-8.6.1.6.Windows10.x86_64.cuda-11.8.zip)
 
  Extract the contents of the zip file to `C:\DarkFusion\UltraDarkFusion`.
-    Open a anaconda prompt
+    Open an anaconda prompt
 ```
    conda activate fusion
    cd C:\DarkFusion\UltraDarkFusion\TensorRT-8.6.1.6
@@ -128,24 +128,25 @@ Many thanks to all who helped and to all who had input on this.
 Long call #1 tester, thanks for all your help.
 see Discord for links to their Discord servers and websites.
 
-Main inspiration was from DarkMark, a Linux-based label maker maintained by Stephane, the current developer for the Hank-AI Darknet repo.
+The main inspiration was from DarkMark, a Linux-based label maker maintained by Stephane, the current developer for the Hank-AI Darknet repo.
 **DarkMark GitHub:** [https://github.com/stephanecharette/DarkMark](https://github.com/stephanecharette/DarkMark)
 
 Label Maker Pro (thanks EAL)!
 **Label Maker Pro Search:** [https://www.bing.com/search?q=easy+aimlock](https://www.bing.com/search?q=easy+aimlock)
 
-# Acknowledgments
 
+# Acknowledgments
 This project makes use of several open-source packages and models. We would like to acknowledge the contributions of the following works:
 
-- **SAM - Segment Anything Model:** Developed by Facebook Research, SAM is an advanced tool for segmentation tasks that greatly enhanced our project's capabilities in distinguishing complex patterns in images. For more information on SAM, visit their GitHub repository: [SAM - Segment Anything Model](https://github.com/facebookresearch/segment-anything).
+SAM  - Segment Anything Model: Developed by Facebook Research, SAM is an advanced tool for segmentation tasks that greatly enhanced our project's capabilities in distinguishing complex patterns in images. For more information on SAM, visit their GitHub repository: SAM - Segment Anything Model.
 
-- **GroundingDINO:** Provided by IDEA Research, GroundingDINO is an innovative approach to visual grounding, and it has been instrumental in improving the interpretability of our models. Additional details can be found at their GitHub repository: [GroundingDINO](https://github.com/IDEA-Research/GroundingDINO).
+GroundingDINO: Provided by IDEA Research, GroundingDINO is an innovative approach to visual grounding, and it has been instrumental in improving the interpretability of our models. Additional details can be found at their GitHub repository: GroundingDINO.
 
-- **Ultralytics YOLO:** Ultralytics' YOLO (You Only Look Once) models are state-of-the-art for object detection tasks. We've incorporated these models to provide fast and accurate detection capabilities for our project. More information on Ultralytics' YOLO can be found on their GitHub page: [Ultralytics YOLO](https://github.com/ultralytics).
+Ultralytics YOLO: Ultralytics' YOLO (You Only Look Once) models are state-of-the-art for object detection tasks. We've incorporated these models to provide fast and accurate detection capabilities for our project. More information on Ultralytics' YOLO can be found on their GitHub page: Ultralytics YOLO.
 
-- **Darknet by Hank-AI:** Darknet is an open-source neural network framework that serves as the foundation for real-time object detection systems. The Hank-AI team has provided contributions that improve upon the original framework. For more details on their implementation, visit the GitHub repository: [Darknet by Hank-AI](https://github.com/hank-ai/darknet).
+Darknet by Hank-AI: Darknet is an open-source neural network framework that serves as the foundation for real-time object detection systems. The Hank-AI team has provided contributions that improve upon the original framework. For more details on their implementation, visit the GitHub repository: Darknet by Hank-AI.
 
+SAHI - Slicing Aided Hyper Inference: SAHI is a utility tool for performing efficient and precise object detection, especially in large and cluttered image scenes. Its slicing mechanism helps in managing computational resources better while maintaining high accuracy levels. More information can be found at their GitHub repository: SAHI.
 
 
 
