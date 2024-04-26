@@ -30,18 +30,11 @@ install neccessary build tools
    ```sh
    winget install git.git
    winget install Kitware.CMake
-   winget install Microsoft.VisualStudio.2022.Community
+   winget install Microsoft.VisualStudio.2022.Community --silent --override "--wait --quiet --add ProductLang En-us --add Microsoft.VisualStudio.Workload.NativeDesktop --includeRecommended
   ```
+   *Note:* Ensure that you install Visual Studio before proceeding with CUDA installation. Changing your Visual Studio version after installing CUDA may require you to reinstall CUDA.
+     The build process for Microsoft Visual Studio can take some time, so please be patient. Please restart your computer after the installation is complete to make sure all components are properly integrated.
 
- **Note**: It's crucial to install Visual Studio before CUDA. If you change your Visual Studio version later, you'll need to reinstall CUDA.
-
-      click on the "Windows Start" menu and run "Visual Studio Installer"
-      click on Modify
-      select Desktop Development With C++
-      select python development
-      click on Modify in the bottom-right corner, and then click on Yes
-      After installation, A system restart is required. 
-   
       
  Clone UltraDarkFusion Repository:
    Warning: If a different version of OpenCV and contrib are already installed in your environment, ensure they are updated to match the required version for UltraDarkFusion.
@@ -59,7 +52,7 @@ install neccessary build tools
 
 **NOT OPTIONAL**: Download the SAM folder for Grounding DINO and SAM weights. This complete folder can be obtained from the following source: [SAM Folder Google Drive](https://drive.google.com/file/d/1Tux3ncgLcCagQ0N3cC25XP4O_UwsjXbP/view?usp=sharing). Extract it to `c:/darkfusion/ultradarkfusion` or you will need to change the source code.
 
-**OPTIONAL** download my weights folder collection of mscoco pretrained .weights, .cfg and .pt its (https://drive.google.com/file/d/1hMwNzGi2DnA19SbQdoA0OXCYzk8LwOPP/view?usp=sharing).
+**OPTIONAL** Download my weights folder collection of mscoco pretrained .weights, .cfg and .pt its (https://drive.google.com/file/d/1hMwNzGi2DnA19SbQdoA0OXCYzk8LwOPP/view?usp=sharing).
 
 ## Anaconda Setup for UltraDarkFusion
 
