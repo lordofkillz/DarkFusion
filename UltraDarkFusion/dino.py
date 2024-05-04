@@ -143,8 +143,8 @@ async def process_images(image_directory_path, model, TEXT_PROMPT, class_names, 
 
 def run_groundingdino(image_directory_path, overwrite):
     package_path = groundingdino.__path__[0]
-    config_full_path = os.path.join(package_path, "config", "GroundingDINO_SwinB_cfg.py")
-    model = load_model(config_full_path, "Sam/groundingdino_swinb_cogcoor.pth", device=DEVICE)
+    config_full_path = os.path.join(package_path, "config", "GroundingDINO_SwinT_OGC.py")
+    model = load_model(config_full_path, "Sam/groundingdino_swint_ogc.pth", device=DEVICE)
     with open(os.path.join(image_directory_path, 'classes.txt'), 'r') as f:
         class_names = [line.strip() for line in f.readlines() if line.strip() != ""]
 
