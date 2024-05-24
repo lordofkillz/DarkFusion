@@ -30,10 +30,36 @@ install neccessary build tools
    ```sh
    winget install git.git
    winget install Kitware.CMake
-   winget install Microsoft.VisualStudio.2022.Community --silent --override "--wait --quiet --add ProductLang En-us --add Microsoft.VisualStudio.Workload.NativeDesktop --includeRecommended
   ```
-   *Note:* Ensure that you install Visual Studio before proceeding with CUDA installation. Changing your Visual Studio version after installing CUDA may require you to reinstall CUDA.
-     The build process for Microsoft Visual Studio can take some time, so please be patient. Please restart your computer after the installation is complete to make sure all components are properly integrated.
+   ## Visual Studio 2019 Community Edition Installation Guide
+   
+   Follow these steps to download and install Visual Studio 2019 Community Edition, essential for C++ and Python development on Windows. This setup is required before installing CUDA.
+   
+   ### Step 1: Download
+   
+   Download Visual Studio 2019 Community Edition from the official Microsoft site:
+   
+   [Download Visual Studio 2019](https://my.visualstudio.com/Downloads?q=visual%20studio%202019&wt.mc_id=o~msft~vscom~older-downloads)
+   
+   ### Step 2: Installation
+   
+   Run the Installer: Execute the downloaded installer file.
+   
+   Modify Installation:
+   - Click on **Modify**.
+   - Select **Desktop development with C++**.
+   - Select **Python development**.
+   - Proceed with the installation.
+   
+   ### Step 3: Post-Installation
+   
+   Restart Your Computer: After the installation completes, restart your computer to ensure all components are properly integrated.
+   
+   #### Note
+   
+   - **CUDA Compatibility**: Ensure that Visual Studio is installed before installing CUDA. If you change your Visual Studio version after installing CUDA, you may need to reinstall CUDA.
+   - **Patience During Installation**: The build process for Microsoft Visual Studio can take some time, so please be patient.
+
 
       
  Clone UltraDarkFusion Repository:
