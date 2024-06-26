@@ -1,0 +1,116 @@
+/* This is a general setup for QWidget, it sets a dark background and light foreground */
+QWidget {
+    background-color: #333;
+    color: #EEE;
+}
+
+/* Headers */
+QHeaderView::section {
+    background-color: #007ACC;
+    color: #FFF;
+}
+
+/* Push Buttons */
+QPushButton {
+    background-color: #007ACC;
+    border: none;
+    color: #FFF;
+    padding: 5px;
+}
+
+QPushButton:hover {
+    background-color: #005999;
+}
+
+QPushButton:pressed {
+    background-color: #003366;
+}
+
+/* Checkboxes */
+QCheckBox {
+    color: #FFF;
+}
+
+/* Radio Buttons */
+QRadioButton {
+    color: #FFF;
+}
+
+/* Line Edits */
+QLineEdit {
+    background-color: #555;
+    color: #EEE;
+}
+
+/* Spin Boxes */
+QSpinBox {
+    background-color: #555;
+    color: #EEE;
+}
+
+/* Combo Boxes */
+QComboBox {
+    background-color: #555;
+    color: #EEE;
+}
+
+/* Progress Bars */
+QProgressBar {
+    background-color: #555;
+    color: #FFF;
+    border: none;
+}
+
+QProgressBar::chunk {
+    background-color: #007ACC;
+}
+
+/* Sliders */
+QSlider::groove:horizontal {
+    background: #555;
+    height: 5px;
+}
+
+QSlider::handle:horizontal {
+    background: #007ACC;
+    width: 15px;
+}
+
+/* Labels */
+QLabel {
+    color: #EEE;
+}
+
+/* Scroll Bars */
+QScrollBar:horizontal {
+    border: none;
+    background: #555;
+    height: 15px;
+    margin: 0px;
+}
+
+QScrollBar::handle:horizontal {
+    background: #007ACC;
+    min-width: 20px;
+}
+
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+    width: 0px;
+}
+
+/* Red Errors */
+QLabel#Error {
+    color: #FF0000;
+}
+
+/* Yellow Warnings */
+QLabel#Warning {
+    color: #FFFF00;
+}
+
+/* Light Blue Info */
+QLabel#Info {
+    color: #ADD8E6;
+}
+
+
