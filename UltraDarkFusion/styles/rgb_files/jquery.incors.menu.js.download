@@ -1,0 +1,64 @@
+$(document).ready(function() {
+  $(document).one('mousemove', function() {  
+    var collectionNames = ['g', 'o', 'i', 'v', 'm'];
+    var menuItemElems = $('.iex_menu_item');
+    var previewContainerElem = $('#menu_collection_preview_container');
+    var menuPreviewElemByCollectionName = {};
+    var backgroundPos = 0;
+    var intervalId = null;
+    var menuPreviewImages = [];
+  
+    for (var i = 0; i < collectionNames.length; ++i) {
+      var collectionName = collectionNames[i];
+      menuPreviewElem = $('<div class="menu_preview menu_preview_' + collectionName + '"><div class="menu_preview_image"></div></div>');
+      menuPreviewElemByCollectionName[collectionName] = menuPreviewElem;
+      previewContainerElem.append(menuPreviewElem);
+    }
+  
+    var menuPreviewImages = $('.menu_preview_image');
+  
+    menuItemElems.mouseenter(function() {
+      var menuItemElem = $(this);
+      this.over = true;
+      var collectionName = menuItemElem.attr('href')[1];
+      
+      if (menuItemElem.hasClass('iex_menu_item_i_collection_selected')) {
+        menuItemElem.css({ paddingTop: '2px', marginTop: '-1px', borderTopWidth: '0' });
+      } else if (menuItemElem.hasClass('iex_menu_item_i_collection')) {
+        menuItemElem.css({ paddingTop: '1px', marginTop: '-1px', borderTopWidth: '0', borderBottom: '1px solid #ccc' });
+      } else {
+        menuItemElem.css({ paddingTop: '1px', marginTop: '-1px' });
+      }
+      
+    
+      previewContainerElem.stop().fadeIn();
+      menuPreviewElemByCollectionName[collectionName].stop().fadeIn();
+    
+      if (intervalId === null) {
+        intervalId = window.setInterval(function() {
+          menuPreviewImages.css({backgroundPosition: (--backgroundPos) + 'px 0px'});
+        }, 50);
+      }
+    });
+    menuItemElems.mouseleave(function() {
+      if (this.over) {
+        var menuItemElem = $(this);
+        this.over = false;
+        var collectionName = menuItemElem.attr('href')[1];
+        if (menuItemElem.hasClass('iex_menu_item_i_collection_selected')) {
+          menuItemElem.css({ paddingTop: '0', marginTop: '0', borderTopWidth: '1px' });
+        } else if (menuItemElem.hasClass('iex_menu_item_i_collection')) {
+          menuItemElem.css({ paddingTop: '0', marginTop: '0', borderBottom: 'none' });
+        } else {
+          menuItemElem.css({ paddingTop: '0', marginTop: '0' });
+        }
+        
+        previewContainerElem.stop().fadeOut(function() {
+          window.clearInterval(intervalId);
+          intervalId = null;
+        });
+        menuPreviewElemByCollectionName[collectionName].stop().fadeOut();
+      }
+    });
+  });
+});
