@@ -1,0 +1,244 @@
+/*----- General Window/Widget -----*/
+QWidget {
+    background-color: #2b2b2b; /* Dark spaceship background */
+    color: #e6e6e6; /* Light metallic text color */
+}
+
+/*----- QLabel -----*/
+QLabel {
+    background-color: transparent; /* Transparent for cleaner look */
+    color: #00ccff; /* Futuristic blue text */
+    font-weight: bold;
+}
+
+/*----- QMenuBar -----*/
+QMenuBar {
+    background-color: #2d2d2d;
+    border: 1px solid #444;
+    color: #e6e6e6;
+}
+
+QMenuBar::item {
+    background-color: transparent;
+    padding: 5px;
+}
+
+QMenuBar::item:selected {
+    background-color: #00ccff; /* Highlighted with a futuristic blue */
+    color: #000;
+}
+
+QMenuBar::item:pressed {
+    background-color: #444;
+    color: #fff;
+}
+
+/*----- QMenu -----*/
+QMenu {
+    background-color: #333;
+    border: 1px solid #000;
+    padding: 5px;
+    color: #e6e6e6;
+}
+
+QMenu::item {
+    background-color: transparent;
+    padding: 5px 20px;
+}
+
+QMenu::item:selected {
+    background-color: #00ccff; /* Blue for hover */
+    color: #000;
+}
+
+/*----- QPushButton (Futuristic Button) -----*/
+QPushButton {
+    background-color: #444; /* Dark metallic base */
+    color: #e6e6e6; /* Light text */
+    font-size: 14px;
+    border: 2px solid #2a547f;
+    border-radius: 5px;
+    padding: 8px;
+}
+
+QPushButton:hover {
+    background-color: #2a547f; /* Glow effect with blue hover */
+    color: #fff;
+}
+
+QPushButton:pressed {
+    background-color: #d10000; /* Red for alert (Star Trek Red Alert style) */
+    color: #fff;
+}
+
+/*----- QCheckBox -----*/
+QCheckBox {
+    background-color: transparent;
+    color: #e6e6e6; /* White text */
+}
+
+QCheckBox::indicator {
+    background-color: #333;
+    border: 1px solid #00ccff; /* Futuristic blue border */
+    width: 15px;
+    height: 15px;
+}
+
+QCheckBox::indicator:checked {
+    background-color: #00ccff; /* Blue glow when checked */
+}
+
+QCheckBox::indicator:unchecked:hover {
+    border: 1px solid #ffcc00; /* Yellow border on hover */
+}
+
+/*----- QLineEdit (Input Fields) -----*/
+QLineEdit {
+    background-color: #444; /* Dark metallic background */
+    color: #00ccff; /* Blue text for a futuristic feel */
+    border: 1px solid #555;
+    padding: 5px;
+}
+
+/*----- QListView -----*/
+QListView {
+    background-color: #333; /* Dark background */
+    color: #e6e6e6; /* Light text */
+    border: 1px solid #444;
+}
+
+QListView::item {
+    padding: 5px;
+    background-color: #333;
+    color: #e6e6e6;
+}
+
+QListView::item:hover {
+    background-color: #00ccff; /* Blue highlight on hover */
+    color: #000;
+}
+
+QListView::item:selected {
+    background-color: #2a547f;
+    color: #fff;
+}
+
+/*----- QTableView & QTableWidget (Tables) -----*/
+QTableView {
+    background-color: #2b2b2b;
+    color: #e6e6e6;
+    border: 1px solid #444;
+    gridline-color: #555;
+}
+
+QTableView::item:hover {
+    background-color: #00ccff; /* Blue hover */
+    color: #000;
+}
+
+QTableView::item:selected {
+    background-color: #2a547f; /* Futuristic blue */
+    color: #fff;
+}
+
+QHeaderView::section {
+    background-color: #444; /* Darker header */
+    color: #e6e6e6;
+    padding: 5px;
+}
+
+/*----- QProgressBar (Progress Indicators) -----*/
+QProgressBar {
+    border: 1px solid #444;
+    background-color: #333;
+    text-align: center;
+    color: #e6e6e6;
+}
+
+QProgressBar::chunk {
+    background-color: #00ccff; /* Blue for progress */
+}
+
+/*----- QTabWidget -----*/
+QTabWidget::pane {
+    background-color: #2b2b2b;
+    border: 1px solid #444;
+}
+
+QTabBar::tab {
+    background-color: #444;
+    color: #e6e6e6;
+    padding: 8px;
+    border: 1px solid #555;
+}
+
+QTabBar::tab:selected {
+    background-color: #00ccff; /* Bright blue for active tab */
+    color: #000;
+}
+
+/*----- QToolButton (Toolbar Buttons) -----*/
+QToolButton {
+    background-color: #444;
+    color: #e6e6e6;
+    border: 1px solid #555;
+    border-radius: 4px;
+    padding: 5px;
+}
+
+QToolButton:hover {
+    background-color: #2a547f; /* Blue glow */
+}
+
+QToolButton:pressed {
+    background-color: #d10000; /* Red alert for pressed state */
+}
+
+/*----- QScrollBar (Scrollbar) -----*/
+QScrollBar:horizontal, QScrollBar:vertical {
+    background-color: #333;
+    border: 1px solid #444;
+}
+
+QScrollBar::handle:horizontal, QScrollBar::handle:vertical {
+    background-color: #00ccff; /* Blue handle */
+}
+
+QScrollBar::add-line, QScrollBar::sub-line {
+    background-color: #444;
+}
+
+/*----- QStatusBar (Status Area) -----*/
+QStatusBar {
+    background-color: #2b2b2b;
+    color: #e6e6e6;
+}
+
+/*----- QSizeGrip -----*/
+QSizeGrip {
+    background-color: #333;
+}
+
+/*----- QSpinBox & QDoubleSpinBox -----*/
+QSpinBox, QDoubleSpinBox {
+    background-color: #444;
+    color: #e6e6e6;
+    border: 1px solid #555;
+    padding: 5px;
+}
+
+QSpinBox::up-button, QDoubleSpinBox::up-button {
+    background-color: #555;
+}
+
+QSpinBox::down-button, QDoubleSpinBox::down-button {
+    background-color: #555;
+}
+
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
+    image: url(://arrow-up.png);
+}
+
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
+    image: url(://arrow-down.png);
+}

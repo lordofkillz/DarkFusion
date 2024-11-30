@@ -1,0 +1,144 @@
+/* General Background and Text Colors */
+QWidget {
+    background-color: rgb(20, 20, 20); /* Dark, muted background */
+    color: rgb(200, 50, 50); /* Blood-red text for a vampiric feel */
+    border-radius: 6px;
+}
+
+/* Labels */
+QLabel {
+    color: rgb(220, 60, 60); /* Slightly brighter red for labels */
+    background-color: transparent; /* Let it blend with the eerie background */
+}
+
+/* Frames */
+QFrame {
+    background: rgba(40, 0, 0, 0.8); /* Semi-transparent blood hue */
+    border: 1px solid rgb(100, 20, 20); /* Dark red borders */
+    border-radius: 4px;
+}
+
+/* Buttons */
+QPushButton {
+    background-color: rgb(80, 0, 0); /* Deep red */
+    color: rgb(200, 50, 50); /* Blood-red text */
+    border: 1px solid rgb(100, 20, 20); /* Dark red border */
+    border-radius: 6px;
+    padding: 5px;
+}
+
+QPushButton:hover {
+    background-color: rgb(120, 0, 0); /* Brighter red on hover */
+    border: 1px solid rgb(220, 60, 60); /* Highlighted border */
+}
+
+QPushButton:pressed {
+    background-color: rgb(60, 0, 0); /* Darker pressed effect */
+    border: 1px solid rgb(150, 30, 30);
+}
+
+/* Scrollbars */
+QScrollBar:vertical, QScrollBar:horizontal {
+    background-color: rgb(30, 0, 0); /* Dark blood red */
+    border: 1px solid rgb(100, 20, 20); /* Subtle red border */
+}
+
+QScrollBar::handle {
+    background-color: rgb(200, 50, 50); /* Blood-red scrollbar handle */
+    border-radius: 3px;
+}
+
+QScrollBar::handle:hover {
+    background-color: rgb(220, 60, 60); /* Brighter on hover */
+}
+
+/* Progress Bars */
+QProgressBar {
+    border: 1px solid rgb(100, 20, 20);
+    color: rgb(200, 50, 50);
+    background-color: rgb(30, 0, 0); /* Background */
+    text-align: center;
+}
+
+QProgressBar::chunk {
+    background: rgb(200, 50, 50); /* Blood red fill */
+    border-radius: 3px;
+}
+
+/* ComboBoxes */
+QComboBox {
+    background-color: rgb(40, 0, 0); /* Deep red */
+    color: rgb(200, 50, 50); /* Blood red text */
+    border: 1px solid rgb(100, 20, 20); /* Dark red border */
+    border-radius: 4px;
+}
+
+QComboBox::drop-down {
+    background-color: rgb(100, 20, 20); /* Darker drop-down button */
+    border: none;
+}
+
+QComboBox QAbstractItemView {
+    background-color: rgb(30, 0, 0); /* Dropdown background */
+    color: rgb(200, 50, 50); /* Dropdown text */
+}
+
+/* Tab Bars */
+QTabBar::tab {
+    background-color: rgb(30, 0, 0); /* Dark blood red */
+    color: rgb(200, 50, 50); /* Blood red text */
+    border: 1px solid rgb(100, 20, 20);
+    padding: 5px;
+}
+
+QTabBar::tab:selected {
+    background-color: rgb(100, 20, 20); /* Brighter red when selected */
+}
+
+/* Menus */
+QMenuBar {
+    background-color: rgb(30, 0, 0); /* Subtle red */
+    color: rgb(200, 50, 50); /* Blood-red text */
+}
+
+QMenuBar::item:selected {
+    background-color: rgb(100, 20, 20); /* Highlight */
+}
+
+QMenu {
+    background-color: rgb(40, 0, 0); /* Deep red */
+    color: rgb(200, 50, 50);
+    border: 1px solid rgb(100, 20, 20);
+}
+
+QMenu::item:selected {
+    background-color: rgb(100, 20, 20);
+}
+
+/* Line Edits */
+QLineEdit {
+    background-color: rgb(30, 0, 0);
+    color: rgb(200, 50, 50);
+    border: 1px solid rgb(100, 20, 20);
+    padding: 4px;
+}
+
+/* Checkboxes */
+QCheckBox {
+    color: rgb(200, 50, 50);
+}
+
+QCheckBox::indicator:checked {
+    background-color: rgb(200, 50, 50); /* Blood red for checked */
+    border: 1px solid rgb(100, 20, 20);
+}
+
+/* Radio Buttons */
+QRadioButton {
+    color: rgb(200, 50, 50);
+}
+
+QRadioButton::indicator:checked {
+    background-color: rgb(200, 50, 50); /* Blood red for checked */
+    border: 1px solid rgb(100, 20, 20);
+}

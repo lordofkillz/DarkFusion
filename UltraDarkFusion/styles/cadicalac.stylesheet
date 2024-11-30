@@ -1,0 +1,156 @@
+
+/* General styling for QWidget */
+QWidget {
+    background-color: #b11226; /* Candy Apple Red background */
+    color: #ffffff; /* White text color for readability */
+    selection-background-color: #d4af37; /* Gold selection color */
+    selection-color: #000000; /* Black selected text color */
+    font-family: "Segoe UI", Arial, sans-serif; /* Modern font */
+    font-size: 14px; /* Larger font size for readability */
+}
+
+/* QLabel styling */
+QLabel {
+    background-color: transparent;
+    color: #ffffff; /* White text color for labels */
+    font-size: 13px;
+    padding: 2px 4px; /* Slight padding for spacing */
+}
+
+/* QFrame styling */
+QFrame {
+    background-color: #8b0000; /* Dark red for frames */
+    border: 2px solid #d4af37; /* Gold border for frame */
+    border-radius: 5px;
+    margin: 4px;
+}
+
+/* QToolBox styling */
+QToolBox {
+    background-color: #8b0000; /* Dark red background for toolbox */
+    color: #ffffff; /* White text color */
+    border: 1px solid #d4af37; /* Gold border */
+}
+
+QToolBox::tab {
+    background: #b11226; /* Candy Apple Red for toolbox tabs */
+    color: #ffffff; /* White text color for tabs */
+    padding: 6px;
+    border-radius: 4px; /* Rounded tab corners */
+    margin: 1px;
+}
+
+QToolBox::tab:selected {
+    background: #d1222e; /* Brighter red for selected tab */
+    font-weight: bold; /* Bold text for active tab */
+}
+
+/* QTabWidget styling */
+QTabWidget::pane { /* The main background of the tab widget */
+    border-top: 2px solid #8b0000; /* Dark red line at the top of tab pane */
+}
+
+QTabBar::tab {
+    background: #8b0000; /* Dark red background for tabs */
+    color: #ffffff; /* White text color for tab labels */
+    border: 1px solid #d4af37; /* Gold border around tabs */
+    padding: 6px;
+    border-top-left-radius: 4px;
+    border-top-right-radius: 4px;
+    margin-right: 2px;
+}
+
+QTabBar::tab:selected {
+    background: #d1222e; /* Brighter red for selected tab */
+    border-color: #b11226;
+}
+
+QTabBar::tab:hover {
+    background: #c82333; /* Lighter red on hover */
+}
+
+/* QPushButton styling */
+QPushButton {
+    background-color: #b11226; /* Candy Apple Red */
+    color: #ffffff;
+    border: 1px solid #8b0000; /* Dark red border */
+    padding: 6px 12px;
+    border-radius: 8px;
+    font-size: 13px;
+}
+
+QPushButton::hover {
+    background-color: #d1222e; /* Brighter red on hover */
+    border: 1px solid #d4af37;
+}
+
+QPushButton::pressed {
+    background-color: #a3122b; /* Darker red on press */
+    border: 1px solid #8b0000;
+}
+
+/* QScrollArea styling */
+QScrollArea {
+    background-color: #8b0000; /* Dark red background for scroll area */
+    border: 1px solid #d4af37; /* Gold border */
+    border-radius: 6px;
+    padding: 4px;
+}
+
+/* QScrollBar styling */
+QScrollBar:vertical, QScrollBar:horizontal {
+    background-color: #8b0000; /* Dark red for scrollbar background */
+    width: 10px;
+    height: 10px;
+    margin: 2px;
+    border-radius: 5px;
+}
+
+QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
+    background-color: #d4af37; /* Gold for scrollbar handle */
+    min-height: 20px;
+    min-width: 20px;
+    border-radius: 5px;
+}
+
+QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover {
+    background-color: #e3c15e; /* Brighter gold on hover */
+}
+
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical, 
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+    background: none;
+}
+
+/* QLineEdit styling */
+QLineEdit {
+    background-color: #ffffff; /* White input background */
+    color: #000000; /* Black text for input fields */
+    border: 1px solid #b11226; /* Candy Apple Red border */
+    padding: 4px 6px;
+    border-radius: 6px;
+}
+
+/* QCheckBox styling */
+QCheckBox {
+    spacing: 6px;
+    color: #ffffff;
+    font-size: 13px;
+}
+
+QCheckBox::indicator {
+    width: 16px;
+    height: 16px;
+}
+
+QCheckBox::indicator:checked {
+    background-color: #d4af37;
+    border: 1px solid #8b0000;
+    border-radius: 4px;
+}
+
+QCheckBox::indicator:unchecked {
+    background-color: #b11226;
+    border: 1px solid #8b0000;
+    border-radius: 4px;
+}

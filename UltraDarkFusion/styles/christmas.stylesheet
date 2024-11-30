@@ -1,0 +1,154 @@
+
+/* General QWidget styling */
+QWidget {
+    background-color: #2E8B57; /* Christmas Green */
+    color: #FFFFFF; /* White text for contrast */
+    font-family: "Segoe UI", Arial, sans-serif;
+    font-size: 14px;
+}
+
+/* QLabel styling */
+QLabel {
+    background-color: transparent;
+    color: #FF0000; /* Christmas Red for labels */
+    font-size: 13px;
+    padding: 2px 4px;
+}
+
+/* QFrame styling */
+QFrame {
+    background-color: rgba(255, 255, 255, 0.8); /* Semi-transparent white, snowy effect */
+    border: 2px solid #FF0000; /* Christmas Red border */
+    border-radius: 6px;
+    margin: 4px;
+}
+
+/* QToolBox styling */
+QToolBox {
+    background-color: #2E8B57; /* Christmas Green for toolbox */
+    color: #FFFFFF;
+    border: 1px solid #FF0000; /* Red border for festive look */
+}
+
+QToolBox::tab {
+    background: #FF6347; /* Festive Red-Orange for toolbox tabs */
+    color: #FFFFFF;
+    padding: 6px;
+    border-radius: 4px;
+    margin: 1px;
+}
+
+QToolBox::tab:selected {
+    background: #FF0000; /* Bright Christmas Red for selected tab */
+    font-weight: bold;
+}
+
+/* QTabWidget styling */
+QTabWidget::pane {
+    border-top: 2px solid #FF0000; /* Red border on top for festive tabs */
+}
+
+QTabBar::tab {
+    background: #2E8B57; /* Green for tabs */
+    color: #FFFFFF; /* White text on tabs */
+    border: 1px solid #FF0000; /* Red border around tabs */
+    padding: 6px;
+    border-top-left-radius: 4px;
+    border-top-right-radius: 4px;
+    margin-right: 2px;
+}
+
+QTabBar::tab:selected {
+    background: #FF0000; /* Red for selected tab */
+    border-color: #2E8B57; /* Green border */
+}
+
+QTabBar::tab:hover {
+    background: #FF6347; /* Lighter red on hover */
+}
+
+/* QPushButton styling */
+QPushButton {
+    background-color: #FF0000; /* Bright Red */
+    color: #FFFFFF; /* White text on button */
+    border: 1px solid #8B0000; /* Dark Red border */
+    padding: 6px 12px;
+    border-radius: 8px;
+    font-size: 13px;
+}
+
+QPushButton::hover {
+    background-color: #FF6347; /* Lighter red on hover */
+    border: 1px solid #FF0000;
+}
+
+QPushButton::pressed {
+    background-color: #8B0000; /* Darker red on press */
+    border: 1px solid #FF6347;
+}
+
+/* QScrollArea styling */
+QScrollArea {
+    background-color: #2E8B57; /* Green background */
+    border: 1px solid #FF0000; /* Red border */
+    border-radius: 6px;
+    padding: 4px;
+}
+
+/* QScrollBar styling */
+QScrollBar:vertical, QScrollBar:horizontal {
+    background-color: #8B4513; /* Brown for scrollbars */
+    width: 10px;
+    height: 10px;
+    margin: 2px;
+    border-radius: 5px;
+}
+
+QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
+    background-color: #FFFFFF; /* White handle */
+    min-height: 20px;
+    min-width: 20px;
+    border-radius: 5px;
+}
+
+QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover {
+    background-color: #FF0000; /* Red handle on hover */
+}
+
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical, 
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+    background: none;
+}
+
+/* QLineEdit styling */
+QLineEdit {
+    background-color: #FFFFFF; /* White input field */
+    color: #2E8B57; /* Green text inside */
+    border: 1px solid #FF0000; /* Red border */
+    padding: 4px 6px;
+    border-radius: 6px;
+}
+
+/* QCheckBox styling */
+QCheckBox {
+    spacing: 6px;
+    color: #FFFFFF; /* White text for checkboxes */
+    font-size: 13px;
+}
+
+QCheckBox::indicator {
+    width: 16px;
+    height: 16px;
+}
+
+QCheckBox::indicator:checked {
+    background-color: #FF0000; /* Red check */
+    border: 1px solid #8B0000; /* Dark Red border */
+    border-radius: 4px;
+}
+
+QCheckBox::indicator:unchecked {
+    background-color: #2E8B57; /* Green for unchecked */
+    border: 1px solid #FF0000;
+    border-radius: 4px;
+}

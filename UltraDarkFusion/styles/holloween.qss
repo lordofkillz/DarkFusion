@@ -1,0 +1,193 @@
+/* General Halloween dark theme with blood red accents */
+
+/*-----QWidget-----*/
+QWidget {
+    background-color: #0f0f0f; /* Dark background */
+    color: #ffebcc; /* Ghostly pale text */
+    border-color: #000000; /* Pitch-black borders */
+}
+
+/*-----QLabel-----*/
+QLabel {
+    background-color: transparent; /* No background */
+    color: #ffebcc; /* Pale ghostly text */
+    font-weight: bold; /* Bold text */
+    font-size: 14px; /* Slightly larger for readability */
+    border-color: #000000; /* Black border for clear separation */
+}
+
+/*-----QPushButton-----*/
+QPushButton {
+    background-color: #d10000; /* Blood red background */
+    color: #ffebcc; /* Pale text to pop against red */
+    font-weight: bold; /* Strong, bold text */
+    border: 2px solid #d10000; /* Blood-red border */
+    border-radius: 5px; /* Rounded for a softer spooky feel */
+    padding: 6px;
+}
+
+QPushButton::hover {
+    background-color: #ad0000; /* Darker red on hover */
+    color: #ffebcc; /* Keep the pale text */
+}
+
+QPushButton::pressed {
+    background-color: #8b0000; /* Even darker for a blood-like effect */
+    color: #ffebcc; /* Pale text */
+}
+
+/*-----QToolButton-----*/
+QToolButton {
+    background-color: transparent;
+    color: #ffebcc; /* Pale text */
+    border-style: solid;
+    border-color: #ff0000; /* Red border */
+}
+
+QToolButton::hover {
+    background-color: #d10000; /* Blood red hover */
+    color: #ffebcc;
+    border-radius: 10px;
+    border-color: #d10000;
+}
+
+QToolButton::pressed {
+    background-color: #ad0000;
+    color: #ffebcc;
+    border-width: 0px;
+}
+
+/*-----QLineEdit-----*/
+QLineEdit {
+    background-color: #4d4d4d; /* Dark gray, like foggy night */
+    color: #ffebcc; /* Pale text */
+    font-weight: bold;
+    border-style: solid;
+    border-color: #d10000; /* Blood red border */
+    border-radius: 5px;
+    padding: 5px;
+}
+
+/*-----QCheckBox-----*/
+QCheckBox {
+    background-color: transparent;
+    color: #b9b9bb; /* Dull gray text */
+    font-weight: bold;
+}
+
+QCheckBox::indicator {
+    color: #b1b1b1;
+    background-color: #00111d; /* Deep night blue */
+    border: 1px solid #d10000; /* Red border */
+    width: 12px;
+    height: 12px;
+}
+
+QCheckBox::indicator:checked {
+    image: url("./ressources/check.png"); /* Replace with your spooky icon */
+    background-color: #d10000; /* Blood red */
+    border: 1px solid #d10000;
+}
+
+QCheckBox::indicator:unchecked:hover {
+    border: 1px solid #ff0000; /* Blood red on hover */
+}
+
+QCheckBox::disabled {
+    color: #656565; /* Dark gray, lifeless */
+}
+
+QCheckBox::indicator:disabled {
+    background-color: #656565;
+    color: #656565;
+    border: 1px solid #656565;
+}
+
+/*-----QRadioButton-----*/
+QRadioButton {
+    background-color: transparent;
+    color: #b9b9bb; /* Dull gray for inactive state */
+    font-weight: bold;
+}
+
+QRadioButton::indicator {
+    background-color: #00111d; /* Dark night color */
+    border: 1px solid #d10000; /* Red border */
+    width: 12px;
+    height: 12px;
+}
+
+QRadioButton::indicator::checked {
+    background-color: #d10000; /* Blood red for checked */
+}
+
+QRadioButton::indicator::unchecked:hover {
+    border: 1px solid #ff0000; /* Hover effect with red */
+}
+
+/*-----QComboBox-----*/
+QComboBox {
+    background-color: #4d4d4d; /* Dark gray like foggy streets */
+    color: #ffebcc; /* Pale text */
+    border: 1px solid #d10000; /* Red border */
+    border-radius: 5px;
+    padding: 5px;
+}
+
+QComboBox::drop-down {
+    background-color: #ad0000; /* Red when dropdown opens */
+    color: #ffebcc;
+}
+
+QComboBox::item {
+    background-color: #333; /* Darker background for items */
+    color: #ffebcc;
+}
+
+/*-----QSlider-----*/
+QSlider::groove:horizontal {
+    border: 1px solid #d10000; /* Red groove */
+    height: 8px;
+    background: #4d4d4d;
+}
+
+QSlider::handle:horizontal {
+    background: #d10000; /* Blood red handle */
+    border: 1px solid #d10000;
+    width: 14px;
+    margin: -2px 0;
+}
+
+QSlider::handle:horizontal:hover {
+    background: #ad0000; /* Darker red on hover */
+}
+
+/*-----QProgressBar-----*/
+QProgressBar {
+    border: 1px solid #d10000; /* Red border */
+    border-radius: 5px;
+    text-align: center;
+    color: #ffebcc; /* Pale text */
+    background-color: #4d4d4d;
+}
+
+QProgressBar::chunk {
+    background-color: #d10000; /* Blood red progress bar */
+    width: 20px;
+}
+
+/*-----QScrollBar-----*/
+QScrollBar:vertical {
+    background-color: #4d4d4d; /* Dark gray */
+    width: 15px;
+}
+
+QScrollBar::handle:vertical {
+    background-color: #d10000; /* Blood red scroll handle */
+    border-radius: 5px;
+    min-height: 20px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background-color: #ad0000; /* Darker red on hover */
+}

@@ -1,0 +1,232 @@
+/* General American Patriotic Theme */
+
+/*-----QWidget-----*/
+QWidget {
+    background-color: #ffffff; /* White background */
+    color: #000000; /* Black text for better readability */
+}
+
+/*-----QLabel-----*/
+QLabel {
+    background-color: transparent;
+    color: #2a547f; /* Dark blue text */
+    font-weight: bold;
+    font-size: 14px;
+}
+
+/*-----QPushButton-----*/
+QPushButton {
+    background-color: #2a547f; /* American flag blue */
+    color: #ffffff; /* White text */
+    font-size: 13px;
+    font-weight: bold;
+    border-top-right-radius: 15px;
+    border-bottom-left-radius: 15px;
+    padding: 10px;
+    border: 2px solid #2a547f; /* Matching border */
+}
+
+QPushButton::hover {
+    background-color: #ff0000; /* Red hover effect */
+    color: #ffffff;
+}
+
+QPushButton::pressed {
+    background-color: #d10000; /* Darker red when pressed */
+}
+
+/*-----QCheckBox-----*/
+QCheckBox {
+    background-color: transparent;
+    color: #2a547f; /* Blue text */
+    font-size: 12px;
+    font-weight: bold;
+    border: none;
+    border-radius: 5px;
+}
+
+QCheckBox::indicator {
+    background-color: #ffffff; /* White background */
+    border: 1px solid #2a547f; /* Blue border */
+    width: 15px;
+    height: 15px;
+}
+
+QCheckBox::indicator:checked {
+    background-color: #2a547f; /* Blue when checked */
+    border: 1px solid #ff0000; /* Red border when checked */
+    image:url("./resources/star_check.png"); /* Replace with a star icon for checked indicator */
+}
+
+QCheckBox::indicator:unchecked:hover {
+    border: 1px solid #ff0000; /* Red border on hover */
+}
+
+/*-----QLineEdit-----*/
+QLineEdit {
+    background-color: #e6e6e6; /* Light gray for clean, readable input */
+    color: #2a547f; /* Blue text */
+    border: 2px solid #2a547f; /* Blue border */
+    padding: 5px;
+}
+
+/*-----QListView-----*/
+QListView {
+    background-color: #ffffff;
+    color: #2a547f; /* Blue text */
+    font-size: 14px;
+    font-weight: bold;
+    border-radius: 5px;
+    padding: 5px;
+}
+
+QListView::item {
+    background-color: #ffffff;
+    border: none;
+    padding: 10px;
+    color: #2a547f;
+}
+
+QListView::item:selected {
+    background-color: #ff0000; /* Red background for selected items */
+    color: #ffffff; /* White text */
+}
+
+QListView::item:!selected:hover {
+    background-color: #ffcccc; /* Light red hover */
+}
+
+/*-----QTreeView-----*/
+QTreeView {
+    background-color: #ffffff;
+    color: #2a547f;
+}
+
+QTreeView::item:hover {
+    background-color: #ffcccc;
+    color: #000000;
+}
+
+QTreeView::item:selected {
+    background-color: #ff0000;
+    color: #ffffff;
+}
+
+/*-----QTableView & QTableWidget-----*/
+QTableView {
+    background-color: #ffffff;
+    border: 1px solid #2a547f; /* Blue border */
+    color: #2a547f;
+}
+
+QTableView::item:hover {
+    background-color: #ffcccc; /* Light red hover */
+    color: #000000;
+}
+
+QTableView::item:selected {
+    background-color: #ff0000; /* Red background */
+    color: #ffffff; /* White text */
+}
+
+QHeaderView::section {
+    background-color: #2a547f; /* Blue header */
+    color: #ffffff; /* White text */
+    padding: 5px;
+}
+
+/*-----QScrollBar-----*/
+QScrollBar:horizontal, QScrollBar:vertical {
+    background-color: transparent;
+    margin: 0px;
+}
+
+QScrollBar::handle:horizontal, QScrollBar::handle:vertical {
+    background-color: #2a547f; /* Blue scroll handle */
+    border: 1px solid #2a547f;
+}
+
+QScrollBar::add-line, QScrollBar::sub-line {
+    background-color: #ff0000; /* Red scroll buttons */
+}
+
+/*-----QProgressBar-----*/
+QProgressBar {
+    border: 1px solid #2a547f;
+    border-radius: 5px;
+    background-color: #ffffff;
+    text-align: center;
+    color: #2a547f;
+}
+
+QProgressBar::chunk {
+    background-color: #ff0000; /* Red progress chunk */
+}
+
+/*-----QTabWidget-----*/
+QTabWidget::pane {
+    background-color: #ffffff;
+    border: 1px solid #2a547f; /* Blue pane border */
+}
+
+QTabBar::tab {
+    background-color: #ffffff;
+    color: #2a547f; /* Blue text */
+    padding: 5px;
+    border: 1px solid #2a547f;
+}
+
+QTabBar::tab:selected {
+    background-color: #ff0000; /* Red selected tab */
+    color: #ffffff; /* White text */
+}
+
+/*-----QGroupBox-----*/
+QGroupBox {
+    background-color: transparent;
+    border: 2px solid #2a547f;
+    border-radius: 5px;
+    margin-top: 20px;
+}
+
+QGroupBox::title {
+    color: #2a547f;
+    font-weight: bold;
+}
+
+/*-----QToolBox-----*/
+QToolBox::tab {
+    background-color: #ffffff;
+    color: #2a547f; /* Blue text */
+    border: 1px solid #2a547f;
+    border-radius: 5px;
+    padding: 5px;
+}
+
+QToolBox::tab:selected {
+    background-color: #ff0000; /* Red selected tab */
+}
+
+/*-----QMenuBar-----*/
+QMenuBar {
+    background-color: #ffffff;
+    color: #2a547f; /* Blue text */
+}
+
+QMenuBar::item:selected {
+    background-color: #ff0000; /* Red hover effect */
+    color: #ffffff;
+}
+
+/*-----QStatusBar-----*/
+QStatusBar {
+    background-color: #ffffff;
+    color: #2a547f;
+    border-top: 1px solid #2a547f;
+}
+
+/*-----QFrame-----*/
+QFrame {
+    background-color: transparent;
+    border: 1px solid #2a547f;
+}

@@ -1,0 +1,263 @@
+/* General styling for QWidget */
+QWidget {
+    background-color: rgb(19, 23, 37); /* Background color */
+    color: rgb(238, 238, 238); /* Text color */
+    selection-background-color: rgb(91, 0, 178); /* Selection color */
+    selection-color: rgb(28, 28, 28); /* Selected text color */
+    border-radius: 6px;
+}
+
+/* QLabel styling */
+QLabel {
+    background-color: transparent;
+    color: rgb(238, 238, 238); /* Text color */
+}
+
+/* QPushButton styling */
+QPushButton {
+    background-color: rgb(91, 0, 178); /* Button background */
+    color: rgb(238, 238, 238); /* Button text color */
+    border: 1px solid rgb(0, 0, 0);
+    border-radius: 4px;
+    padding: 5px;
+}
+
+QPushButton::hover {
+    background-color: rgba(244, 244, 0, 51); /* Hover background */
+    border: 1px solid rgb(244, 244, 0); /* Hover border */
+}
+
+QPushButton::pressed {
+    background-color: rgb(19, 23, 37); /* Pressed button background */
+    border: 1px solid rgb(244, 244, 0); /* Pressed border */
+}
+
+/* QGroupBox styling */
+QGroupBox {
+    border: 1px solid rgb(91, 0, 178); /* GroupBox border */
+    border-radius: 5px;
+    margin-top: 20px;
+}
+
+QGroupBox::title {
+    background-color: transparent;
+    color: rgb(238, 238, 238); /* Title text color */
+    subcontrol-origin: margin;
+    padding: 5px;
+}
+
+/* QLineEdit and QPlainTextEdit styling */
+QLineEdit, QPlainTextEdit {
+    background-color: rgb(28, 28, 28); /* Text background */
+    color: rgb(238, 238, 238); /* Text color */
+    border: 1px solid #222;
+    border-radius: 2px;
+    padding: 3px;
+    padding-left: 5px;
+}
+
+/* QTableWidget styling */
+QTableWidget {
+    background-color: rgb(28, 28, 28); /* Table background */
+    color: rgb(238, 238, 238); /* Table text color */
+    gridline-color: rgb(91, 0, 178); /* Gridline color */
+}
+
+QTableWidget QHeaderView::section {
+    background-color: rgb(91, 0, 178); /* Header background */
+    color: rgb(238, 238, 238); /* Header text */
+    padding: 5px;
+}
+
+/* QScrollArea styling */
+QScrollArea {
+    background-color: rgb(9, 13, 27); /* Scroll area background */
+}
+
+/* QTabWidget styling */
+QTabWidget::pane {
+    border: 1px solid rgb(91, 0, 178); /* Pane border */
+    border-radius: 8px;
+}
+
+QTabBar::tab {
+    background-color: rgb(91, 0, 178); /* Tab background */
+    color: rgb(238, 238, 238); /* Tab text */
+    border: 1px solid #444;
+    padding: 6px;
+}
+
+QTabBar::tab:selected {
+    background-color: rgb(244, 244, 0); /* Selected tab background */
+    color: rgb(28, 28, 28); /* Selected tab text */
+    border-bottom: 2px solid rgb(244, 244, 0);
+}
+
+QTabBar::tab:!selected {
+    background-color: rgb(0, 0, 0); /* Unselected tab background */
+}
+
+QTabBar::tab:hover {
+    background-color: rgba(244, 244, 0, 51); /* Hovered tab background */
+    color: rgb(238, 238, 238); /* Hovered tab text */
+}
+
+/* QSlider styling */
+QSlider::groove:horizontal {
+    background-color: rgb(28, 28, 28); /* Groove background */
+    height: 8px;
+    border-radius: 4px;
+}
+
+QSlider::handle:horizontal {
+    background-color: rgb(244, 244, 0); /* Handle background */
+    border: 1px solid rgb(19, 23, 37); /* Handle border */
+    width: 15px;
+    border-radius: 7px;
+}
+
+QSlider::sub-page:horizontal {
+    background-color: rgb(244, 244, 0); /* Sub-page (filled part) */
+}
+
+QSlider::add-page:horizontal {
+    background-color: rgb(28, 28, 28); /* Unfilled part */
+}
+
+/* QScrollBar styling */
+QScrollBar:horizontal, QScrollBar:vertical {
+    background-color: rgb(19, 23, 37); /* Scrollbar background */
+}
+
+QScrollBar::handle:horizontal, QScrollBar::handle:vertical {
+    background-color: rgb(91, 0, 178); /* Scrollbar handle */
+    border: 1px solid rgb(0, 0, 0); /* Scrollbar handle border */
+}
+
+/* QToolBox styling */
+QToolBox::tab {
+    background-color: rgb(91, 0, 178); /* Toolbox tab background */
+    color: rgb(238, 238, 238); /* Toolbox tab text */
+    border: 1px solid rgb(0, 0, 0); /* Toolbox tab border */
+    padding: 6px;
+}
+
+QToolBox::tab:selected {
+    background-color: rgb(244, 244, 0); /* Selected toolbox tab */
+    color: rgb(28, 28, 28); /* Selected tab text */
+}
+
+/* QCheckBox styling */
+QCheckBox {
+    background-color: transparent;
+    color: rgb(238, 238, 238); /* Checkbox text color */
+    border: none;
+}
+
+QCheckBox::indicator:checked {
+    image: url(cache/on.png);
+}
+
+QCheckBox::indicator:unchecked {
+    image: url(:/16x16/icons/16x16/off.gif);
+}
+
+/* QRadioButton styling */
+QRadioButton {
+    color: lightgray;
+    background-color: transparent;
+}
+
+/* QComboBox styling */
+QComboBox {
+    background-color: rgb(28, 28, 28); /* ComboBox background */
+    color: rgb(238, 238, 238); /* Text color */
+    border: 1px solid rgb(91, 0, 178);
+}
+
+QComboBox QAbstractItemView {
+    background-color: rgb(28, 28, 28); /* Drop-down background */
+    color: rgb(238, 238, 238); /* Drop-down text color */
+    selection-background-color: rgb(91, 0, 178); /* Selected item background */
+}
+
+QComboBox::drop-down {
+    background-color: rgb(91, 0, 178); /* Drop-down button background */
+    border: 1px solid rgb(0, 0, 0);
+}
+
+/* QSpinBox and QDateTimeEdit styling */
+QSpinBox, QDateTimeEdit {
+    background-color: rgb(28, 28, 28); /* Spinbox background */
+    color: rgb(238, 238, 238); /* Text color */
+    border: 1px solid rgb(91, 0, 178);
+    border-radius: 2px;
+}
+
+/* QProgressBar styling */
+QProgressBar {
+    background-color: rgb(28, 28, 28); /* Background */
+    color: rgb(238, 238, 238); /* Text color */
+    border: 1px solid rgb(91, 0, 178);
+    text-align: center;
+}
+
+QProgressBar::chunk {
+    background-color: rgb(244, 244, 0); /* Progress */
+}
+
+/* QToolTip styling */
+QToolTip {
+    background-color: rgb(91, 0, 178); /* Tooltip background */
+    color: rgb(238, 238, 238); /* Tooltip text color */
+    border: 1px solid rgb(0, 0, 0);
+    padding: 5px;
+}
+
+/* QProgressDialog styling */
+QProgressDialog {
+    background-color: rgb(19, 23, 37); /* Dialog background */
+    color: rgb(238, 238, 238); /* Text color */
+}
+
+/* QCalendarWidget styling */
+QCalendarWidget QAbstractItemView {
+    background-color: rgb(28, 28, 28); /* Calendar background */
+    color: rgb(238, 238, 238); /* Text color */
+}
+
+/* QListWidget styling */
+QListWidget {
+    background-color: rgb(28, 28, 28); /* List background */
+    color: rgb(238, 238, 238); /* Text color */
+}
+
+QListWidget::item:selected {
+    background-color: rgb(91, 0, 178); /* Selected item background */
+    color: rgb(28, 28, 28); /* Selected item text */
+}
+
+/* QTreeWidget styling */
+QTreeWidget {
+    background-color: rgb(28, 28, 28); /* Tree background */
+    color: rgb(238, 238, 238); /* Text color */
+}
+
+QTreeWidget::item:selected {
+    background-color: rgb(91, 0, 178); /* Selected item background */
+    color: rgb(28, 28, 28); /* Selected item text */
+}
+
+/* QStatusBar styling */
+QStatusBar {
+    background-color: rgb(19, 23, 37); /* Status bar background */
+    color: rgb(238, 238, 238); /* Text color */
+}
+
+/* QDockWidget styling */
+QDockWidget {
+    background-color: rgb(19, 23, 37); /* Dock widget background */
+    color: rgb(238, 238, 238); /* Text color */
+    border: 1px solid rgb(91, 0, 178); /* Dock border */
+}
+

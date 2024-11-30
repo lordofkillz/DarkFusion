@@ -1,0 +1,154 @@
+
+/* General QWidget setup */
+QWidget {
+    background-color: #FFC0CB; /* Light Pink */
+    color: #000000; /* Black text */
+    font-family: "Segoe UI", Arial, sans-serif;
+    font-size: 14px;
+}
+
+/* QLabel styling */
+QLabel {
+    background-color: transparent;
+    color: #FF69B4; /* Hot Pink for labels */
+    font-size: 13px;
+    padding: 2px 4px;
+}
+
+/* QFrame styling */
+QFrame {
+    background-color: rgba(255, 182, 193, 0.8); /* Semi-transparent pink */
+    border: 2px solid #FF69B4; /* Hot Pink border */
+    border-radius: 6px;
+    margin: 4px;
+}
+
+/* QToolBox styling */
+QToolBox {
+    background-color: #FFC0CB; /* Light Pink for toolbox */
+    color: #000000;
+    border: 1px solid #FF69B4; /* Hot Pink border */
+}
+
+QToolBox::tab {
+    background: #FF69B4; /* Hot Pink for toolbox tabs */
+    color: #ffffff;
+    padding: 6px;
+    border-radius: 4px;
+    margin: 1px;
+}
+
+QToolBox::tab:selected {
+    background: #FF1493; /* Deep Pink on selected tab */
+    font-weight: bold;
+}
+
+/* QTabWidget styling */
+QTabWidget::pane {
+    border-top: 2px solid #FF1493; /* Deep Pink line on tab pane */
+}
+
+QTabBar::tab {
+    background: #FFC0CB; /* Light Pink for tabs */
+    color: #000000; /* Black text on tabs */
+    border: 1px solid #FF69B4;
+    padding: 6px;
+    border-top-left-radius: 4px;
+    border-top-right-radius: 4px;
+    margin-right: 2px;
+}
+
+QTabBar::tab:selected {
+    background: #FF69B4; /* Hot Pink on selected tab */
+    border-color: #FFC0CB; /* Light pink border */
+}
+
+QTabBar::tab:hover {
+    background: #FF1493; /* Deep Pink on hover */
+}
+
+/* QPushButton styling */
+QPushButton {
+    background-color: #FF69B4; /* Hot Pink */
+    color: #ffffff; /* White text on button */
+    border: 1px solid #FF1493; /* Deep Pink border */
+    padding: 6px 12px;
+    border-radius: 8px;
+    font-size: 13px;
+}
+
+QPushButton::hover {
+    background-color: #FF1493; /* Deep Pink on hover */
+    border: 1px solid #C71585; /* Medium Violet Red border on hover */
+}
+
+QPushButton::pressed {
+    background-color: #C71585; /* Medium Violet Red on press */
+    border: 1px solid #FF1493;
+}
+
+/* QScrollArea styling */
+QScrollArea {
+    background-color: #FFB6C1; /* Light Coral background */
+    border: 1px solid #FF69B4; /* Hot Pink border */
+    border-radius: 6px;
+    padding: 4px;
+}
+
+/* QScrollBar styling */
+QScrollBar:vertical, QScrollBar:horizontal {
+    background-color: #FFC0CB; /* Light Pink for scrollbar background */
+    width: 10px;
+    height: 10px;
+    margin: 2px;
+    border-radius: 5px;
+}
+
+QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
+    background-color: #FF69B4; /* Hot Pink handle */
+    min-height: 20px;
+    min-width: 20px;
+    border-radius: 5px;
+}
+
+QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover {
+    background-color: #FF1493; /* Deep Pink handle on hover */
+}
+
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical, 
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+    background: none;
+}
+
+/* QLineEdit styling */
+QLineEdit {
+    background-color: #FFB6C1; /* Light Coral input */
+    color: #000000; /* Black text */
+    border: 1px solid #FF69B4; /* Hot Pink border */
+    padding: 4px 6px;
+    border-radius: 6px;
+}
+
+/* QCheckBox styling */
+QCheckBox {
+    spacing: 6px;
+    color: #FF69B4; /* Hot Pink text for checkboxes */
+    font-size: 13px;
+}
+
+QCheckBox::indicator {
+    width: 16px;
+    height: 16px;
+}
+
+QCheckBox::indicator:checked {
+    background-color: #FF1493; /* Deep Pink check */
+    border: 1px solid #FF69B4;
+    border-radius: 4px;
+}
+
+QCheckBox::indicator:unchecked {
+    background-color: #FFC0CB; /* Light Pink for unchecked */
+    border: 1px solid #FF69B4;
+    border-radius: 4px;
+}
