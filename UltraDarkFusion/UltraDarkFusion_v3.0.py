@@ -2210,7 +2210,7 @@ class RedBoxDelegate(QStyledItemDelegate):
 
 
 
-ui_file: Path = Path(__file__).resolve().parent / "UltraDarkFusion_v2.0.1.ui"
+ui_file: Path = Path(__file__).resolve().parent / "UltraDarkFusion_v3.0.ui"
 with open(ui_file, "r", encoding="utf-8") as file:
     Ui_MainWindow: Type[QtWidgets.QMainWindow]
     QtBaseClass: Type[object]
