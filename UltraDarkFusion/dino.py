@@ -13,7 +13,8 @@ from groundingdino.util.inference import load_model, load_image, predict
 from tqdm import tqdm
 from torch.cuda.amp import autocast
 import numpy as np
-import random
+import json
+import faiss
 
 # Configure basic logging settings
 logging.basicConfig(level=logging.CRITICAL, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -25,6 +26,29 @@ DEVICE = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 LLM_MODEL_NAME = "bert-base-uncased"
 llm_tokenizer = AutoTokenizer.from_pretrained(LLM_MODEL_NAME)
 llm_model = AutoModelForSequenceClassification.from_pretrained(LLM_MODEL_NAME).to(DEVICE)
+
+# FAISS index for local vector storage
+dimension = 128
+index = faiss.IndexFlatL2(dimension)
+vector_store_file = "vector_store.json"
+
+# Load existing vectors if available
+def load_vector_store():
+    if os.path.exists(vector_store_file):
+        with open(vector_store_file, 'r') as f:
+            data = json.load(f)
+            ids = [int(key) for key in data.keys()]
+            vectors = [np.array(value, dtype='float32') for value in data.values()]
+            for i, vector in zip(ids, vectors):
+                index.add(np.expand_dims(vector, axis=0))
+        return data
+    return {}
+
+vector_store = load_vector_store()
+
+def save_vector_store():
+    with open(vector_store_file, 'w') as f:
+        json.dump(vector_store, f)
 
 def enhance_contrast(image):
     """
@@ -58,7 +82,6 @@ async def iou(box1, box2):
     iou = interArea / float(box1Area + box2Area - interArea)
 
     return iou
-
 
 async def write_to_disk(bbox_data_path, boxes, phrases, class_names, overwrite):
     """
@@ -94,6 +117,14 @@ async def write_to_disk(bbox_data_path, boxes, phrases, class_names, overwrite):
         for box, class_id in boxes_to_write:
             xc, yc, w, h = box
             await f.write(f"{class_id} {xc} {yc} {w} {h}\n")
+
+    # Extract meaningful vectors using logits
+    vectors = logits.cpu().detach().numpy().astype('float32')
+    for i, vector in enumerate(vectors):
+        vector_id = len(vector_store) + 1
+        vector_store[vector_id] = vector.tolist()
+        index.add(np.expand_dims(vector, axis=0))
+    save_vector_store()
 
 async def process_images(image_directory_path, model, TEXT_PROMPT, class_names, BOX_THRESHOLD, TEXT_THRESHOLD, overwrite):
     """
@@ -142,8 +173,8 @@ def run_groundingdino(image_directory_path, overwrite):
         class_names = [line.strip() for line in f.readlines() if line.strip() != ""]
 
     TEXT_PROMPT = '.'.join(class_names) + '.'
-    BOX_THRESHOLD = 0.40
-    TEXT_THRESHOLD = 0.40
+    BOX_THRESHOLD = 0.35
+    TEXT_THRESHOLD = 0.25
 
     asyncio.run(process_images(image_directory_path, model, TEXT_PROMPT, class_names, BOX_THRESHOLD, TEXT_THRESHOLD, overwrite))
     tqdm.write("Batch inference completed.")
