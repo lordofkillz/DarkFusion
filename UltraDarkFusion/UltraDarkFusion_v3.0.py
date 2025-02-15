@@ -3932,42 +3932,19 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
     #VIEO PLAYER FRAME EXTRACTION
 
     def stop_program(self):
-        # Stop the timer if it's running
-        if hasattr(self, 'timer2') and self.timer2.isActive():
-            self.timer2.stop()
-            self.timer2.timeout.disconnect()  # Disconnect the signal to prevent any residual calls
-            print("Timer stopped and disconnected.")
+            if hasattr(self, 'timer2') and self.timer2 is not None:
+                self.timer2.stop()
+                self.timer2.timeout.disconnect()  # Disconnect the signal to avoid residual calls
+                self.timer2 = None
 
-        # Release the video capture if it's initialized
-        if hasattr(self, 'capture') and self.capture is not None:
-            self.capture.release()
-            self.capture = None
-            print("Video capture released.")
+            # Stop extraction loops
+            self.extracting_frames = False
 
-        # Clear the display by setting a placeholder or blank image
-        self.clear_display()
-        print("Display cleared.")
-
-
-
-    def clear_display(self):
-        # Load the placeholder image
-        placeholder_path = 'styles/images/default.png'
-        if os.path.exists(placeholder_path):
-            placeholder_image = QPixmap(placeholder_path)
-        else:
-            print("Placeholder image not found.")
-            return
-
-        # Create a new scene
-        scene = QGraphicsScene()
-
-        # Add the placeholder image to the scene
-        pixmap_item = QGraphicsPixmapItem(placeholder_image)
-        scene.addItem(pixmap_item)
-
-        # Set the scene to the QGraphicsView
-        self.screen_view.setScene(scene)
+            # Release capture resources
+            self.is_camera_mode = False
+            if self.capture:
+                self.capture.release()
+                self.capture = None
 
     def get_input_devices(self):
         """Get a list of connected camera devices."""
@@ -4173,7 +4150,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             frame = self.crop_frame(frame)
 
             # Apply preprocessing (ignore head_labels if returned)
-            processed_frame, _ = self.apply_preprocessing(frame)  # Ignore `head_labels`
+            processed_frame, _ = self.apply_preprocessing(frame)  # Ignore head_labels
 
             # Perform YOLO inference
             annotated_frame, results = self.perform_yolo_inference(processed_frame)
@@ -4262,7 +4239,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         # Initialize classes for the output directory
         self.initialize_classes(input_type="video")
 
-        # Reset `extracting_frames`
+        # Reset extracting_frames
         self.extracting_frames = True
 
         # Check if the model is loaded
@@ -4620,9 +4597,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         except Exception as e:
             print(f"Error during YOLO inference: {e}")
             return frame, None
-
-
-
 
 
     def on_play_video_clicked(self):
