@@ -4179,8 +4179,18 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
                 print("Error: screen_view is not initialized.")
                 return
 
-            # Convert the frame from BGR (OpenCV format) to RGB (Qt format)
-            rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            # Ensure frame is a valid NumPy array
+            if not isinstance(frame, np.ndarray) or frame.size == 0:
+                print("Invalid frame received. Skipping display update.")
+                return
+
+            # Convert the frame safely
+            try:
+                rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            except cv2.error as e:
+                print(f"OpenCV error in update_display: {e}")
+                return
+
             h, w, ch = rgb_image.shape
             bytes_per_line = ch * w
             qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
@@ -4203,12 +4213,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             self.pixmap_item = QGraphicsPixmapItem(pixmap)
             self.graphics_scene.addItem(self.pixmap_item)
 
-            # Update the scene rect with QRectF instead of QRect
+            # Update the scene rect
             self.graphics_scene.setSceneRect(QRectF(pixmap.rect()))
             self.screen_view.fitInView(self.graphics_scene.sceneRect(), Qt.KeepAspectRatio)
 
         except Exception as e:
             print(f"Error updating display: {e}")
+
 
 
     def showEvent(self, event):
@@ -4549,10 +4560,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         print(f"Image format set to: {self.image_format}")  # Debug log
 
 
-
-
-
-
     def get_selected_video_path(self):
         current_row = self.video_table.currentRow()
         if current_row != -1:
@@ -4599,39 +4606,74 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             return frame, None
 
 
+
+
+
     def on_play_video_clicked(self):
+        """Handles playing a selected video."""
         video_path = self.get_selected_video_path()
         if not video_path:
             print("No video selected for playback.")
             return
 
+        # Ensure capture is initialized
+        if hasattr(self, 'capture') and self.capture:
+            self.capture.release()
         self.capture = cv2.VideoCapture(video_path)
+
         if not self.capture.isOpened():
             print(f"Unable to open video: {video_path}")
             return
+
+        # Ensure timer2 is properly initialized before connecting
+        if not hasattr(self, 'timer2') or self.timer2 is None:
+            self.timer2 = QTimer()
+
+        # Disconnect previous connections before reconnecting to avoid duplicate connections
+        try:
+            self.timer2.timeout.disconnect()
+        except TypeError:
+            pass  # Ignore error if there are no active connections
 
         self.timer2.timeout.connect(self.play_video_frame)
         self.timer2.start(30)  # 30ms interval (~33 FPS)
         print(f"Playing video: {video_path}")
 
-    def stop_video_playback(self):
-        if hasattr(self, 'timer2') and self.timer2.isActive():
-            self.timer2.stop()
-        print("Video playback stopped.")
 
 
     def play_video_frame(self):
         if self.capture and self.capture.isOpened():
             ret, frame = self.capture.read()
-            if not ret:
+            if not ret or frame is None:
                 self.stop_video_playback()
-                print("Video playback completed.")
+                print("Video playback completed or failed to read frame.")
+                return
+
+            # Ensure frame is a valid NumPy array
+            if not isinstance(frame, np.ndarray) or frame.size == 0:
+                print("Invalid frame received. Skipping frame.")
                 return
 
             # Resize and crop frame
             frame = self.resize_frame(frame)
             frame = self.crop_frame(frame)
-            frame = self.apply_preprocessing(frame)
+
+            try:
+                # Convert to RGB format safely
+                if len(frame.shape) == 2:  # Grayscale
+                    frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+                elif len(frame.shape) == 3 and frame.shape[2] == 4:  # BGRA to BGR
+                    frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+                elif len(frame.shape) == 3 and frame.shape[2] == 3:  # BGR to RGB
+                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                else:
+                    print("Unexpected frame shape:", frame.shape)
+                    return
+
+            except cv2.error as e:
+                print(f"OpenCV error in cvtColor: {e}")
+                return
+
             # Perform YOLO inference if loaded
             if hasattr(self, 'model') and self.model:
                 results = self.model(frame)
@@ -4642,7 +4684,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             # Display frame in the UI
             self.update_display(annotated_frame)
 
-            # **Save frames while playing if extraction is enabled**
+            # Save frames while playing if extraction is enabled
             if self.extracting_frames:
                 try:
                     frame_path = os.path.join(
@@ -4655,6 +4697,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
                     logging.error(f"Error saving frame: {e}")
         else:
             self.stop_video_playback()
+
 
 
 
