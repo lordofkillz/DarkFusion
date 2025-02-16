@@ -5753,9 +5753,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         network_width = self.network_width.value()
         batch_size = self.batch_inference.value()
 
-        # ✅ Ensure class names are only loaded ONCE (cached)
+        # ✅ Use cached class names instead of reloading from file
         if not hasattr(self, "class_names") or not self.class_names:
-            self.class_names = self.load_classes()
+            self.load_classes()  # Ensure self.class_names is populated
 
         class_indices = list(range(len(self.class_names))) if self.class_names else None
 
@@ -5782,6 +5782,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
         print(f"✅ Model kwargs for inference: {model_kwargs}")
         return model_kwargs
+
 
 
 
@@ -8477,71 +8478,57 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             
     def load_classes(self, data_directory=None, default_classes=None, create_if_missing=True):
         """
-        Load class names from 'classes.txt'. Create it with default classes if missing.
-        Args:
-            data_directory (str): Directory to search for 'classes.txt'.
-            default_classes (list): Default classes to use if 'classes.txt' is missing or empty.
-            create_if_missing (bool): Whether to create a new 'classes.txt' if not found.
-        Returns:
-            list: List of class names, or an empty list if no valid classes are found.
+        Load class names from 'classes.txt' in the image directory. If missing, create one.
+        If no image directory is provided, load from the working directory.
         """
-        # ✅ Prevent reloading if already cached
-        if hasattr(self, "class_names") and self.class_names:
-            return self.class_names
-
-        # ✅ Select active directory (fallback to current working directory)
-        active_directory = data_directory or os.getcwd()
+        # ✅ Use provided image directory, or fall back to the working directory
+        active_directory = data_directory or self.image_directory or os.getcwd()
 
         # ✅ Ensure directory exists
         if not os.path.exists(active_directory):
-            print(f"Error: Directory does not exist: {active_directory}")
+            print(f"❌ Error: Directory does not exist: {active_directory}")
             return []
 
-        # ✅ Define `classes.txt` path
-        classes_file = os.path.join(active_directory, 'classes.txt')
+        # ✅ Define path for `classes.txt` in the image directory
+        classes_file_dataset = os.path.join(active_directory, 'classes.txt')
 
-        # ✅ Load `classes.txt` if it exists
-        if os.path.exists(classes_file):
+        # ✅ Load `classes.txt` from the dataset directory first
+        if os.path.exists(classes_file_dataset):
             try:
-                with open(classes_file, 'r') as f:
+                with open(classes_file_dataset, 'r') as f:
                     class_names = [line.strip() for line in f if line.strip()]
                 if class_names:
                     self.id_to_class = {i: name for i, name in enumerate(class_names)}
-                    self.class_names = class_names  # ✅ Cache the classes
-
-                    # ✅ Only update dropdown once
-                    if not hasattr(self, 'dropdown_initialized') or not self.dropdown_initialized:
-                        self.update_classes_dropdown(class_names)
-                        self.dropdown_initialized = True
-
-                    print(f"✅ Loaded classes from {classes_file}: {self.id_to_class}")
+                    self.class_names = class_names  # ✅ Cache for future calls
+                    self.update_classes_dropdown(class_names)
+                    print(f"✅ Loaded classes from {classes_file_dataset}: {self.id_to_class}")
                     return class_names
                 else:
-                    print(f"⚠️ Warning: {classes_file} is empty.")
+                    print(f"⚠️ Warning: {classes_file_dataset} is empty.")
             except Exception as e:
-                print(f"❌ Error reading {classes_file}: {e}")
+                print(f"❌ Error reading {classes_file_dataset}: {e}")
 
-        # ✅ If `classes.txt` is missing, create a new one
+        # ✅ If `classes.txt` is missing, create it in the **image directory**
         if create_if_missing:
             default_classes = default_classes or ['person']  # Default class if none provided
             try:
-                with open(classes_file, 'w') as f:
+                with open(classes_file_dataset, 'w') as f:
                     for cls in default_classes:
                         f.write(f"{cls}\n")
                 self.id_to_class = {i: cls for i, cls in enumerate(default_classes)}
-                self.class_names = default_classes  # ✅ Cache default classes
-
-                # ✅ Only update dropdown once
-                if not hasattr(self, 'dropdown_initialized') or not self.dropdown_initialized:
-                    self.update_classes_dropdown(default_classes)
-                    self.dropdown_initialized = True
-
-                print(f"📄 'classes.txt' created at {classes_file} with default classes: {default_classes}")
+                self.class_names = default_classes  # ✅ Cache
+                self.update_classes_dropdown(default_classes)
+                print(f"📄 Created 'classes.txt' in {classes_file_dataset} with default: {default_classes}")
                 return default_classes
             except Exception as e:
-                print(f"❌ Error creating {classes_file}: {e}")
+                print(f"❌ Error creating {classes_file_dataset}: {e}")
 
         return []
+
+
+
+
+
 
 
 

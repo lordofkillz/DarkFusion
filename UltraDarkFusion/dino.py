@@ -1,92 +1,60 @@
 import os
 import logging
 import argparse
-from pathlib import Path
 import asyncio
 import aiofiles
 import cv2
 import torch
+import numpy as np
+from pathlib import Path
 from PIL import Image
-from transformers import AutoModelForSequenceClassification, AutoTokenizer
-import groundingdino
-from groundingdino.util.inference import load_model, load_image, predict
 from tqdm import tqdm
 from torch.cuda.amp import autocast
-import numpy as np
+import groundingdino
+from groundingdino.util.inference import load_model, load_image, predict
 import json
-import faiss
 
-# Configure basic logging settings
+# Configure logging
 logging.basicConfig(level=logging.CRITICAL, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Device configuration for model
+# Device setup
 DEVICE = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
-# Load pre-trained LLM for additional text interpretation
-LLM_MODEL_NAME = "bert-base-uncased"
-llm_tokenizer = AutoTokenizer.from_pretrained(LLM_MODEL_NAME)
-llm_model = AutoModelForSequenceClassification.from_pretrained(LLM_MODEL_NAME).to(DEVICE)
+# Threshold tracking file
+THRESHOLD_FILE = "class_thresholds.json"
 
-# FAISS index for local vector storage
-dimension = 128
-index = faiss.IndexFlatL2(dimension)
-vector_store_file = "vector_store.json"
-
-# Load existing vectors if available
-def load_vector_store():
-    if os.path.exists(vector_store_file):
-        with open(vector_store_file, 'r') as f:
-            data = json.load(f)
-            ids = [int(key) for key in data.keys()]
-            vectors = [np.array(value, dtype='float32') for value in data.values()]
-            for i, vector in zip(ids, vectors):
-                index.add(np.expand_dims(vector, axis=0))
-        return data
+def load_thresholds():
+    """ Load previous thresholds or start fresh. """
+    if os.path.exists(THRESHOLD_FILE):
+        with open(THRESHOLD_FILE, "r") as f:
+            return json.load(f)
     return {}
 
-vector_store = load_vector_store()
+def save_thresholds(thresholds):
+    """ Save updated class thresholds. """
+    with open(THRESHOLD_FILE, "w") as f:
+        json.dump(thresholds, f, indent=4)
 
-def save_vector_store():
-    with open(vector_store_file, 'w') as f:
-        json.dump(vector_store, f)
-
-def enhance_contrast(image):
+def adjust_thresholds(detected_classes, class_thresholds):
     """
-    Enhance image contrast using CLAHE for better visibility of small objects.
+    Automatically adjusts thresholds:
+    - If a class is detected **often**, lower its threshold slightly.
+    - If a class is rarely detected, increase its threshold.
     """
-    lab = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2LAB)
-    l, a, b = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    cl = clahe.apply(l)
-    lab = cv2.merge((cl, a, b))
-    enhanced_image = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
-    return Image.fromarray(enhanced_image)
+    for cls in detected_classes:
+        if cls in class_thresholds:
+            class_thresholds[cls] = max(0.25, class_thresholds[cls] - 0.02)  # Reduce threshold slightly
+        else:
+            class_thresholds[cls] = 0.35  # Default confidence for new classes
+    
+    for cls in list(class_thresholds.keys()):
+        if cls not in detected_classes:
+            class_thresholds[cls] = min(0.6, class_thresholds[cls] + 0.02)  # Increase threshold slightly
 
-async def iou(box1, box2):
-    """
-    Calculate the Intersection over Union (IoU) of two bounding boxes.
-    """
-    box1 = [box1[0] - box1[2] / 2, box1[1] - box1[3] / 2,
-            box1[0] + box1[2] / 2, box1[1] + box1[3] / 2]
-    box2 = [box2[0] - box2[2] / 2, box2[1] - box2[3] / 2,
-            box2[0] + box2[2] / 2, box2[1] + box2[3] / 2]
-
-    xA = max(box1[0], box2[0])
-    yA = max(box1[1], box2[1])
-    xB = min(box1[2], box2[2])
-    yB = min(box1[3], box2[3])
-
-    interArea = max(0, xB - xA) * max(0, yB - yA)
-    box1Area = (box1[2] - box1[0]) * (box1[3] - box1[1])
-    box2Area = (box2[2] - box2[0]) * (box2[3] - box2[1])
-    iou = interArea / float(box1Area + box2Area - interArea)
-
-    return iou
+    save_thresholds(class_thresholds)
 
 async def write_to_disk(bbox_data_path, boxes, phrases, class_names, overwrite):
-    """
-    Write bounding box data to disk.
-    """
+    """ Write bounding box data to disk, ensuring only current `classes.txt` classes are included. """
     boxes_to_write = []
     if not overwrite and bbox_data_path.exists():
         async with aiofiles.open(bbox_data_path, 'r') as f:
@@ -99,84 +67,84 @@ async def write_to_disk(bbox_data_path, boxes, phrases, class_names, overwrite):
     new_boxes_with_ids = []
     for box, phrase in zip(boxes, phrases):
         normalized_phrase = phrase.lower().strip('.')
-        class_id = class_names.index(normalized_phrase) if normalized_phrase in class_names else -1
-        if class_id != -1:
-            new_boxes_with_ids.append((box, str(class_id)))
-
-    for new_box, class_id in new_boxes_with_ids:
-        duplicate_found = False
-        for i, (existing_box, existing_id) in enumerate(boxes_to_write):
-            if await iou(existing_box, new_box) > 0.5:
-                boxes_to_write[i] = (new_box, class_id)
-                duplicate_found = True
-                break
-        if not duplicate_found:
-            boxes_to_write.append((new_box, class_id))
+        if normalized_phrase in class_names:
+            new_boxes_with_ids.append((box, str(class_names.index(normalized_phrase))))
 
     async with aiofiles.open(bbox_data_path, 'w') as f:
-        for box, class_id in boxes_to_write:
+        for box, class_id in new_boxes_with_ids:
             xc, yc, w, h = box
             await f.write(f"{class_id} {xc} {yc} {w} {h}\n")
 
-    # Extract meaningful vectors using logits
-    vectors = logits.cpu().detach().numpy().astype('float32')
-    for i, vector in enumerate(vectors):
-        vector_id = len(vector_store) + 1
-        vector_store[vector_id] = vector.tolist()
-        index.add(np.expand_dims(vector, axis=0))
-    save_vector_store()
-
-async def process_images(image_directory_path, model, TEXT_PROMPT, class_names, BOX_THRESHOLD, TEXT_THRESHOLD, overwrite):
+async def process_images(image_directory_path, model, TEXT_PROMPT, class_names, class_thresholds, TEXT_THRESHOLD, overwrite):
     """
-    Process all images in a directory.
+    Process all images in a directory with GroundingDINO.
+    Uses dynamic class-based thresholds.
     """
     image_directory = Path(image_directory_path)
     image_formats = ['*.jpg', '*.jpeg', '*.png', '*.bmp', '*.gif']
     image_paths = [p for ext in image_formats for p in image_directory.glob(ext)]
 
+    detected_classes = set()
+
     progress_bar = tqdm(total=len(image_paths), desc="Processing Images")
     for image_path in image_paths:
         try:
             image_source, image_tensor = load_image(str(image_path))
-            image_source = enhance_contrast(image_source)
-
-            # Additional LLM processing for refined text interpretation
-            llm_inputs = llm_tokenizer(TEXT_PROMPT, return_tensors="pt", truncation=True, padding=True).to(DEVICE)
-            with torch.no_grad():
-                llm_outputs = llm_model(**llm_inputs)
-
             image_tensor = image_tensor.to(DEVICE)
+
             with autocast():
                 boxes, logits, phrases = predict(
                     model=model,
                     image=image_tensor,
                     caption=TEXT_PROMPT,
-                    box_threshold=BOX_THRESHOLD,
+                    box_threshold=0.1,  # Start with a low threshold
                     text_threshold=TEXT_THRESHOLD,
                     device=DEVICE
                 )
 
+            filtered_boxes = []
+            filtered_phrases = []
+            for box, logit, phrase in zip(boxes, logits, phrases):
+                normalized_phrase = phrase.lower().strip('.')
+                if normalized_phrase in class_names:
+                    dynamic_threshold = class_thresholds.get(normalized_phrase, 0.35)
+                    if logit > dynamic_threshold:  # Apply auto-adjusted confidence threshold
+                        filtered_boxes.append(box)
+                        filtered_phrases.append(normalized_phrase)
+                        detected_classes.add(normalized_phrase)
+
+            if not filtered_boxes:
+                logging.info(f"No valid detections for {image_path}, skipping.")
+                continue
+
             bbox_data_path = image_path.with_suffix('.txt')
-            await write_to_disk(bbox_data_path, boxes, phrases, class_names, overwrite)
+            await write_to_disk(bbox_data_path, filtered_boxes, filtered_phrases, class_names, overwrite)
 
         except Exception as e:
-            logging.error(f"Error loading image {image_path}: {e}")
+            logging.error(f"Error processing image {image_path}: {e}")
 
         progress_bar.update(1)
+
     progress_bar.close()
+    adjust_thresholds(detected_classes, class_thresholds)  # Auto-adjust thresholds after each run
 
 def run_groundingdino(image_directory_path, overwrite):
+    """Run GroundingDINO with auto-learning thresholds."""
     package_path = groundingdino.__path__[0]
     config_full_path = os.path.join(package_path, "config", "GroundingDINO_SwinT_OGC.py")
     model = load_model(config_full_path, "Sam/groundingdino_swint_ogc.pth", device=DEVICE)
+
+    # Load class names from `classes.txt`
     with open(os.path.join(image_directory_path, 'classes.txt'), 'r') as f:
-        class_names = [line.strip() for line in f.readlines() if line.strip() != ""]
+        class_names = [line.strip().lower() for line in f.readlines() if line.strip()]
 
-    TEXT_PROMPT = '.'.join(class_names) + '.'
-    BOX_THRESHOLD = 0.35
-    TEXT_THRESHOLD = 0.25
+    # Load previously learned thresholds or start fresh
+    class_thresholds = load_thresholds()
 
-    asyncio.run(process_images(image_directory_path, model, TEXT_PROMPT, class_names, BOX_THRESHOLD, TEXT_THRESHOLD, overwrite))
+    TEXT_PROMPT = '. '.join(class_names) + '.'
+    TEXT_THRESHOLD = 0.35
+
+    asyncio.run(process_images(image_directory_path, model, TEXT_PROMPT, class_names, class_thresholds, TEXT_THRESHOLD, overwrite))
     tqdm.write("Batch inference completed.")
 
 def main():
@@ -189,3 +157,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+
