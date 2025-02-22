@@ -79,10 +79,10 @@ pip install requests==2.27.1 XInput-Python==0.4.0 pythonnet==2.5.2 inputs==0.5 p
 echo Installing additional dependencies...
 pip install Pillow==10.1.0 pytube pyAesCrypt==6.0.0 tqdm==4.66.1
 pip install ultralytics sahi pywebview==4.4.1
-pip install pyqt5==5.15.7 PyQt6==6.4.2 imutils==0.5.4 PyAutoGUI==0.9.53 noise watchdog
+pip install pyqt5==5.15.7 PyQt6==6.4.2 imutils==0.5.4 PyAutoGUI perlin-noise watchdog
 
 echo Installing ML & Vision-related libraries...
-pip install GPUtil==1.4.0 scikit-image==0.17.2 pycocotools==2.0.6
+pip install GPUtil scikit-image==0.17.2 pycocotools==2.0.6
 pip install scikit-learn==0.24.2 qt-material==2.14 validators dill==0.3.7 pybboxes==0.1.6
 pip install groundingdino-py transformers==4.35.0 diffusers addict yapf timm rectpack
 
