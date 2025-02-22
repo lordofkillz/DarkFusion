@@ -1,12 +1,16 @@
+import logging
+
 from sahi.predict import get_sliced_prediction
 from sahi.utils.cv import read_image
-import numpy as np
 import cv2
 import os
 import random
-from PIL import Image, UnidentifiedImageError
-from ultralytics import YOLO
+from PIL import UnidentifiedImageError
 from sahi import AutoDetectionModel
+
+# Configure logger
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
 class SahiPredictWrapper:
     def __init__(self, model_type, model_path, confidence_threshold, device):
@@ -63,16 +67,16 @@ class SahiPredictWrapper:
             cv2.waitKey(1)
 
         except UnidentifiedImageError:
-            print(f"Cannot open image: {image_path}")
+            logger.info(f"Cannot open image: {image_path}")
         except Exception as e:
-            print(f"Error processing image {image_path}: {e}")
+            logger.error(f"Error processing image {image_path}: {e}")
 
     def process_folder(self, folder_path, class_names_file, slice_height, slice_width, overlap_height_ratio, overlap_width_ratio):
         desired_classes = self.read_class_names(class_names_file)
         allowed_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
         if not os.path.isdir(folder_path):
-            print(f"Image directory not found: {folder_path}")
+            logger.info(f"Image directory not found: {folder_path}")
             return
 
         for image_file in filter(lambda file: any(file.lower().endswith(ext) for ext in allowed_extensions), os.listdir(folder_path)):

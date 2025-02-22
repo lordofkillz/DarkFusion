@@ -187,7 +187,7 @@ def start_tkinter_app():
     theme_colors = apply_stylesheet_to_tkinter(root, last_theme)
 
     # Create the DatasetSplitterApp with theme colors
-    app = DatasetSplitterApp(root, theme_colors)
+    DatasetSplitterApp(root, theme_colors)
 
     root.mainloop()
 
