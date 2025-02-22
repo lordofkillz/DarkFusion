@@ -78,7 +78,7 @@ pip install requests==2.27.1 XInput-Python==0.4.0 pythonnet==2.5.2 inputs==0.5 p
 
 echo Installing additional dependencies...
 pip install Pillow==10.1.0 pytube pyAesCrypt==6.0.0 tqdm==4.66.1
-pip install ultralytics sahi mediapipe==0.9.1.0 pywebview==4.4.1
+pip install ultralytics sahi pywebview==4.4.1
 pip install pyqt5==5.15.7 PyQt6==6.4.2 imutils==0.5.4 PyAutoGUI==0.9.53 noise watchdog
 
 echo Installing ML & Vision-related libraries...
