@@ -86,9 +86,10 @@ pip install GPUtil==1.4.0 scikit-image==0.17.2 pycocotools==2.0.6
 pip install scikit-learn==0.24.2 qt-material==2.14 validators dill==0.3.7 pybboxes==0.1.6
 pip install groundingdino-py transformers==4.35.0 diffusers addict yapf timm rectpack
 
+
 echo Installing special dependencies...
 pip install git+https://github.com/facebookresearch/segment-anything.git
-pip install onnxruntime-gpu faiss-gpu yt-dlp
+pip install onnxruntime-gpu mediapipe yt-dlp
 pip install protobuf==3.20.3 pyqt5-tools
 pip install opencv-contrib-python==4.7.0.68 opencv-python-headless==4.7.0.68 --no-cache-dir
 
