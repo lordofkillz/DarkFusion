@@ -91,7 +91,14 @@ Special thanks to these open-source projects:
 
 Inspired by [DarkMark](https://github.com/stephanecharette/DarkMark), developed by Stephane from Hank-AI.
 
----
+### **Goals for UltraDarkFusion**  
+- [ ] **Remove OpenCV DNN and create a Python wrapper for Darknet**  
+- [ ] **Add support for OBB (Oriented Bounding Boxes) and pose estimation**  
+- [ ] **Remove the document-based help and train a chatbot for assistance**  
+- [ ] **Improve code efficiency (Ongoing...)**  
+- [ ] **Upload UltraDarkFusion to PyPI for easier installation and distribution**  
+
+----
 
 
 
