@@ -18,7 +18,7 @@ matplotlib==3.6.3
 keyboard==0.13.5
 pypiwin32==223
 pyttsx3==2.90
-requests==2.27.1
+requests==2.32.2
 XInput-Python==0.4.0
 pythonnet
 inputs==0.5
