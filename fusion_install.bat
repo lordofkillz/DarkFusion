@@ -18,7 +18,7 @@ IF %ERRORLEVEL% NEQ 0 (
 
 :: Define Paths
 SET "DFPATH=C:\Darkfusion"
-SET "ANACONDAP=C:\Anaconda3"
+SET "ANACONDAP=%USERPROFILE%\Anaconda3"
 SET "ENVNAME=fusion"
 SET "PYTHONEXE=%ANACONDAP%\envs\%ENVNAME%\python.exe"
 
@@ -48,9 +48,14 @@ for /F "usebackq skip=2 tokens=2*" %%A IN (`reg query %pathkey% /v Path`) do (
 :: Create environment if not exists
 IF NOT EXIST "%PYTHONEXE%" (
     echo Creating '%ENVNAME%' environment...
-    conda create -n %ENVNAME% python=3.11 -y
-    echo Waiting for environment creation...
-    timeout /t 10 >nul
+    conda create -n %ENVNAME% python=3.11 -y --force
+    echo Verifying environment creation...
+    conda info --envs | findstr /C:"%ENVNAME%"
+    IF %ERRORLEVEL% NEQ 0 (
+        echo [ERROR] Environment creation failed.
+        pause
+        exit /b 1
+    )
 ) ELSE (
     echo '%ENVNAME%' environment already exists.
 )
@@ -69,15 +74,19 @@ IF %ERRORLEVEL% NEQ 0 (
 
 echo Successfully activated '%ENVNAME%' environment.
 
-:: Install Ninja first to ensure availability
-echo Ensuring Ninja is installed...
-pip install ninja
+:: Ensure Ninja is installed
+pip show ninja >nul 2>&1
+IF %ERRORLEVEL% NEQ 0 (
+    echo Installing Ninja...
+    pip install ninja
+)
 
-:: Set environment variable to force pip/setuptools to use Ninja
+:: Set environment variables for compilation acceleration
 SET "CMAKE_GENERATOR=Ninja"
+SET "CMAKE_MAKE_PROGRAM=ninja"
 
-:: Install packages from requirements.txt explicitly using Ninja where applicable
-echo Installing packages from requirements.txt using Ninja...
+:: Install packages from requirements.txt using Ninja
+echo Installing packages from requirements.txt...
 python -m pip install -r "%DFPATH%\requirements.txt"
 
 IF %ERRORLEVEL% NEQ 0 (
