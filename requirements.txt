@@ -48,7 +48,7 @@ validators
 dill==0.3.7
 pybboxes==0.1.6
 groundingdino-py
-transformers==4.35.0
+transformers==4.48.0
 diffusers
 addict
 yapf
