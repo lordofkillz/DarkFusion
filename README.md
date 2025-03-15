@@ -20,8 +20,6 @@
 - **Automatic Labeling** – Use pre-trained `.weights` or `.pt` files for quick dataset annotation.
 
 **UltraDarkFusion 4.0** is modular, efficient, and built for professionals looking to streamline their entire machine learning workflow—from data collection to real-time model deployment.
-
-UltraDarkFusion 4.0 is modular, efficient, and built for professionals looking to streamline their entire machine learning workflow—from data collection to real-time model deployment.
 ## 🚀 Getting Started with Installation
 
 Before diving into the code, let's set up your environment with the necessary build tools. Open up a command prompt and execute the following commands to download Git and CMake. These are essential tools for version control and building the project, respectively Install Git and cmake close the terminal after your done this allows it to refresh otherwise you may recieve and error.
