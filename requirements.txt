@@ -26,7 +26,7 @@ pynput==1.7.6
 mss==6.1.0
 cefpython3==66.1
 # Additional dependencies
-Pillow==10.1.0
+Pillow==10.3.0
 pytube
 pyAesCrypt==6.0.0
 tqdm==4.66.1
