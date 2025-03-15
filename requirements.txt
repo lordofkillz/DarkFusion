@@ -29,7 +29,7 @@ cefpython3==66.1
 Pillow==10.1.0
 pytube
 pyAesCrypt==6.0.0
-tqdm==4.66.1
+tqdm==4.66.3
 ultralytics
 sahi
 pywebview==4.4.1
