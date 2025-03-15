@@ -70,7 +70,7 @@ To compile OpenCV with CUDA acceleration (recommended for improved performance):
 
 ```batch
 cd C:\DarkFusion\
-cuda.bat
+fusion_cuda.bat
 ```
 
 ### Install Darknet
