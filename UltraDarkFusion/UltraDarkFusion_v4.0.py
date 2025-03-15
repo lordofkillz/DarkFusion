@@ -66,7 +66,7 @@ from PIL import Image
 from rectpack import newPacker
 from PyQt5.QtGui import QImage
 from PyQt5.QtWidgets import QAction
-from sahi_predict_wrapper import SahiPredictWrapper
+from sahi_predict_wrapperv4 import SahiPredictWrapper
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QLabel, QLineEdit,QPushButton, QSpinBox, QFileDialog,QComboBox,QDoubleSpinBox)
 from PyQt5.QtWidgets import QAbstractItemView
 from PyQt5.QtCore import QItemSelectionModel
