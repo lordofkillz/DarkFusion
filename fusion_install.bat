@@ -92,6 +92,7 @@ pip install git+https://github.com/facebookresearch/segment-anything.git
 pip install onnxruntime-gpu mediapipe yt-dlp
 pip install protobuf==3.20.3 pyqt5-tools
 pip install opencv-contrib-python==4.7.0.68 opencv-python-headless==4.7.0.68 --no-cache-dir
+pip install sip
 
 :: Upgrade numpy separately
 pip install --upgrade numpy 
