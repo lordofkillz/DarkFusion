@@ -1,21 +1,25 @@
 ![UltraDarkFusion GUI](darkfusion2.gif)
 
-UltraDarkFusion 4.0 – Next-Level Object Detection & Segmentation
-UltraDarkFusion 4.0 is an advanced GUI for object detection, segmentation, and computer vision, designed to streamline dataset management, annotation, model training, and real-time inference.
+## UltraDarkFusion 4.0 – Next-Level Object Detection & Segmentation
 
-What's New in UltraDarkFusion 4.0?
-Full Segmentation Support – Now supports segmentation labeling, conversion, training, and inference.
-Improved Dataset Management – Enhanced tools for dataset preparation, duplicate removal, and image splitting.
-Optimized Model Training – Train both bounding box and segmentation models with Ultralytics YOLO and Darknet.
-Expanded Framework Support – Grounding-DINO and Segment Anything (SAM) integration for smarter annotations.
-TensorRT Inference – Supports .engine models for accelerated inference.
-Better Performance Analytics – Track model improvements with more detailed metrics.
-Key Features
-Advanced Labeling – Create bounding box and segmentation annotations with YOLO compatibility.
-Video Processing – Extract frames, collect images, and process YouTube videos for dataset generation.
-Custom UI & Themes – Fully customizable interface with user-defined shortcuts.
-Hardware Acceleration – Run on CUDA, OpenCL, or CPU backends for optimized performance.
-Automatic Labeling – Use pre-trained .weights or .pt  files for quick dataset annotation.
+**UltraDarkFusion 4.0** is an advanced GUI for object detection, segmentation, and computer vision, designed to streamline dataset management, annotation, model training, and real-time inference.
+
+### What's New in UltraDarkFusion 4.0?
+- **Full Segmentation Support** – Now supports segmentation labeling, conversion, training, and inference.
+- **Improved Dataset Management** – Enhanced tools for dataset preparation, duplicate removal, and image splitting.
+- **Optimized Model Training** – Train both bounding box and segmentation models with Ultralytics YOLO and Darknet.
+- **Expanded Framework Support** – Grounding-DINO and **Segment Anything (SAM)** integration for smarter annotations.
+- **TensorRT Inference** – Supports `.engine` models for accelerated inference.
+- **Better Performance Analytics** – Track model improvements with more detailed metrics.
+
+### Key Features
+- **Advanced Labeling** – Create **bounding box** and **segmentation** annotations with YOLO compatibility.
+- **Video Processing** – Extract frames, collect images, and process YouTube videos for dataset generation.
+- **Custom UI & Themes** – Fully customizable interface with user-defined shortcuts.
+- **Hardware Acceleration** – Run on **CUDA**, **OpenCL**, or CPU backends for optimized performance.
+- **Automatic Labeling** – Use pre-trained `.weights` or `.pt` files for quick dataset annotation.
+
+**UltraDarkFusion 4.0** is modular, efficient, and built for professionals looking to streamline their entire machine learning workflow—from data collection to real-time model deployment.
 
 UltraDarkFusion 4.0 is modular, efficient, and built for professionals looking to streamline their entire machine learning workflow—from data collection to real-time model deployment.
 ## 🚀 Getting Started with Installation
