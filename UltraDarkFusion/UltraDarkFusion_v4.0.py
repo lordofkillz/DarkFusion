@@ -277,8 +277,6 @@ class CustomGraphicsView(QGraphicsView):
             logger.warning("⚠️ Attempted to remove an item that does not belong to the current scene or is None.")
 
 
-
-
     def contextMenuEvent(self, event):
         menu = QMenu(self)
         right_click_pos = self.mapToScene(event.pos())
@@ -295,12 +293,11 @@ class CustomGraphicsView(QGraphicsView):
         """Removes bounding boxes or segmentation masks under the cursor on right-click."""
         cursor_pos = self.mapToScene(self.mapFromGlobal(QCursor.pos()))
 
-        for item in self.scene().items(cursor_pos):
-            if isinstance(item, (BoundingBoxDrawer, SegmentationDrawer)):
+        for item in reversed(self.scene().items(cursor_pos)):  # Start from top-most item
+            if isinstance(item, SegmentationDrawer):
                 self._play_sound_and_remove_bbox(item)
-                if hasattr(self.main_window, 'auto_save_bounding_boxes'):
-                    self.main_window.auto_save_bounding_boxes()
-                break
+                item.remove_self()
+                return  # ✅ Ensures only one click is needed to delete
 
 
     def _get_last_drawn_bbox(self):
@@ -359,9 +356,6 @@ class CustomGraphicsView(QGraphicsView):
 
         # Disable SmoothPixmapTransform after zooming
         self.setRenderHint(QPainter.SmoothPixmapTransform, False)
-
-
-
             
     def resizeEvent(self, event):
         self.fitInView(self.sceneRect(), Qt.KeepAspectRatio)  # type: ignore
@@ -583,12 +577,13 @@ class CustomGraphicsView(QGraphicsView):
 
         if self.show_crosshair:
             painter.setPen(QColor(*self.crosshair_color_rgb) if hasattr(self, 'crosshair_color_rgb') else Qt.yellow)
-            center_x = self.crosshair_position.x()
-            center_y = self.crosshair_position.y()
+            center_x = int(self.crosshair_position.x())
+            center_y = int(self.crosshair_position.y())
             painter.drawLine(center_x, self.viewport().rect().top(), center_x, self.viewport().rect().bottom())
             painter.drawLine(self.viewport().rect().left(), center_y, self.viewport().rect().right(), center_y)
 
         painter.end()
+
 
     def _handle_moving_view(self, event):
         if self.last_mouse_position is None:
@@ -1074,384 +1069,6 @@ class BoundingBoxDrawer(QGraphicsRectItem):
             self.setCursor(Qt.ArrowCursor)
 
 
-
-
-
-    def reset_color(self):
-        self.setPen(QPen(self.get_color(self.class_id, self.main_window.classes_dropdown.count()), 2))
-
-    def mouseMoveEvent(self, event):   
-        self.setCursor(Qt.ArrowCursor)  # ✅ Force cursor to stay an arrow
-        
-        if self.dragStartPos is None:
-            return
-        
-        newPos = event.pos() - self.dragStartPos
-        newRect = QRectF(newPos, self.rect().size())
-
-        if self.scene() is not None:
-            maxLeft = 0
-            maxTop = 0
-            maxRight = self.scene().width() - newRect.width()
-            maxBottom = self.scene().height() - newRect.height()
-            newRect.moveLeft(max(maxLeft, min(newRect.left(), maxRight)))
-            newRect.moveTop(max(maxTop, min(newRect.top(), maxBottom)))
-
-        self.setRect(newRect)
-        
-        # Ensure consistent Z-value when dragging
-        self.set_z_order(bring_to_front=True)
-
-        self.update_class_name_position()
-
-        super().mouseMoveEvent(event)  # ✅ Keep default behavior intact
-
-
-    def update_class_name_position(self):
-        offset = 14
-        new_label_pos = QPointF(self.rect().x(), self.rect().y() - offset)
-        self.class_name_item.setPos(new_label_pos)
-        self.class_name_item.update()
-    def mouseReleaseEvent(self, event):
-        """Handles bounding box movement and release events."""
-        if self.dragStartPos is not None:
-            self.final_rect = self.rect()
-            self.dragStartPos = None
-            self.update_bbox()
-            self.setFlag(QGraphicsItem.ItemIsMovable, False)
-            self.setPen(QPen(self.get_color(self.class_id, self.main_window.classes_dropdown.count()), 2))
-
-        if event.button() == Qt.LeftButton and event.modifiers() == Qt.ControlModifier:
-            self.set_selected(False)
-            self.setFlag(QGraphicsItem.ItemIsMovable, True)
-            self.setFlag(QGraphicsItem.ItemIsSelectable, True)
-            self.setFlag(QGraphicsItem.ItemIsFocusable, True)
-        
-        # ✅ Reset Z-order after release
-        self.set_z_order(bring_to_front=False)
-
-        # ✅ Ensure cursor remains an arrow
-        self.setCursor(Qt.ArrowCursor)
-
-        # ✅ Prevent crash by ensuring deleted items are unreferenced
-        if sip.isdeleted(self):  
-            if self.main_window.selected_bbox == self:
-                self.main_window.selected_bbox = None
-            logger.warning("⚠️ Bounding box was deleted while in use.")
-
-        super().mouseReleaseEvent(event)
-
-
-
-
-
-class BoundingBoxDrawer(QGraphicsRectItem):
-    MIN_SIZE = 6
-    MAX_SIZE = 100
-    """
-    A graphical bounding box representation for object detection in a GUI.
-
-    This class extends QGraphicsRectItem to provide interactive bounding boxes that 
-    can be moved, resized, highlighted, and labeled. It allows users to visualize, 
-    modify, and manage bounding boxes within an annotation tool.
-
-    Attributes:
-        MIN_SIZE (int): Minimum size constraint for bounding boxes.
-        MAX_SIZE (int): Maximum size constraint for bounding boxes.
-        unique_id (int, optional): A unique identifier for the bounding box.
-        main_window (QMainWindow): Reference to the main GUI window for accessing UI elements.
-        class_id (int): The assigned class ID of the bounding box.
-        confidence (float, optional): The confidence score of the detection (if available).
-        dragStartPos (QPointF, optional): Stores the initial mouse position when dragging.
-        final_pos (QPointF, optional): Stores the final position after dragging.
-        hover_opacity (float): Opacity level when hovering over the bounding box.
-        normal_opacity (float): Default opacity level when not hovered.
-        flash_color (QColor): The color used when flashing.
-        alternate_flash_color (QColor): The alternate flashing color.
-        flash_timer (QTimer): Timer to handle flashing animations.
-        scroll_timer (QTimer): Timer to stop flashing after a duration.
-    """    
-    def __init__(self, x, y, width, height, main_window, class_id=None, confidence=None, unique_id=None):
-        super().__init__(x, y, width, height)
-        self.set_z_order(bring_to_front=True)  
-        self.unique_id = unique_id
-        self.main_window = main_window
-        self.class_id = 0 if class_id is None else class_id
-        self.confidence = confidence
-        self.dragStartPos = None
-        self.final_pos = None
-        
-        # Cache color and pen
-        self._class_color = self.get_color(self.class_id, main_window.classes_dropdown.count())
-        self._pen = QPen(self._class_color, 2)
-        
-        # Initialize graphics properties
-        self.setFlags(QGraphicsItem.ItemIsMovable | QGraphicsItem.ItemIsFocusable)
-        self.setPen(self._pen)
-        
-        # Initialize text properties
-        self._text_pos = QPointF(5, 5)
-        self._last_rect = self.rect()
-        self.class_name_item = QGraphicsTextItem(self)
-        self.update_class_name_item()
-        
-        # Initialize hover properties
-        self.setAcceptHoverEvents(True)
-        self.hover_opacity = 1.0
-        self.normal_opacity = 0.6
-        self._is_hovered = False
-        self.setOpacity(self.normal_opacity)
-        
-        # Initialize flash properties
-        self.flash_color = QColor(255, 0, 0)
-        self.alternate_flash_color = QColor(0, 0, 255)
-        self.flash_timer = QTimer()
-        self.flash_timer.timeout.connect(self.toggle_flash_color)
-        self.scroll_timer = QTimer()
-        self.scroll_timer.setSingleShot(True)
-        self.scroll_timer.timeout.connect(self.stop_flashing)
-        
-        # Set initial visibility
-        self.setVisible(self.main_window.class_visibility.get(self.class_id, True))
-    def set_z_order(self, bring_to_front=False):
-        """ Adjust Z-values while preserving initial order. """
-        if bring_to_front:
-            self.setZValue(1.0)  # Bring to front
-        elif self.zValue() < 1.0:  #  `zValue()` exists and is correct
-            self.setZValue(0.5)
-
-
-    def hoverEnterEvent(self, event):
-        if self._is_hovered:
-            return
-
-        scene = self.scene()
-        if scene:
-            scene_pos = self.mapToScene(event.pos())
-
-            # Get all bounding boxes under the cursor
-            items_under_cursor = [
-                item for item in scene.items(scene_pos)
-                if isinstance(item, BoundingBoxDrawer)
-            ]
-
-            # Sort boxes by Z-value (top-most first)
-            items_under_cursor.sort(key=lambda x: x.zValue(), reverse=True)
-
-            # If the hovered box is at the top, bring it forward
-
-            if items_under_cursor and items_under_cursor[0] == self:
-                self.set_z_order(bring_to_front=True)
-            else:
-                # If another box is already on top, push the current box slightly forward
-                self.setZValue(self.zValue() + 0.1)
-
-        self.setOpacity(self.hover_opacity)
-        super().hoverEnterEvent(event)
-        self._is_hovered = True
-
-        # Cache scene items to avoid repeated lookups
-        scene = self.scene()
-        if not scene:
-            return
-            
-        # Get boxes at position more efficiently
-        scene_pos = self.mapToScene(event.pos())
-        boxes = [item for item in scene.items(scene_pos)
-                if isinstance(item, BoundingBoxDrawer)]
-
-        if not boxes:
-            return
-
-        # Optimize z-value checks
-        boxes.sort(key=lambda x: x.zValue())
-        if boxes[0] == self:  # We're the bottom-most box
-            views = scene.views()
-            if views:
-                view = views[0]
-                if isinstance(view, CustomGraphicsView):
-                    view._bring_to_front(self)
-        else:
-            self.setOpacity(1.0)
-
-    def hoverLeaveEvent(self, event):
-        if not self._is_hovered:
-            return
-
-        # Only reset Z-value if this box was moved to the front during hover
-        if self.zValue() > 1.0:
-            self.setZValue(self.zValue() - 0.1)
-
-        self.setOpacity(self.normal_opacity)
-        super().hoverLeaveEvent(event)
-        self._is_hovered = False
-
-
-
-        
-    def start_flashing(self, interval, duration):
-        self.flash_timer.start(interval)
-        QTimer.singleShot(duration, self.stop_flashing)
-
-    def stop_flashing(self):
-        self.flash_timer.stop()
-        self.setPen(QPen(self.get_color(self.class_id, self.main_window.classes_dropdown.count()), 2))
-
-    def toggle_flash_color(self):
-        current_color = self.pen().color()
-        self.setPen(QPen(self.flash_color if current_color == self.alternate_flash_color else self.alternate_flash_color, 2))
-
-    @staticmethod
-    def get_color(class_id, num_classes):
-        if num_classes == 0:
-            logging.error("Number of classes should not be zero.")
-            return QColor(255, 255, 255)  # Default color in case of error
-        
-        num_classes = min(num_classes, 100)
-        hue_step = 360 / num_classes
-        hue = (class_id * hue_step) % 360  # This was a float before
-        return QColor.fromHsv(int(hue), 255, 255)  # Convert to int before passing
-
-
-    def paint(self, painter, option, widget=None):
-        super().paint(painter, option, widget)
-        
-        # Draw the bounding box
-        if self.main_window.shade_checkbox.isChecked():
-            shade_value = self.main_window.shade_slider.value()
-            color = self.pen().color()
-            mapped_shade_value = int((shade_value / 100) * 255) if self.confidence is not None else shade_value
-            shaded_color = QColor(color.red(), color.green(), color.blue(), mapped_shade_value)
-            painter.setBrush(shaded_color)
-            painter.drawRect(self.rect())
-        
-        # Draw the connected label background
-        if not self.main_window.hide_label_checkbox.isChecked():
-            # Get the label rectangle
-            label_rect = self.class_name_item.boundingRect()
-            label_rect.moveTopLeft(self.class_name_item.pos())
-            
-            # Create a path to draw the connected background
-            path = QPainterPath()
-            
-            # Add the label rectangle to the path
-            path.addRect(label_rect)
-            
-            # Create a connector that stretches the width of the label
-            connector_rect = QRectF(
-                self.rect().left(),  # Left edge of bbox
-                label_rect.bottom(),  # Bottom of label
-                label_rect.width(),  # Width of the label
-                self.rect().top() - label_rect.bottom()  # Height to connect to bbox
-            )
-            
-            # Add the connector to the path
-            path.addRect(connector_rect)
-            
-            # Draw the colored padding around the label (only top, left, right)
-            pen_color = self.pen().color()
-            painter.setBrush(pen_color)
-            painter.setPen(Qt.NoPen)
-            painter.drawRect(label_rect.adjusted(-2, -2, 2, 0))  # Adjust padding size as needed, no bottom padding
-            
-            # Draw the connected background without the darkened area
-            painter.setBrush(pen_color)
-            painter.drawPath(path)
-    def update_class_name_item(self):
-        """Update the class name text and position"""
-        # Only update if needed
-        current_rect = self.rect()
-        if self._last_rect == current_rect and self.class_name_item.toPlainText():
-            return
-            
-        self._last_rect = current_rect
-        
-        # Update text - only show class name, no confidence
-        class_name = self.main_window.classes_dropdown.itemText(self.class_id)
-        
-        # Update appearance
-        self.class_name_item.setPlainText(class_name)
-        self.class_name_item.setDefaultTextColor(QColor(255, 255, 255))
-        
-        # Update font - make it slightly smaller to fit better
-        font = self.class_name_item.font()
-        font.setPointSize(self.main_window.font_size_slider.value())  # Removed the +1 to make text smaller
-        self.class_name_item.setFont(font)
-        
-        # Position label at top-left, aligned with bbox
-        label_height = self.class_name_item.boundingRect().height()
-        self.class_name_item.setPos(self.rect().topLeft() - QPointF(0, label_height + 2))
-
-    def get_formatted_class_text(self):
-        return self.main_window.classes_dropdown.itemText(self.class_id)
-
-    def update_class_color_and_position(self):
-        offset = 14
-        position_x, position_y = self.rect().x(), self.rect().y() - offset
-        self.class_name_item.setPos(position_x, position_y)
-        self.class_name_item.setDefaultTextColor(QColor(255, 255, 255))
-
-
-    def update_class_name_item_font(self):
-        font = self.class_name_item.font()
-        font.setPointSize(self.main_window.font_size_slider.value() + 1)
-        self.class_name_item.setFont(font)
-
-    def set_class_id(self, class_id):
-        """
-        Set the class ID and update the bounding box label safely.
-        """
-        if sip.isdeleted(self):  #  Prevent updates on deleted objects
-            logger.warning("⚠️ Attempted to update a deleted BoundingBoxDrawer object.")
-            return  
-
-        self.class_id = class_id
-        self.update_class_name_item()
-
-    def update_bbox(self):
-        if self.scene() and self in self.scene().items():  # Avoid re-adding
-            return  
-        rect = self.rect()
-        if self.scene():
-            img_width = self.scene().width()
-            img_height = self.scene().height()
-            x_center = (rect.x() + rect.width() / 2) / img_width
-            y_center = (rect.y() + rect.height() / 2) / img_height
-            width = rect.width() / img_width
-            height = rect.height() / img_height
-            self.bbox = BoundingBox(self.class_id, x_center, y_center, width, height, self.confidence)
-
-
-    def set_selected(self, selected):
-        """Set selection state safely."""
-        if sip.isdeleted(self):
-            return
-        self.setSelected(selected)
-        
-        # Update Z-value based on selection
-        self.set_z_order(bring_to_front=selected)
-
-
-
-    def mouseDoubleClickEvent(self, event):
-        """Ensures the cursor remains an arrow after a double-click."""
-        if event.button() == Qt.LeftButton and not event.modifiers() & Qt.ControlModifier:
-            self.setFlag(QGraphicsItem.ItemIsMovable, True)
-            self.dragStartPos = event.pos() - self.rect().topLeft()
-            self.setPen(QPen(QColor(0, 255, 0), 2))
-
-            # ✅ Always enforce the arrow cursor
-            self.setCursor(Qt.ArrowCursor)
-        else:
-            super().mouseDoubleClickEvent(event)
-
-            # ✅ If the event is handled elsewhere, still force the cursor back to an arrow
-            self.setCursor(Qt.ArrowCursor)
-
-
-
-
-
     def reset_color(self):
         self.setPen(QPen(self.get_color(self.class_id, self.main_window.classes_dropdown.count()), 2))
 
@@ -1718,10 +1335,19 @@ class SegmentationDrawer(QGraphicsPolygonItem):
 
 
     def remove_self(self):
-        """Remove segmentation from scene and update the label file."""
+        """Ensure segmentation is fully removed."""
         if self.scene():
             self.scene().removeItem(self)
-        self.remove_segmentation_from_file()  # ✅ Update label file
+
+        self.remove_segmentation_from_file()
+
+        # Remove from parent's list to ensure reference cleanup
+        if hasattr(self.main_window, 'segmentation_list'):
+            self.main_window.segmentation_list.remove(self)
+
+        self.deleteLater()  # Ensures it is properly removed
+
+
     def remove_segmentation_from_file(self):
     
         """Remove segmentation label from the .txt file safely."""
@@ -8612,8 +8238,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             for f in os.listdir(directory)
             if os.path.splitext(f)[1].lower() in extensions and not self.is_placeholder_file(f)
         ]
-
-
 
 
     def preprocess_placeholder_image(self, image_path):
