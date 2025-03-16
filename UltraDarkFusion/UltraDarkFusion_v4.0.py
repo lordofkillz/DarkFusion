@@ -7976,9 +7976,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         current_label_file = os.path.splitext(self.current_file)[0] + '.txt'
         # Clear the current bounding boxes from the scene.
         for item in self.screen_view.scene().items():
-            if isinstance(item, BoundingBoxDrawer,SegmentationDrawer):
+            if isinstance(item, (BoundingBoxDrawer, SegmentationDrawer)):  # ✅ Fixed
                 self.screen_view.scene().removeItem(item)
-        
+
         # If the label file exists, load and display the new boxes.
         if os.path.exists(current_label_file):
             try:
@@ -7995,6 +7995,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
         # Optionally, update any UI elements that show the count of boxes, etc.
         self.update_bounding_box_count_display()
+
     
 
 
