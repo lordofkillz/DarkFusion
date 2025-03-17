@@ -84,8 +84,10 @@ import mediapipe as mp
 import sip
 import codecs
 from logging.handlers import WatchedFileHandler
-
+from dotenv import load_dotenv, set_key
 # Setup logger configuration
+dotenv_path = os.path.join(os.getcwd(), ".env")
+load_dotenv(dotenv_path)
 
 def setup_logger():
     logger = logging.getLogger('UltraDarkFusionLogger')
@@ -7834,10 +7836,15 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
 
 
-    def update_filter_spinbox(self):
+    def update_filter_spinbox(self, classes=None):
         """
-        Populate the QComboBox with class names, indices, and special options.
+        Populate the filter spinbox with class names and synchronize it with the dropdown.
         """
+        if classes is None:
+            classes = self.class_names  # Use stored class names if not provided
+
+        logger.info(f"Updating filter spinbox with classes: {classes}")  # Debugging log
+
         self.filter_class_spinbox.blockSignals(True)  # Prevent triggering events during update
         self.filter_class_spinbox.clear()  # Clear existing entries
 
@@ -7846,23 +7853,33 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.filter_class_spinbox.addItem("Blanks (-2)")
 
         # Add class indices and names
-        for idx, class_name in enumerate(self.class_names):
+        for idx, class_name in enumerate(classes):
+            logger.info(f"Adding class {idx}: {class_name} to spinbox")  # Debugging log
             self.filter_class_spinbox.addItem(f"{idx}: {class_name}")
 
+        self.filter_class_spinbox.setEnabled(True)  # Ensure it's enabled
         self.filter_class_spinbox.blockSignals(False)  # Re-enable signals
+
+
         
     def on_filter_class_spinbox_changed(self, index):
         """
         Handle changes in the class filter ComboBox.
         """
         current_text = self.filter_class_spinbox.currentText()
+        logger.info(f"Filter spinbox changed: {current_text}")
+
         if current_text.startswith("All"):
             self.filter_class(-1)  # Special case: All
         elif current_text.startswith("Blanks"):
             self.filter_class(-2)  # Special case: Blanks
         else:
-            class_index = int(current_text.split(":")[0])  # Extract the class index
-            self.filter_class(class_index)
+            try:
+                class_index = int(current_text.split(":")[0])  # Extract the class index
+                self.filter_class(class_index)
+            except ValueError:
+                logger.error(f"Invalid class index from filter: {current_text}")
+
 
 
     def filter_class(self, filter_index):
@@ -7890,18 +7907,22 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
                     with open(label_file, 'r') as file:
                         for line in file:
                             try:
-                                if int(line.split()[0]) == filter_index:
+                                class_id = int(line.split()[0])
+                                if class_id == filter_index:
                                     self.filtered_image_files.append(img_file)
                                     break
-                            except Exception as e:
+                            except ValueError as e:
                                 logger.error(f"Error parsing label in {label_file}: {e}")
 
         # Debugging output
         logger.info(f"Filter index: {filter_index}")
         logger.info(f"Filtered images count: {len(self.filtered_image_files)}")
+        logger.info(f"Filtered images: {self.filtered_image_files}")
+
         # Ensure the placeholder image is always at the beginning
         if placeholder_file not in self.filtered_image_files:
             self.filtered_image_files.insert(0, placeholder_file)        
+
         # Update QLabel and ListView
         self.total_images.setText(f"Total Images: {len(self.filtered_image_files)}")
         self.update_list_view(self.filtered_image_files)
@@ -8088,33 +8109,26 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
     def update_list_view(self, image_files):
         """
-        Update the ListView with image file names, even if thumbnails are missing.
+        Update the ListView with filtered image file names.
         """
         filtered_images = [img for img in image_files if img != 'styles/images/default.png']
         logger.info(f"Updating ListView with {len(filtered_images)} files.")
 
-        model = QStandardItemModel()  # Create a new model for the ListView
+        model = QStandardItemModel()
         for image_file in filtered_images:
             base_file = os.path.basename(image_file)
-            item = QStandardItem(base_file)  # Add the base file name
+            item = QStandardItem(base_file)
             item.setFlags(item.flags() & ~Qt.ItemIsEditable)  # Make items uneditable
 
-            thumbnail_file = os.path.join(self.thumbnails_directory, f"{base_file}.jpeg")
-            if os.path.exists(thumbnail_file):
-                # Optionally add custom styling if a thumbnail exists
-                item.setBackground(Qt.green)
-            else:
-                # Highlight missing thumbnails (optional)
-                item.setBackground(Qt.red)
-                logger.warning(f"Thumbnail missing for {base_file}.")
+            # Debugging output
+            logger.info(f"Adding {base_file} to list view.")
 
             model.appendRow(item)
 
-        self.List_view.setModel(model)  # Set the model for the ListView
+        self.List_view.setModel(model)
+        self.total_images.setText(f"Total Images: {len(filtered_images)}")
         logger.info("ListView updated successfully.")
 
-        # Update the QLabel for total images
-        self.total_images.setText(f"Total Images: {len(filtered_images)}")
 
 
 
@@ -8280,10 +8294,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         return os.path.basename(file_path) == os.path.basename(placeholder_file)
 
 
+
+
     def open_image_video(self):
         """
         Open an image directory, load images, initialize classes, and populate views.
         Deduplicate bounding boxes across the entire dataset during loading.
+        Uses dotenv to store last directory persistently without interfering with deleted folders.
         """
         options = QFileDialog.Options()
         options |= QFileDialog.ReadOnly
@@ -8292,8 +8309,18 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.label_progress.setValue(0)
         self.clear_annotations()
 
-        # Read the last directory from the settings
-        dir_name = QFileDialog.getExistingDirectory(None, "Open Image Directory", options=options)
+        # 🔹 Retrieve last used directory from .env file
+        last_used_directory = os.getenv("ULTRADARKFUSION_LAST_DIR", None)
+
+        # Ensure the directory exists; otherwise, fallback to the current working directory
+        if last_used_directory and os.path.exists(last_used_directory):
+            start_directory = last_used_directory
+        else:
+            start_directory = os.getcwd()  # Fallback directory if last directory is invalid
+
+        # Open QFileDialog starting from the last known directory
+        dir_name = QFileDialog.getExistingDirectory(None, "Open Image Directory", start_directory, options=options)
+
         placeholder_image_path = 'styles/images/default.png'  # Adjust this path if needed
 
         #  Preprocess the placeholder before anything else
@@ -8302,7 +8329,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         if not dir_name:
             return  # Do nothing if no directory is selected
 
-        self.saveSettings()  # Save the settings after modifying it
+        # 🔹 Store last used directory in .env file
+        self.last_image_directory = dir_name
+        set_key(dotenv_path, "ULTRADARKFUSION_LAST_DIR", dir_name)  # Persist directory across restarts
+
+        self.saveSettings()  # Save the settings after modifying them
         self.image_directory = dir_name
         logger.info(f"📂 Image Directory: {self.image_directory}")
 
@@ -8311,13 +8342,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         if not self.class_names:
             logger.warning("⚠️ No classes found in classes.txt. Using default class ['person'].")
             self.class_names = ['person']
-        
+
         # ✅ Ensure the classes dropdown is initialized correctly before use
         if not hasattr(self, "classes_dropdown"):
             self.classes_dropdown = QComboBox()  # Ensure dropdown is defined
 
         self.update_classes_dropdown(self.class_names)  # Ensure the dropdown is populated
-        
+
         #  Load image files in the directory
         self.image_files = self.sorted_nicely(self.get_image_files(dir_name))
 
@@ -8329,7 +8360,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             )
             self.dedup_worker.progress.connect(self.label_progress.setValue)
             self.dedup_worker.finished.connect(lambda: logger.info("✅ Deduplication completed."))
-
             self.dedup_worker.start()
 
         #  Insert placeholder image at the beginning **only if it's valid**
@@ -9200,7 +9230,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         return 0
     def update_classes_dropdown(self, classes):
         """
-        Update the classes dropdown with a list of classes without logging class names.
+        Update the classes dropdown with a list of classes and synchronize the filter spinbox.
         """
         self.classes_dropdown.clear()  # Clear existing items
         self.class_visibility = {cls: True for cls in classes}  # Default visibility: True
@@ -9216,11 +9246,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.classes_dropdown.setModel(model)
         self.classes_dropdown.setItemDelegate(CheckboxDelegate(self.classes_dropdown))
 
+        # Sync the filter spinbox with the dropdown
+        self.update_filter_spinbox(classes)  # 🔹 Ensure sync here
+
         # Connect changes to toggle_class_visibility
         model.itemChanged.connect(self.handle_class_visibility_change)
 
-        # ✅ Log the update event WITHOUT class names
         logger.info(f"📌 Classes dropdown updated. Loaded {len(classes)} classes.")
+
 
 
     def handle_class_visibility_change(self, item):
@@ -9657,14 +9690,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             
     def load_classes(self, data_directory=None, default_classes=None, create_if_missing=True):
         """
-        Load class names from 'classes.txt'. If images are loaded, use the image directory.
-        If using video, webcam, or screen capture, use the working directory.
-        If 'classes.txt' is missing, create it with default classes.
+        Load class names from 'classes.txt'. If missing, create with default classes.
         """
-        # Determine correct directory
         active_directory = data_directory or self.image_directory or os.getcwd()
 
-        # Ensure the directory exists
         if not os.path.exists(active_directory):
             logger.error(f"❌ Error: Directory does not exist: {active_directory}")
             return []
@@ -9677,15 +9706,17 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
                 with open(classes_file, 'r') as f:
                     class_names = [line.strip() for line in f if line.strip()]
 
-                # 🔹 Avoid redundant updates if classes haven't changed
+                # Sync only if there's a change
                 if hasattr(self, "class_names") and self.class_names == class_names:
                     logger.debug("✅ No changes detected in classes.txt. Skipping unnecessary updates.")
                     return class_names
 
-                self.id_to_class = {i: name for i, name in enumerate(class_names)}
                 self.class_names = class_names
+                self.id_to_class = {i: name for i, name in enumerate(class_names)}
 
-                # 🔹 Dropdown update is now optional (controlled in initialize_classes)
+                # 🔹 Update UI dropdown and filter spinbox
+                self.update_classes_dropdown(class_names)
+
                 logger.info(f"📄 Loaded classes from: {classes_file}")
                 return class_names
             except Exception as e:
@@ -9693,21 +9724,25 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
         # If missing, create 'classes.txt' with default classes
         if create_if_missing and not os.path.exists(classes_file):
-            default_classes = default_classes or ['person']  # Default if no classes
+            default_classes = default_classes or ['person']
             try:
                 with open(classes_file, 'w') as f:
                     for cls in default_classes:
                         f.write(f"{cls}\n")
-                self.id_to_class = {i: cls for i, cls in enumerate(default_classes)}
-                self.class_names = default_classes
 
-                # 🔹 Dropdown update controlled in initialize_classes
+                self.class_names = default_classes
+                self.id_to_class = {i: cls for i, cls in enumerate(default_classes)}
+
+                # 🔹 Update UI dropdown and filter spinbox
+                self.update_classes_dropdown(default_classes)
+
                 logger.info(f"📄 Created 'classes.txt' at: {classes_file}")
                 return default_classes
             except Exception as e:
                 logger.error(f"❌ Error creating {classes_file}: {e}")
 
         return []
+
 
 
 
