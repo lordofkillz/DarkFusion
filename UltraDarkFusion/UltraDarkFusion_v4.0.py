@@ -38,7 +38,7 @@ from PIL import Image
 from PyQt5 import QtCore, QtWidgets, uic
 from PyQt5.QtCore import (QEvent, QModelIndex, QObject,
                           QRectF, QRunnable, Qt, QThread, QThreadPool,
-                          QTimer, QUrl, pyqtSignal, pyqtSlot, QPointF,QModelIndex,Qt,QEvent,QPropertyAnimation, QEasingCurve,QRect,QProcess,QRectF)
+                          QTimer, QUrl, pyqtSignal, pyqtSlot, QPointF,QModelIndex,Qt,QEvent,QPropertyAnimation, QEasingCurve,QRect,QProcess,QRectF,QMetaObject)
 from PyQt5.QtGui import (QBrush, QColor, QFont, QImage, QImageReader,
                          QImageWriter, QMovie, QPainter, QPen,
                          QPixmap,  QStandardItem,
@@ -64,10 +64,9 @@ import webbrowser
 import threading
 from PIL import Image
 from rectpack import newPacker
-from PyQt5.QtGui import QImage
 from PyQt5.QtWidgets import QAction
 from sahi_predict_wrapperv4 import SahiPredictWrapper
-from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QLabel, QLineEdit,QPushButton, QSpinBox, QFileDialog,QComboBox,QDoubleSpinBox)
+from PyQt5.QtWidgets import (QDialog, QLineEdit,QPushButton, QSpinBox, QComboBox,QDoubleSpinBox)
 from PyQt5.QtWidgets import QAbstractItemView
 from PyQt5.QtCore import QItemSelectionModel
 from PyQt5.QtCore import pyqtSlot, QModelIndex
@@ -85,6 +84,8 @@ import sip
 import codecs
 from logging.handlers import WatchedFileHandler
 from dotenv import load_dotenv, set_key
+from torch.amp import autocast
+
 # Setup logger configuration
 dotenv_path = os.path.join(os.getcwd(), ".env")
 load_dotenv(dotenv_path)
@@ -531,14 +532,15 @@ class CustomGraphicsView(QGraphicsView):
 
         elif self.selected_bbox and not self.drawing:
             # ✅ Prevent crash if the selected bounding box was deleted
-            if sip.isdeleted(self.selected_bbox):  
-                logger.warning("⚠️ Attempted to move a deleted bounding box.")
-                self.selected_bbox = None  # Reset reference
-            else:
+            if sip.isdeleted(self.selected_bbox) or self.selected_bbox.scene() is None:
+                logger.warning("⚠️ Attempted to move a deleted bounding box. Resetting selection.")
+                self.selected_bbox = None  # ✅ Reset reference to avoid issues
+            elif event.buttons() & Qt.LeftButton:  # ✅ Only move when mouse is clicked
                 self.selected_bbox.mouseMoveEvent(event)
 
         else:
             super().mouseMoveEvent(event)
+
 
 
     def _handle_segmentation_drawing(self, event):
@@ -1058,41 +1060,55 @@ class BoundingBoxDrawer(QGraphicsRectItem):
     def mouseDoubleClickEvent(self, event):
         """Ensures the cursor remains an arrow after a double-click."""
         if event.button() == Qt.LeftButton and not event.modifiers() & Qt.ControlModifier:
-            self.setFlag(QGraphicsItem.ItemIsMovable, True)
+            # Ensure bounding box can't move outside the image
+            rect = self.rect()
+            img_width = self.main_window.image.width()
+            img_height = self.main_window.image.height()
+
+            if rect.right() > img_width or rect.bottom() > img_height:
+                return  # Prevent activation if out of bounds
+
+            self.setFlag(QGraphicsItem.ItemIsMovable, True)  # ✅ Enable only if within bounds
             self.dragStartPos = event.pos() - self.rect().topLeft()
             self.setPen(QPen(QColor(0, 255, 0), 2))
 
-            # ✅ Always enforce the arrow cursor
-            self.setCursor(Qt.ArrowCursor)
+            self.setCursor(Qt.ArrowCursor)  # ✅ Keep cursor correct
         else:
             super().mouseDoubleClickEvent(event)
+            self.setCursor(Qt.ArrowCursor)  # ✅ Always reset cursor
 
-            # ✅ If the event is handled elsewhere, still force the cursor back to an arrow
-            self.setCursor(Qt.ArrowCursor)
 
 
     def reset_color(self):
         self.setPen(QPen(self.get_color(self.class_id, self.main_window.classes_dropdown.count()), 2))
 
-    def mouseMoveEvent(self, event):   
-        self.setCursor(Qt.ArrowCursor)  # ✅ Force cursor to stay an arrow
-        
+    def mouseMoveEvent(self, event):
+        """Prevents bounding box from moving outside the image area while dragging."""
+        self.setCursor(Qt.ArrowCursor)  # ✅ Keep cursor an arrow
+
         if self.dragStartPos is None:
-            return
-        
+            return  # Don't process movement if dragging isn't active
+
         newPos = event.pos() - self.dragStartPos
         newRect = QRectF(newPos, self.rect().size())
 
-        if self.scene() is not None:
-            maxLeft = 0
-            maxTop = 0
-            maxRight = self.scene().width() - newRect.width()
-            maxBottom = self.scene().height() - newRect.height()
-            newRect.moveLeft(max(maxLeft, min(newRect.left(), maxRight)))
-            newRect.moveTop(max(maxTop, min(newRect.top(), maxBottom)))
+        # Get actual image dimensions
+        img_width = self.main_window.image.width()
+        img_height = self.main_window.image.height()
 
-        self.setRect(newRect)
-        
+        # Compute valid bounds for the bounding box
+        maxLeft = 0
+        maxTop = 0
+        maxRight = img_width - self.rect().width()
+        maxBottom = img_height - self.rect().height()
+
+        # **Clamping to prevent the bounding box from going outside**
+        clamped_x = max(maxLeft, min(newRect.left(), maxRight))
+        clamped_y = max(maxTop, min(newRect.top(), maxBottom))
+
+        # Set new position, ensuring it stays within valid image bounds
+        self.setRect(QRectF(clamped_x, clamped_y, self.rect().width(), self.rect().height()))
+
         # Ensure consistent Z-value when dragging
         self.set_z_order(bring_to_front=True)
 
@@ -1101,18 +1117,30 @@ class BoundingBoxDrawer(QGraphicsRectItem):
         super().mouseMoveEvent(event)  # ✅ Keep default behavior intact
 
 
+
     def update_class_name_position(self):
         offset = 14
         new_label_pos = QPointF(self.rect().x(), self.rect().y() - offset)
         self.class_name_item.setPos(new_label_pos)
         self.class_name_item.update()
     def mouseReleaseEvent(self, event):
-        """Handles bounding box movement and release events."""
+        """Handles bounding box movement and release events, ensuring it stays in bounds."""
+        if sip.isdeleted(self):  # ✅ Prevent operations on deleted objects
+            return
+
         if self.dragStartPos is not None:
-            self.final_rect = self.rect()
+            img_width = self.main_window.image.width()
+            img_height = self.main_window.image.height()
+
+            # Re-clamp position in case of unwanted movement on release
+            rect = self.rect()
+            clamped_x = max(0, min(rect.x(), img_width - rect.width()))
+            clamped_y = max(0, min(rect.y(), img_height - rect.height()))
+            self.setRect(QRectF(clamped_x, clamped_y, rect.width(), rect.height()))
+
             self.dragStartPos = None
             self.update_bbox()
-            self.setFlag(QGraphicsItem.ItemIsMovable, False)
+            self.setFlag(QGraphicsItem.ItemIsMovable, False)  # ✅ Disable moving after release
             self.setPen(QPen(self.get_color(self.class_id, self.main_window.classes_dropdown.count()), 2))
 
         if event.button() == Qt.LeftButton and event.modifiers() == Qt.ControlModifier:
@@ -1120,20 +1148,13 @@ class BoundingBoxDrawer(QGraphicsRectItem):
             self.setFlag(QGraphicsItem.ItemIsMovable, True)
             self.setFlag(QGraphicsItem.ItemIsSelectable, True)
             self.setFlag(QGraphicsItem.ItemIsFocusable, True)
-        
-        # ✅ Reset Z-order after release
-        self.set_z_order(bring_to_front=False)
 
-        # ✅ Ensure cursor remains an arrow
+        self.set_z_order(bring_to_front=False)
         self.setCursor(Qt.ArrowCursor)
 
-        # ✅ Prevent crash by ensuring deleted items are unreferenced
-        if sip.isdeleted(self):  
-            if self.main_window.selected_bbox == self:
-                self.main_window.selected_bbox = None
-            logger.warning("⚠️ Bounding box was deleted while in use.")
-
         super().mouseReleaseEvent(event)
+
+
 
 class BoundingBox:
     """
@@ -1304,8 +1325,9 @@ class SegmentationDrawer(QGraphicsPolygonItem):
 
 
 
+
     def save_segmentation_labels(self):
-        """Save segmentation in Ultralytics YOLO format, clamping points within image boundaries."""
+        """Save segmentation in Ultralytics YOLO format, ensuring labels are properly formatted."""
         if not self.file_name or len(self.points) < 3 or not hasattr(self.main_window, "image"):
             return  # Skip if no file name, too few points, or no reference to image
 
@@ -1315,39 +1337,26 @@ class SegmentationDrawer(QGraphicsPolygonItem):
         img_width = self.main_window.image.width()
         img_height = self.main_window.image.height()
 
-        # Clamp segmentation points within the image boundaries
-        clamped_points = [
-            (max(0, min(img_width - 1, x)), max(0, min(img_height - 1, y)))
-            for x, y in self.points
-        ]
-
-        # Convert to YOLO format (normalize between 0-1)
-        normalized_points = [
-            (x / img_width, y / img_height) for x, y in clamped_points
-        ]
+        # Convert points to normalized YOLO format
+        normalized_points = [(x / img_width, y / img_height) for x, y in self.points]
 
         # Format: class_id x1 y1 x2 y2 ... xn yn
         label_text = f"{self.class_id} " + " ".join(f"{x:.6f} {y:.6f}" for x, y in normalized_points)
 
-        # Append to file
         with open(label_file, "a") as f:
             f.write(label_text + "\n")
 
         logging.info(f"✅ Segmentation saved for {self.file_name}")
 
+        self.update_class_name_item()  # ✅ Ensure label updates when saved
+
+
 
     def remove_self(self):
-        """Ensure segmentation is fully removed."""
+        """Remove segmentation from scene and update the label file."""
         if self.scene():
             self.scene().removeItem(self)
-
-        self.remove_segmentation_from_file()
-
-        # Remove from parent's list to ensure reference cleanup
-        if hasattr(self.main_window, 'segmentation_list'):
-            self.main_window.segmentation_list.remove(self)
-
-        self.deleteLater()  # Ensures it is properly removed
+        self.remove_segmentation_from_file()  # ✅ Update label file
 
 
     def remove_segmentation_from_file(self):
@@ -1393,187 +1402,60 @@ class SegmentationDrawer(QGraphicsPolygonItem):
         return QColor.fromHsv(int(hue), 255, 255, alpha)
 
     def update_opacity(self):
-        """Update segmentation opacity based on UI controls."""
+        """Update the opacity of segmentation based on UI controls."""
+        logger = logging.getLogger('UltraDarkFusionLogger')
         if self.main_window.shade_checkbox.isChecked():
             shade_value = self.main_window.shade_slider.value()
             mapped_alpha = int((shade_value / 100) * 255)
+            logger.info(f"Shading enabled. Shade value: {shade_value}, Mapped alpha: {mapped_alpha}")
         else:
-            mapped_alpha = 150
+            mapped_alpha = 150  # Default to 150 when shading is OFF
+            logger.info("Shading disabled. Using default alpha: 150")
 
         shaded_color = QColor(self._base_color.red(), self._base_color.green(), self._base_color.blue(), mapped_alpha)
         self.setBrush(QBrush(shaded_color))
-        self.update()
+        self.update()  # Force repaint
+        logger.info("Segmentation opacity updated.")
 
     def mousePressEvent(self, event):
-        """Handles selection and right-click delete."""
+        """Handles selection and enables dragging without modifying shape."""
         self.setCursor(Qt.ArrowCursor)  # ✅ Ensure cursor stays an arrow
         if event.button() == Qt.LeftButton:
             self.setOpacity(0.5)
-            self.setFlag(QGraphicsItem.ItemIsMovable, True)  # ✅ Allow dragging if clicked
+            self.setFlag(QGraphicsItem.ItemIsMovable, True)  # ✅ Allow dragging
+            self.dragStartPos = event.scenePos()  # ✅ Store initial click position
+            self.startPolygonPos = self.pos()  # ✅ Store initial polygon position
+            self.grabMouse()  # ✅ Explicitly grab mouse to prevent warnings
         elif event.button() == Qt.RightButton:
             self.remove_self()
         super().mousePressEvent(event)
 
 
     def mouseMoveEvent(self, event):
-        """Allows drawing segmentation dynamically with movement filtering."""
+        """Moves the segmentation polygon without modifying points."""
         self.setCursor(Qt.ArrowCursor)  # ✅ Keep cursor as an arrow even while moving
-        try:
-            if self.main_window.segmentation_mode.isChecked():
-                scene_pos = event.scenePos()
 
-                # Ensure movement is significant before adding a new point
-                if self.points and (abs(scene_pos.x() - self.points[-1][0] * self.main_window.image.width()) < 5
-                                    and abs(scene_pos.y() - self.points[-1][1] * self.main_window.image.height()) < 5):
-                    return  # Ignore small, unnecessary movements
-
-                self.append_point(scene_pos)
-                self.update_polygon()
-        except RuntimeError as e:
-            logging.error(f"Error drawing segmentation: {e}")
-        except Exception as e:
-            logging.error(f"Unexpected error in segmentation drawing: {e}")
-        super().mouseMoveEvent(event)
+        if self.isSelected() and event.buttons() & Qt.LeftButton:
+            newPos = event.scenePos()
+            delta = newPos - self.dragStartPos  # ✅ Calculate movement difference
+            self.setPos(self.startPolygonPos + delta)  # ✅ Translate entire polygon
+        else:
+            super().mouseMoveEvent(event)
 
 
     def mouseReleaseEvent(self, event):
-        """Handles deselection."""
+        """Ensures that moving the segmentation does not alter its shape."""
         self.setCursor(Qt.ArrowCursor)  # ✅ Reset cursor to arrow on release
         self.setOpacity(1.0)
         self.setFlag(QGraphicsItem.ItemIsMovable, False)  # ✅ Stop dragging when released
+
+        if self.grabMouse():  # ✅ Only ungrab mouse if it was grabbed
+            self.ungrabMouse()
+
         super().mouseReleaseEvent(event)
 
 
-    def update_polygon(self):
-        """Update the polygon dynamically as new points are added."""
-        self.setPolygon(QPolygonF([QPointF(x * self.main_window.image.width(), y * self.main_window.image.height()) for x, y in self.points]))
-        self.save_segmentation_labels()  # ✅ Ensure label file stays updated
 
-    def finalize(self):
-        """Finalize the segmentation and save the label."""
-        if len(self.points) >= 3:
-            polygon = QPolygonF([QPointF(x * self.main_window.image.width(), y * self.main_window.image.height()) for x, y in self.points])
-            self.setPolygon(polygon)
-
-            if not self.scene() or self not in self.scene().items():
-                self.scene().addItem(self)  # ✅ Only add if not already present
-
-            self.update_class_name_item()  # ✅ Ensure label stays on the polygon
-            self.save_segmentation_labels()
-
-
-    def save_segmentation_labels(self):
-        """Save segmentation in Ultralytics YOLO format, ensuring labels are properly formatted."""
-        if not self.file_name or len(self.points) < 3 or not hasattr(self.main_window, "image"):
-            return  # Skip if no file name, too few points, or no reference to image
-
-        label_file = os.path.splitext(self.file_name)[0] + ".txt"
-
-        # Get image dimensions
-        img_width = self.main_window.image.width()
-        img_height = self.main_window.image.height()
-
-        # Convert points to normalized YOLO format
-        normalized_points = [(x / img_width, y / img_height) for x, y in self.points]
-
-        # Format: class_id x1 y1 x2 y2 ... xn yn
-        label_text = f"{self.class_id} " + " ".join(f"{x:.6f} {y:.6f}" for x, y in normalized_points)
-
-        with open(label_file, "a") as f:
-            f.write(label_text + "\n")
-
-        logging.info(f"✅ Segmentation saved for {self.file_name}")
-
-        self.update_class_name_item()  # ✅ Ensure label updates when saved
-
-
-
-    def remove_self(self):
-        """Remove segmentation from scene and update the label file."""
-        if self.scene():
-            self.scene().removeItem(self)
-        self.remove_segmentation_from_file()  # ✅ Update label file
-    def remove_segmentation_from_file(self):
-        """Remove segmentation label from the .txt file safely."""
-        
-        if not self.file_name:  # ✅ Prevent crashes by checking None first
-            logger.error("❌ Error: Cannot remove segmentation - `file_name` is None!")
-            return
-
-        label_file = os.path.splitext(self.file_name)[0] + ".txt"
-
-        if not os.path.exists(label_file):
-            logger.warning(f"⚠️ Label file does not exist: {label_file}")
-            return
-
-        current_label = f"{self.class_id} " + " ".join(f"{x:.6f} {y:.6f}" for x, y in self.points)
-
-        try:
-            # Read and filter labels
-            with open(label_file, "r") as f:
-                lines = f.readlines()
-            updated_lines = [line for line in lines if line.strip() != current_label]
-
-            # Write back only remaining labels
-            with open(label_file, "w") as f:
-                f.writelines(updated_lines)
-
-            logger.info(f"✅ Segmentation removed from {label_file}")  # Log success message
-
-        except Exception as e:
-            logger.error(f"❌ Error removing segmentation from {label_file}: {e}")  # Log failure
-
-
-
-    @staticmethod
-    def get_color(class_id, num_classes, alpha=150):
-        """Generate a unique color for each class."""
-        if num_classes == 0:
-            return QColor(255, 255, 255, alpha)
-        hue_step = 360 / num_classes
-        hue = (class_id * hue_step) % 360
-        return QColor.fromHsv(int(hue), 255, 255, alpha)
-
-    def update_opacity(self):
-        """Update segmentation opacity based on UI controls."""
-        if self.main_window.shade_checkbox.isChecked():
-            shade_value = self.main_window.shade_slider.value()
-            mapped_alpha = int((shade_value / 100) * 255)
-        else:
-            mapped_alpha = 150
-
-        shaded_color = QColor(self._base_color.red(), self._base_color.green(), self._base_color.blue(), mapped_alpha)
-        self.setBrush(QBrush(shaded_color))
-        self.update()
-
-    def mousePressEvent(self, event):
-        """Handles selection and right-click delete."""
-        self.setCursor(Qt.ArrowCursor)  # ✅ Ensure cursor stays an arrow
-        if event.button() == Qt.LeftButton:
-            self.setOpacity(0.5)
-        elif event.button() == Qt.RightButton:
-            self.remove_self()
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):
-        """Allows drawing segmentation dynamically."""
-        self.setCursor(Qt.ArrowCursor)  # ✅ Keep cursor as an arrow even while moving
-        try:
-            if self.main_window.segmentation_mode.isChecked():
-                scene_pos = event.scenePos()
-                self.append_point(scene_pos)
-                self.update_polygon()
-        except RuntimeError as e:
-            logging.error(f"Error drawing segmentation: {e}")
-        except Exception as e:
-            logging.error(f"Unexpected error in segmentation drawing: {e}")
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        """Handles deselection."""
-        self.setCursor(Qt.ArrowCursor)  # ✅ Reset cursor to arrow on release
-        self.setOpacity(1.0)
-        super().mouseReleaseEvent(event)
 
 
 
@@ -2697,24 +2579,24 @@ class UiLoader:
         self.main_window = main_window
 
     def setup_ui(self, show_images=True):
+        self.main_window.preview_list.setUpdatesEnabled(False)  # 🚀 Prevent UI from updating mid-setup
         self.main_window.preview_list.setRowCount(0)
         self.main_window.preview_list.setColumnCount(5)
         self.main_window.preview_list.setHorizontalHeaderLabels(['Image', 'Class Name', 'ID', 'Size', 'Bounding Box'])
 
         # Set up placeholder image
-        placeholder_pixmap = QPixmap(128, 128)  # Create a 128x128 placeholder
-        placeholder_pixmap.fill(Qt.gray)  # Fill the pixmap with a gray color
+        placeholder_pixmap = QPixmap(128, 128)
+        placeholder_pixmap.fill(Qt.gray)  
 
-        if show_images:
-            self.main_window.preview_list.setColumnWidth(0, 100)
-        else:
-            self.main_window.preview_list.setColumnWidth(0, 0)
+        # Column widths
+        column_widths = [100 if show_images else 0, 50, 25, 50, 250]
+        for col, width in enumerate(column_widths):
+            self.main_window.preview_list.setColumnWidth(col, width)
 
-        self.main_window.preview_list.setColumnWidth(1, 50)
-        self.main_window.preview_list.setColumnWidth(2, 25)
-        self.main_window.preview_list.setColumnWidth(3, 50)
-        self.main_window.preview_list.setColumnWidth(4, 250)
+        self.main_window.preview_list.setUpdatesEnabled(True)  # ✅ Re-enable UI updates after setup
+
         logger.info("UI setup completed.")
+
 
 
 class CropWorker(QThread):
@@ -2896,6 +2778,29 @@ class DeduplicationWorker(QThread):
             # Emit progress update (e.g., percentage)
             self.progress.emit(int((idx + 1) / total * 100))
         self.finished.emit()
+
+class ImageLoaderThread(QThread):
+    update_progress = pyqtSignal(int)  # Signal to update UI progress
+    images_loaded = pyqtSignal(list)   # Signal to update UI with images
+
+    def __init__(self, image_directory):
+        super().__init__()
+        self.image_directory = image_directory
+
+    def run(self):
+        """Load images in a separate thread to prevent UI freezing."""
+        image_files = [
+            os.path.join(self.image_directory, f).replace("\\", "/")
+            for f in os.listdir(self.image_directory)
+            if os.path.splitext(f)[1].lower() in {'.png', '.jpg', '.jpeg', '.bmp', '.gif', '.tif', '.webp'}
+        ]
+
+        sorted_files = sorted(image_files, key=lambda x: os.path.getsize(x), reverse=True)
+
+        for i, _ in enumerate(sorted_files):
+            self.update_progress.emit(int((i / len(sorted_files)) * 100))  # Update progress bar
+
+        self.images_loaded.emit(sorted_files)  # Send loaded images to UI
 
 ui_file: Path = Path(__file__).resolve().parent / "ultradarkfusion_v4.0.ui"
 with open(ui_file, "r", encoding="utf-8") as file:
@@ -5699,17 +5604,22 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
         try:
             model_kwargs = self.get_model_kwargs()
-            results = self.model(frame, **model_kwargs)  # Run inference
 
-            #  Extract segmentation masks with class IDs
-            segmentations = []
+            # ✅ Perform inference with AMP
+            with torch.autocast(device_type='cuda', dtype=torch.float16):
+                results = self.model(frame, **model_kwargs)  # Run inference
+
+            # ✅ Always initialize both bounding_boxes and segmentation_data
+            bounding_boxes = []
+            segmentation_data = []
+
             if results and hasattr(results[0], 'masks') and results[0].masks is not None:
                 masks = results[0].masks.xy  # Get segmentation mask polygons
                 class_ids = results[0].boxes.cls.cpu().numpy()  # Get class IDs
 
                 # Pair segmentations with class IDs
                 for seg, class_id in zip(masks, class_ids):
-                    segmentations.append((seg, int(class_id)))
+                    segmentation_data.append((seg, int(class_id)))
 
             # Log detected objects and segmentations
             detections = []
@@ -5717,24 +5627,22 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
                 class_index = int(box.cls.item())
                 confidence = float(box.conf.item())
 
-                if hasattr(self.model, 'names') and class_index in self.model.names:
-                    class_name = self.model.names[class_index]
-                else:
-                    class_name = f"unknown_{class_index}"
+                class_name = self.model.names.get(class_index, f"unknown_{class_index}")
 
                 detections.append(f"{class_name} {confidence:.2f}")
 
             logger.debug(f"YOLO detected objects: {detections}")
-            logger.debug(f"Segmentation masks: {len(segmentations)} masks found.")
+            logger.debug(f"Segmentation masks: {len(segmentation_data)} masks found.")
 
             # Annotate the frame with bounding boxes and segmentations
             annotated_frame = results[0].plot()
 
-            return annotated_frame, segmentations
+            return annotated_frame, segmentation_data
 
         except Exception as e:
             logger.error(f"Error during YOLO inference: {e}")
             return frame, None
+
 
 
 
@@ -5838,48 +5746,47 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
     # predict and reivew function       
     def process_images_cuda(self, image_files: List[str], target_size: Tuple[int, int] = (256, 256)) -> List[Image.Image]:
-        """
-        Process single or batch images using OpenCV CUDA.
-        Args:
-            image_files (List[str]): List of image file paths.
-            target_size (Tuple[int, int]): Desired resize dimensions (width, height).
-        Returns:
-            List[Image.Image]: List of processed PIL images.
-        """
+        """Process images using OpenCV CUDA in batches to improve performance."""
         try:
+            if not image_files:
+                return []
+
             stream = cv2.cuda.Stream()
             gpu_images = []
             pil_images = []
 
             for image_file in image_files:
+                img = cv2.imread(image_file)
+                if img is None:
+                    logger.warning(f"Failed to read image: {image_file}")
+                    continue
+
                 gpu_img = cv2.cuda_GpuMat()
-                gpu_img.upload(cv2.imread(image_file))  # Upload image to GPU
+                gpu_img.upload(img, stream)  # ✅ Upload image to GPU
+                gpu_images.append(gpu_img)
 
-                # Process image on GPU
-                gpu_img_rgb = cv2.cuda.cvtColor(gpu_img, cv2.COLOR_BGR2RGB, stream=stream)
-                gpu_img_resized = cv2.cuda.resize(gpu_img_rgb, target_size, stream=stream)
+            if not gpu_images:
+                return []
 
-                gpu_images.append(gpu_img_resized)
+            # Apply GPU processing in a batch
+            gpu_images_rgb = [cv2.cuda.cvtColor(img, cv2.COLOR_BGR2RGB, stream=stream) for img in gpu_images]
+            gpu_images_resized = [cv2.cuda.resize(img, target_size, stream=stream) for img in gpu_images_rgb]
 
-            stream.waitForCompletion()  # Ensure all operations are complete
+            stream.waitForCompletion()  # ✅ Ensure GPU operations complete before moving to CPU
 
-            # Download images to CPU and convert to PIL
-            pil_images = [Image.fromarray(gpu_img.download()) for gpu_img in gpu_images]
+            # Convert GPU images to PIL format
+            pil_images = [Image.fromarray(img.download()) for img in gpu_images_resized]
 
             return pil_images
+        except cv2.error as e:
+            logger.error(f"CUDA Error: {str(e)} - Falling back to CPU processing.")
+            return [Image.open(f).resize(target_size) for f in image_files]  # ✅ Fallback to CPU
         except Exception as e:
             logger.error(f"Error processing images: {str(e)}")
             return []
 
     def lazy_image_batch_generator(self, image_files: List[str], batch_size: int):
-        """
-        Lazy generator for image batches.
-        Args:
-            image_files (List[str]): List of image file paths.
-            batch_size (int): Number of images per batch.
-        Yields:
-            List[str]: Batch of image file paths.
-        """
+        """Lazy generator for image batches."""
         for i in range(0, len(image_files), batch_size):
             yield image_files[i:i + batch_size]
 
@@ -5898,44 +5805,63 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
         batch_generator = self.lazy_image_batch_generator(image_files, batch_size)
 
-        for batch in batch_generator:
-            pil_images = self.process_images_cuda(batch)
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            for batch_index, batch in enumerate(batch_generator):
+                logger.info(f"Processing batch {batch_index + 1}/{(len(image_files) // batch_size) + 1}...")  # ✅ Log progress
+                pil_images = self.process_images_cuda(batch)
 
-            for image_file, pil_image in zip(batch, pil_images):
-                label_file = os.path.splitext(image_file)[0] + '.txt'
-                if not os.path.exists(label_file):
-                    logger.warning(f"No label file found for {image_file}. Skipping.")
-                    continue
+                futures = []
+                for image_file, pil_image in zip(batch, pil_images):
+                    label_file = os.path.splitext(image_file)[0] + '.txt'
+                    if not os.path.exists(label_file):
+                        logger.warning(f"No label file found for {image_file}. Skipping.")
+                        continue
 
-                # Read label data for the image
-                with open(label_file, 'r') as file:
-                    labels = file.readlines()
+                    with open(label_file, 'r') as file:
+                        labels = file.readlines()
 
-                # Process each label and create thumbnails
-                for label_index, label_data in enumerate(labels):
-                    self.create_thumbnail_for_label(image_file, pil_image, label_data, label_index, thumbnails_directory)
+                    # Process each label and create thumbnails asynchronously
+                    for label_index, label_data in enumerate(labels):
+                        futures.append(
+                            executor.submit(
+                                self.create_thumbnail_for_label, 
+                                image_file, pil_image, label_data, label_index, thumbnails_directory
+                            )
+                        )
 
-        # Refresh UI after processing
-        self.preview_list.setRowCount(0)  # Clear existing rows
-        self.update_list_view(self.filtered_image_files)
-        self.preview_list.resizeRowsToContents()
-        self.preview_list.resizeColumnsToContents()
+                # Wait for all tasks to complete
+                for future in futures:
+                    future.result()
 
+        QTimer.singleShot(0, self.refresh_ui)
         logger.info(f"Processing completed for {len(image_files)} images.")
 
-            
+    def refresh_ui(self):
+        """Ensure UI updates are run on the main thread to prevent lag."""
+        QMetaObject.invokeMethod(
+            self, 
+            "update_list_view", 
+            Qt.QueuedConnection, 
+            self.filtered_image_files
+        )
+
+        QMetaObject.invokeMethod(
+            self.preview_list, 
+            "resizeRowsToContents", 
+            Qt.QueuedConnection
+        )
+
+        QMetaObject.invokeMethod(
+            self.preview_list, 
+            "resizeColumnsToContents", 
+            Qt.QueuedConnection
+        )
+
+        logger.info("UI refreshed after processing.")
+
     def create_thumbnail_for_label(self, image_file, pil_image, label_data, label_index, thumbnails_directory):
-        """
-        Create and save a thumbnail for a specific label of an image.
-        Args:
-            image_file (str): Path to the original image file.
-            pil_image (PIL.Image): Processed PIL image.
-            label_data (str): Label data string (bounding box and class).
-            label_index (int): Index of the label in the image's label file.
-            thumbnails_directory (str): Directory to save the thumbnails.
-        """
+        """Efficiently create and save a thumbnail using NumPy slicing."""
         try:
-            # Parse label data (class_id, x_center, y_center, width, height)
             parts = label_data.strip().split()
             if len(parts) != 5:
                 logger.warning(f"Invalid label data: {label_data}")
@@ -5948,23 +5874,24 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             width = width_ratio * img_width
             height = height_ratio * img_height
 
-            # Compute bounding box coordinates
-            x1 = int(x_center - width / 2)
-            y1 = int(y_center - height / 2)
-            x2 = int(x_center + width / 2)
-            y2 = int(y_center + height / 2)
+            x1 = max(0, int(x_center - width / 2))
+            y1 = max(0, int(y_center - height / 2))
+            x2 = min(img_width, int(x_center + width / 2))
+            y2 = min(img_height, int(y_center + height / 2))
 
-            # Crop the region corresponding to the bounding box
-            cropped_image = pil_image.crop((x1, y1, x2, y2))
+            # ✅ Use NumPy slicing instead of `crop()`
+            cropped_array = np.array(pil_image)[y1:y2, x1:x2]
 
-            # Save thumbnail
             base_file = os.path.splitext(os.path.basename(image_file))[0]
             thumbnail_filename = os.path.join(thumbnails_directory, f"{base_file}_{label_index}.jpeg")
-            cropped_image.save(thumbnail_filename, "JPEG")
+
+            Image.fromarray(cropped_array).save(thumbnail_filename, "JPEG")  # ✅ No extra copies
             logger.info(f"Saved thumbnail: {thumbnail_filename}")
 
         except Exception as e:
             logger.error(f"Error creating thumbnail for {image_file} label {label_index}: {str(e)}")
+
+
 
 
     def start_debounce_timer(self, value):
@@ -6764,7 +6691,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
             try:
                 # ✅ Perform inference
-                results = self.model.predict(image, **model_kwargs)
+                with torch.amp.autocast(device_type='cuda'):
+                    results = self.model.predict(image, **model_kwargs)
 
                 # ✅ Always initialize both bounding_boxes and segmentation_data
                 bounding_boxes = []
@@ -7835,30 +7763,36 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         )
 
 
-
     def update_filter_spinbox(self, classes=None):
         """
-        Populate the filter spinbox with class names and synchronize it with the dropdown.
+        Populate the filter spinbox with class names, but only after an image directory is loaded.
+        Log only the total number of classes instead of listing each one.
         """
+        if not hasattr(self, "image_directory") or not self.image_directory:
+            logger.warning("⚠️ Filter spinbox update skipped: image directory not set.")
+            return
+
         if classes is None:
             classes = self.class_names  # Use stored class names if not provided
 
-        logger.info(f"Updating filter spinbox with classes: {classes}")  # Debugging log
+        num_classes = len(classes)
+        logger.info(f"✅ Adding {num_classes} classes to filter spinbox.")  # Clean single log line
 
-        self.filter_class_spinbox.blockSignals(True)  # Prevent triggering events during update
-        self.filter_class_spinbox.clear()  # Clear existing entries
+        self.filter_class_spinbox.blockSignals(True)
+        self.filter_class_spinbox.clear()
 
-        # Add special options
+        # Add filter options
         self.filter_class_spinbox.addItem("All (-1)")
         self.filter_class_spinbox.addItem("Blanks (-2)")
 
-        # Add class indices and names
+        # Add class names (quietly, no log spam)
         for idx, class_name in enumerate(classes):
-            logger.info(f"Adding class {idx}: {class_name} to spinbox")  # Debugging log
             self.filter_class_spinbox.addItem(f"{idx}: {class_name}")
 
-        self.filter_class_spinbox.setEnabled(True)  # Ensure it's enabled
-        self.filter_class_spinbox.blockSignals(False)  # Re-enable signals
+        self.filter_class_spinbox.setEnabled(True)
+        self.filter_class_spinbox.blockSignals(False)
+
+
 
 
         
@@ -8643,10 +8577,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
                 #  Load both bounding boxes and segmentations
                 bounding_boxes, segmentations = self.load_labels(label_file, self.image.width(), self.image.height())
-
-                #  DEBUG: Print segmentations before displaying
-                logger.info(f"📌 Displaying segmentations for {file_name}")
-
 
                 #  Now pass both to display function
                 self.display_bounding_boxes(bounding_boxes, file_name, segmentations)
@@ -9531,8 +9461,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
                 unique_key = f"{file_name}_{unique_id}"
                 self.bounding_boxes[unique_key] = seg_item
 
-        #  Debug to confirm segmentation is added
-        logger.info(f"🎨 Added {len(segmentations)} segmentations to scene for {file_name}")
 
 
     def save_bounding_boxes(self, image_file, img_width, img_height, scene=None, remove_confidence=True, extra_labels=None, log_save=True):
