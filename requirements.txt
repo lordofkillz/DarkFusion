@@ -8,7 +8,7 @@ torchaudio
 pandas==1.5.3
 bcrypt==4.0.1
 pywin32==306
-scipy==1.10.1
+scipy
 
 # Utility packages
 asyncio==3.4.3
@@ -48,7 +48,6 @@ validators
 dill==0.3.7
 pybboxes==0.1.6
 groundingdino-py
-transformers==4.35.0
 diffusers
 addict
 yapf
@@ -58,11 +57,9 @@ rectpack
 # Special dependencies
 mediapipe
 yt-dlp
-pyqt5-tools
 opencv-contrib-python==4.9.0.80
 opencv-python-headless==4.9.0.80
 sip
-protobuf==3.20.3
 onnxruntime-gpu
 tensorrt
 numpy
