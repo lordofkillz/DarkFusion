@@ -51,8 +51,9 @@ mkdir build install
 ```
 
 ### Mandatory Downloads
-- [SAM Weights and Files](https://drive.google.com/file/d/1TcmzFbc3J3rHPzW5o_z8Vo0JfFe0Ffpq)
+- [Download SAM Weights and Files](https://drive.google.com/uc?export=download&id=1Tux3ncgLcCagQ0N3cC25XP4O_UwsjXbP)
   - Extract to `C:\DarkFusion\UltraDarkFusion`
+
 
 ### Anaconda Setup
 - Download and install [Anaconda](https://www.anaconda.com/products/distribution).
