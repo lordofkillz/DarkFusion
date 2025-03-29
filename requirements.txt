@@ -37,6 +37,7 @@ imutils==0.5.4
 PyAutoGUI
 perlin-noise
 watchdog
+python-dotenv
 
 # ML & Vision-related libraries
 GPUtil
