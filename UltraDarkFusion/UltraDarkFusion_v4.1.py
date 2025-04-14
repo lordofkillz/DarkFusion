@@ -42,7 +42,7 @@ from PyQt5.QtCore import (QEvent, QModelIndex, QObject,
 from PyQt5.QtGui import (QBrush, QColor, QFont, QImage, QImageReader,
                          QImageWriter, QMovie, QPainter, QPen,
                          QPixmap,  QStandardItem,
-                         QStandardItemModel, QTransform, QLinearGradient,QIcon,QCursor,QStandardItemModel, QStandardItem,QMouseEvent,QKeyEvent,QPainterPath,QPolygonF)
+                         QStandardItemModel, QTransform, QLinearGradient,QIcon,QCursor,QStandardItemModel, QStandardItem,QMouseEvent,QKeyEvent,QPainterPath,QPolygonF,QPalette)
 from PyQt5.QtWidgets import (QApplication, QFileDialog,
                              QGraphicsDropShadowEffect, QGraphicsItem,
                              QGraphicsPixmapItem, QGraphicsRectItem,
@@ -87,6 +87,18 @@ from dotenv import load_dotenv, set_key
 from torch.amp import autocast
 import codecs
 from logging.handlers import RotatingFileHandler
+import torch
+import torchvision.transforms.functional as F
+import numpy as np
+
+# global functions
+def get_color(class_id, num_classes, alpha=150):
+    if class_id is None or num_classes == 0:
+        return QColor(255, 255, 255, alpha)  # Default white
+    hue_step = 360 / num_classes
+    hue = (class_id * hue_step) % 360
+    return QColor.fromHsv(int(hue), 255, 255, alpha)
+
 # Setup logger configuration
 dotenv_path = os.path.join(os.getcwd(), ".env")
 load_dotenv(dotenv_path)
@@ -267,7 +279,9 @@ class CustomGraphicsView(QGraphicsView):
         self.main_window.crosshair_color.triggered.connect(self.pick_color)  # type: ignore 
         self.main_window.box_size.valueChanged.connect(self.update_bbox_size)  # type: ignore
         self.graphics_scene = QGraphicsScene(self)
-    
+        self.auto_fit_enabled = False
+        
+        
     def _setup_render_settings(self):
         self.setBackgroundBrush(QColor(0, 0, 0))  # Set the background color to black
         self.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)
@@ -380,10 +394,12 @@ class CustomGraphicsView(QGraphicsView):
         self.setRenderHint(QPainter.SmoothPixmapTransform, False)
             
     def resizeEvent(self, event):
-        self.fitInView(self.sceneRect(), Qt.KeepAspectRatio)  # type: ignore
+        if self.auto_fit_enabled:
+            self.fitInView(self.sceneRect(), Qt.KeepAspectRatio)
         self.fitInView_scale = self.transform().mapRect(QRectF(0, 0, 1, 1)).width()
         self.setTransform(QTransform().scale(self.zoom_scale, self.zoom_scale))
         self.update()
+
 
     def mousePressEvent(self, event):
         if self.main_window.edit_mode_active():
@@ -639,7 +655,6 @@ class CustomGraphicsView(QGraphicsView):
             start_point = np.array([self.start_point.x(), self.start_point.y()], dtype=int)
             end_point_np = np.array([end_point.x(), end_point.y()], dtype=int)
 
-            # Clamp coordinates to scene dimensions (maintains current logic)
             scene_rect = self.sceneRect()
             min_point = np.clip(
                 np.minimum(start_point, end_point_np),
@@ -653,44 +668,84 @@ class CustomGraphicsView(QGraphicsView):
                 [scene_rect.right(), scene_rect.bottom()]
             ).astype(int)
 
-            # Optional snapping logic when outline_Checkbox is checked
-            if self.main_window.outline_Checkbox.isChecked() and hasattr(self.main_window, 'processed_image'):
-                gray_img = cv2.cvtColor(self.main_window.processed_image, cv2.COLOR_BGR2GRAY)
-
-                x1, y1 = min_point
-                x2, y2 = max_point
-
-                # Clamp again to valid image dimensions explicitly to prevent errors
-                img_h, img_w = gray_img.shape[:2]
-                x1, y1 = np.clip([x1, y1], [0, 0], [img_w - 1, img_h - 1])
-                x2, y2 = np.clip([x2, y2], [0, 0], [img_w - 1, img_h - 1])
-
-                roi = gray_img[y1:y2, x1:x2]
-
-                contours, _ = cv2.findContours(roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-                if contours:
-                    x, y, w, h = cv2.boundingRect(np.vstack(contours))
-                    # Adjust points based on contours within ROI
-                    snapped_min_point = np.array([x1 + x, y1 + y])
-                    snapped_max_point = snapped_min_point + [w, h]
-
-                    # Update min/max points after snapping
-                    min_point, max_point = snapped_min_point, snapped_max_point
-
-            # Calculate dimensions ensuring bounding box meets minimum size
+            # ✅ Remove live snapping here!
             dimensions = np.clip(max_point - min_point, BoundingBoxDrawer.MIN_SIZE, None)
             x, y = min_point
             width, height = dimensions
 
-            # Update the bounding box rectangle
             self.current_bbox.setRect(x, y, width, height)
 
         except RuntimeError as e:
-            logging.error(f"Error while drawing bounding box: {e}")
+            logger.error(f"Error drawing bbox: {e}")
         except Exception as e:
-            logging.error(f"Unexpected error in bounding box drawing: {e}")
+            logger.error(f"bbox error: {e}")
 
+
+
+    def preprocess_roi_for_contours(self, roi):
+        blurred = cv2.GaussianBlur(roi, (3, 3), 0)
+        edges = cv2.Canny(blurred, 50, 150)
+        return edges
+    def snap_bbox_to_contour(self, gray_img, min_point, max_point):
+        x1, y1 = min_point
+        x2, y2 = max_point
+
+        # Clamp to valid image dimensions
+        img_h, img_w = gray_img.shape[:2]
+        x1, y1 = np.clip([x1, y1], [0, 0], [img_w - 1, img_h - 1])
+        x2, y2 = np.clip([x2, y2], [0, 0], [img_w - 1, img_h - 1])
+
+        roi = gray_img[y1:y2, x1:x2]
+        processed_roi = self.preprocess_roi_for_contours(roi)
+
+        contours, _ = cv2.findContours(processed_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        if contours:
+            x, y, w, h = cv2.boundingRect(np.vstack(contours))
+            snapped_min_point = np.array([x1 + x, y1 + y])
+            snapped_max_point = snapped_min_point + [w, h]
+            return snapped_min_point, snapped_max_point
+
+        # If no contours found, return original points
+        return min_point, max_point
+
+    def _finalize_bbox(self):
+        try:
+            if (
+                self.current_bbox
+                and self.current_bbox.rect().width() >= BoundingBoxDrawer.MIN_SIZE
+                and self.current_bbox.rect().height() >= BoundingBoxDrawer.MIN_SIZE
+            ):
+                if self.main_window.outline_Checkbox.isChecked() and hasattr(self.main_window, 'processed_image'):
+                    gray_img = self.main_window.processed_image
+                    if len(gray_img.shape) == 3 and gray_img.shape[2] == 3:
+                        gray_img = cv2.cvtColor(gray_img, cv2.COLOR_BGR2GRAY)
+
+                    rect = self.current_bbox.rect()
+                    min_point = np.array([int(rect.x()), int(rect.y())], dtype=int)
+                    max_point = np.array([int(rect.x() + rect.width()), int(rect.y() + rect.height())], dtype=int)
+
+                    min_point, max_point = self.snap_bbox_to_contour(gray_img, min_point, max_point)
+
+                    x, y = min_point
+                    w, h = max_point - min_point
+                    self.current_bbox.setRect(x, y, w, h)
+
+                self._save_and_play_sound()
+            else:
+                if self.current_bbox.scene():
+                    self.scene().removeItem(self.current_bbox)
+                    if hasattr(self.current_bbox, "class_name_item") and self.current_bbox.class_name_item.scene():
+                        self.scene().removeItem(self.current_bbox.class_name_item)
+        except RuntimeError as e:
+            logger.error(f"Runtime error finalizing bounding box: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected error finalizing bounding box: {e}")
+        finally:
+            self.drawing = False
+            self.current_bbox = None
+            self.clear_selection()
+            self.setCursor(Qt.ArrowCursor)
 
 
     def _get_bbox_coordinates(self, end_point):
@@ -733,47 +788,6 @@ class CustomGraphicsView(QGraphicsView):
 
 
 
-    def _finalize_bbox(self):
-        try:
-            if (
-                self.current_bbox
-                and self.current_bbox.rect().width() >= BoundingBoxDrawer.MIN_SIZE
-                and self.current_bbox.rect().height() >= BoundingBoxDrawer.MIN_SIZE
-            ):
-                if self.main_window.outline_Checkbox.isChecked() and hasattr(self.main_window, 'processed_image'):
-                    gray_img = cv2.cvtColor(self.main_window.processed_image, cv2.COLOR_BGR2GRAY)
-
-                    rect = self.current_bbox.rect()
-                    x1, y1 = int(rect.x()), int(rect.y())
-                    x2, y2 = int(rect.x() + rect.width()), int(rect.y() + rect.height())
-
-                    img_h, img_w = gray_img.shape[:2]
-                    x1, y1 = np.clip([x1, y1], [0, 0], [img_w - 1, img_h - 1])
-                    x2, y2 = np.clip([x2, y2], [0, 0], [img_w - 1, img_h - 1])
-
-                    roi = gray_img[y1:y2, x1:x2]
-                    contours, _ = cv2.findContours(roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-                    if contours:
-                        x, y, w, h = cv2.boundingRect(np.vstack(contours))
-                        self.current_bbox.setRect(x1 + x, y1 + y, w, h)
-
-                self._save_and_play_sound()
-            else:
-                if self.current_bbox.scene():
-                    self.scene().removeItem(self.current_bbox)
-                    if hasattr(self.current_bbox, "class_name_item") and self.current_bbox.class_name_item.scene():
-                        self.scene().removeItem(self.current_bbox.class_name_item)
-        except RuntimeError as e:
-            logger.error(f"Runtime error finalizing bounding box: {e}")
-        except Exception as e:
-            logger.error(f"Unexpected error finalizing bounding box: {e}")
-        finally:
-            self.drawing = False
-            self.current_bbox = None
-            self.clear_selection()
-
-            self.setCursor(Qt.ArrowCursor)  # ✅ Explicitly reset cursor here
 
 
 
@@ -884,7 +898,7 @@ class BoundingBoxDrawer(QGraphicsRectItem):
         self.final_pos = None
         
         # Cache color and pen
-        self._class_color = self.get_color(self.class_id, main_window.classes_dropdown.count())
+        self._class_color = get_color(self.class_id, main_window.classes_dropdown.count())
         self._pen = QPen(self._class_color, 2)
         
         # Initialize graphics properties
@@ -995,22 +1009,12 @@ class BoundingBoxDrawer(QGraphicsRectItem):
 
     def stop_flashing(self):
         self.flash_timer.stop()
-        self.setPen(QPen(self.get_color(self.class_id, self.main_window.classes_dropdown.count()), 2))
+        self.setPen(QPen(get_color(self.class_id, self.main_window.classes_dropdown.count()), 2))
 
     def toggle_flash_color(self):
         current_color = self.pen().color()
         self.setPen(QPen(self.flash_color if current_color == self.alternate_flash_color else self.alternate_flash_color, 2))
 
-    @staticmethod
-    def get_color(class_id, num_classes):
-        if num_classes == 0:
-            logging.error("Number of classes should not be zero.")
-            return QColor(255, 255, 255)  # Default color in case of error
-        
-        num_classes = min(num_classes, 100)
-        hue_step = 360 / num_classes
-        hue = (class_id * hue_step) % 360  # This was a float before
-        return QColor.fromHsv(int(hue), 255, 255)  # Convert to int before passing
 
 
     def paint(self, painter, option, widget=None):
@@ -1146,7 +1150,7 @@ class BoundingBoxDrawer(QGraphicsRectItem):
 
 
     def reset_color(self):
-        self.setPen(QPen(self.get_color(self.class_id, self.main_window.classes_dropdown.count()), 2))
+        self.setPen(QPen(get_color(self.class_id, self.main_window.classes_dropdown.count()), 2))
 
     def mouseMoveEvent(self, event):
         if self.dragStartPos is None:
@@ -1204,7 +1208,7 @@ class BoundingBoxDrawer(QGraphicsRectItem):
             self.dragStartPos = None
             self.update_bbox()
             self.setFlag(QGraphicsItem.ItemIsMovable, False)  # ✅ Disable moving after release
-            self.setPen(QPen(self.get_color(self.class_id, self.main_window.classes_dropdown.count()), 2))
+            self.setPen(QPen(get_color(self.class_id, self.main_window.classes_dropdown.count()), 2))
 
         if event.button() == Qt.LeftButton and event.modifiers() == Qt.ControlModifier:
             self.set_selected(False)
@@ -1232,7 +1236,7 @@ class SegmentationDrawer(QGraphicsPolygonItem):
         self.polygon = QPolygonF([QPointF(x * img_width, y * img_height) for x, y in self.points])
         self.setPolygon(self.polygon)
 
-        self._base_color = self.get_color(self.class_id, self.main_window.classes_dropdown.count(), alpha=150)
+        self._base_color = get_color(self.class_id, self.main_window.classes_dropdown.count(), alpha=150)
         self.setPen(QPen(self._base_color, 2))
         self.setBrush(QBrush(self._base_color))
 
@@ -1366,14 +1370,6 @@ class SegmentationDrawer(QGraphicsPolygonItem):
             logger.info(f"✅ Segmentation removed from {label_file}")
         except Exception as e:
             logger.error(f"❌ Error removing segmentation from {label_file}: {e}")
-
-    @staticmethod
-    def get_color(class_id, num_classes, alpha=150):
-        if num_classes == 0:
-            return QColor(255, 255, 255, alpha)
-        hue_step = 360 / num_classes
-        hue = (class_id * hue_step) % 360
-        return QColor.fromHsv(int(hue), 255, 255, alpha)
 
     def update_opacity(self):
         if self.main_window.shade_checkbox.isChecked():
@@ -1531,8 +1527,37 @@ class SegmentationDrawer(QGraphicsPolygonItem):
             logging.warning(f"⚠️ Tried to update point at index {index}, but points has only {len(self.points)} items.")
             return
 
-        local_pt = self.mapFromScene(new_scene_pos)
-        
+        x, y = int(new_scene_pos.x()), int(new_scene_pos.y())
+        snapped_scene_pos = new_scene_pos
+
+        if self.main_window.outline_Checkbox.isChecked() and hasattr(self.main_window, 'processed_image'):
+            gray_img = cv2.cvtColor(self.main_window.processed_image, cv2.COLOR_BGR2GRAY)
+            roi_size = 30
+            x_min = max(0, x - roi_size)
+            y_min = max(0, y - roi_size)
+            x_max = min(gray_img.shape[1], x + roi_size)
+            y_max = min(gray_img.shape[0], y + roi_size)
+            roi = gray_img[y_min:y_max, x_min:x_max]
+            blurred = cv2.GaussianBlur(roi, (3, 3), 0)
+            edges = cv2.Canny(blurred, 50, 150)
+            contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+
+            if contours:
+                min_dist = float('inf')
+                nearest_point = (x, y)
+                for contour in contours:
+                    for pt in contour:
+                        cx, cy = pt[0]
+                        global_x = cx + x_min
+                        global_y = cy + y_min
+                        dist = np.hypot(global_x - x, global_y - y)
+                        if dist < min_dist:
+                            min_dist = dist
+                            nearest_point = (global_x, global_y)
+                snapped_scene_pos = QPointF(nearest_point[0], nearest_point[1])
+
+        local_pt = self.mapFromScene(snapped_scene_pos)
+
         if index >= len(self.polygon):
             logging.warning(f"⚠️ Polygon index {index} out of bounds. Polygon has {len(self.polygon)} points.")
             return
@@ -1543,6 +1568,7 @@ class SegmentationDrawer(QGraphicsPolygonItem):
             local_pt.x() / self.main_window.image.width(),
             local_pt.y() / self.main_window.image.height()
         )
+
 
 
     def mouseDoubleClickEvent(self, event):
@@ -2678,25 +2704,58 @@ class RedBoxDelegate(QStyledItemDelegate):
 class CheckboxDelegate(QStyledItemDelegate):
     def __init__(self, parent=None):
         super().__init__(parent)
-
+     
     def paint(self, painter, option, index):
+        painter.save()
+
         # Get the item text and checkbox state
         text = index.data(Qt.DisplayRole)
         checked = index.data(Qt.CheckStateRole) == Qt.Checked
 
+        # Draw the background if selected or hovered
+        if option.state & QStyle.State_Selected or option.state & QStyle.State_MouseOver:
+            painter.fillRect(option.rect, option.palette.highlight())
+
         # Draw the checkbox
         checkbox_style = QApplication.style()
         checkbox_option = QStyleOptionButton()
-        checkbox_rect = QApplication.style().subElementRect(QStyle.SE_CheckBoxIndicator, checkbox_option, None)
-        checkbox_option.rect = QRect(option.rect.left(), option.rect.top() + (option.rect.height() - checkbox_rect.height()) // 2,
-                                     checkbox_rect.width(), checkbox_rect.height())
+        checkbox_rect = checkbox_style.subElementRect(QStyle.SE_CheckBoxIndicator, checkbox_option, None)
+        checkbox_option.rect = QRect(
+            option.rect.left(),
+            option.rect.top() + (option.rect.height() - checkbox_rect.height()) // 2,
+            checkbox_rect.width(),
+            checkbox_rect.height()
+        )
         checkbox_option.state = QStyle.State_Enabled | (QStyle.State_On if checked else QStyle.State_Off)
         checkbox_style.drawControl(QStyle.CE_CheckBox, checkbox_option, painter)
 
+        # Determine the color for the circle
+        class_id = index.row()
+        num_classes = self.parent().model().rowCount()
+        circle_color = get_color(class_id, num_classes)
+
+        # Set text color based on state
+        if option.state & QStyle.State_Selected or option.state & QStyle.State_MouseOver:
+            painter.setPen(option.palette.color(QPalette.HighlightedText))
+        else:
+            painter.setPen(option.palette.color(QPalette.Text))
+
         # Draw the text
-        text_rect = option.rect.adjusted(20, 0, 0, 0)  # Adjust to avoid overlap with checkbox
+        text_rect = option.rect.adjusted(checkbox_rect.width() + 5, 0, -20, 0)
         painter.drawText(text_rect, Qt.AlignVCenter, text)
 
+        # Draw the colored circle
+        circle_diameter = 10
+        circle_x = text_rect.right() + 5
+        circle_y = option.rect.top() + (option.rect.height() - circle_diameter) // 2
+        painter.setBrush(circle_color)
+        painter.setPen(Qt.NoPen)
+        painter.drawEllipse(QRectF(circle_x, circle_y, circle_diameter, circle_diameter))
+
+        painter.restore()
+
+
+    
     def editorEvent(self, event, model, option, index):
         if event.type() == QEvent.MouseButtonPress:
             # Determine if the click is within the checkbox bounds
@@ -5166,11 +5225,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         else:
             # Fallback to a default if image_format is not set
             return ".jpg"
+
+
     def display_camera_input(self):
-        """Display frames from the selected input source."""
+        """Display frames from the selected input source using PyTorch CUDA acceleration."""
         try:
             current_text = self.input_selection.currentText()
             frame = None
+            is_rgb_source = False
 
             # Handle input source
             if current_text == "Desktop":
@@ -5179,59 +5241,75 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
                 frame = np.array(screenshot)  # Already RGB
                 is_rgb_source = True
 
-            elif current_text.isdigit():  # Webcam input
+            elif current_text.isdigit():
                 self.initialize_classes(input_type="webcam")
                 if not hasattr(self, 'capture') or self.capture is None or not self.capture.isOpened():
                     self.capture = cv2.VideoCapture(int(current_text), cv2.CAP_DSHOW)
                     if not self.capture.isOpened():
                         logger.error(f"❌ Unable to access webcam at index {current_text}.")
                         return
-
                 ret, frame = self.capture.read()
                 if not ret or frame is None:
                     logger.error("❌ Unable to read frame from webcam. Skipping update.")
                     return
+                is_rgb_source = False
 
-                is_rgb_source = False  # OpenCV captures in BGR
-
-            else:  # Video file input
+            else:
                 self.initialize_classes(input_type="video")
                 if not hasattr(self, 'capture') or self.capture is None or not self.capture.isOpened():
                     self.capture = cv2.VideoCapture(current_text)
                     if not self.capture.isOpened():
                         logger.error(f"❌ Unable to open video file: {current_text}.")
                         return
-
                 ret, frame = self.capture.read()
                 if not ret or frame is None:
                     logger.error("❌ Unable to read frame from video file. Skipping update.")
                     return
+                is_rgb_source = False
 
-                is_rgb_source = False  # OpenCV reads videos in BGR too
-
-            #  Ensure the frame is valid before updating display
-            if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
+            # Check frame validity
+            if frame is None or frame.size == 0:
                 logger.warning("❌ No valid frame to display. Skipping UI update.")
                 return
 
-            # Resize and crop the frame (in original format)
-            frame = self.resize_frame(frame)
-            frame = self.crop_frame(frame)
+            # Convert frame to torch tensor and move to GPU
+            frame_tensor = torch.from_numpy(frame).to('cuda').float() / 255.0  # HWC BGR
+            frame_tensor = frame_tensor.permute(2, 0, 1)  # CHW
 
-            # Prepare frame for model (convert to BGR if source was RGB)
+            # Optional resize
+            if self.custom_size_checkbox.isChecked():
+                width = max(self.width_box.value(), 1)
+                height = max(self.height_box.value(), 1)
+                frame_tensor = F.resize(frame_tensor, [height, width])
+
+            # Optional crop
+            elif self.crop_images_checkbox.isChecked():
+                _, h, w = frame_tensor.shape
+                crop_width = min(max(self.width_box.value(), 1), w)
+                crop_height = min(max(self.height_box.value(), 1), h)
+                top = (h - crop_height) // 2
+                left = (w - crop_width) // 2
+                frame_tensor = F.crop(frame_tensor, top, left, crop_height, crop_width)
+
+            # Optional color convert RGB > BGR
             if is_rgb_source:
-                frame_for_model = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-            else:
-                frame_for_model = frame
+                frame_tensor = frame_tensor[[2, 1, 0], :, :]  # RGB to BGR
 
-            # Run inference
+            # Convert back to numpy for inference and display
+            frame_for_model = (frame_tensor * 255).byte().permute(1, 2, 0).cpu().numpy()
+
+            # Process and run inference
             processed_frame, head_labels = self.apply_preprocessing(frame_for_model)
             annotated_frame, results = self.perform_yolo_inference(processed_frame)
 
-            # Convert model output back to RGB for display
             if annotated_frame is not None:
-                annotated_frame = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
-                self.update_display(annotated_frame)
+                # Prepare for display (convert to RGB)
+                annotated_tensor = torch.from_numpy(annotated_frame).to('cuda').float() / 255.0
+                annotated_tensor = annotated_tensor.permute(2, 0, 1)  # CHW
+                annotated_tensor = annotated_tensor[[2, 1, 0], :, :]  # BGR to RGB
+                display_frame = (annotated_tensor * 255).byte().permute(1, 2, 0).cpu().numpy()
+
+                self.update_display(display_frame)
 
         except Exception as e:
             logger.error(f"❌ Error displaying input: {e}")
@@ -5710,6 +5788,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
 
 
+
+
     def play_video_frame(self):
         if self.capture and self.capture.isOpened():
             ret, frame = self.capture.read()
@@ -5718,50 +5798,63 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
                 logger.warning("Video playback completed or failed to read frame.")
                 return
 
-            # Ensure frame is a valid NumPy array
             if not isinstance(frame, np.ndarray) or frame.size == 0:
                 logger.warning("Invalid frame received. Skipping frame.")
                 return
 
-            # Resize and crop frame
-            frame = self.resize_frame(frame)
-            frame = self.crop_frame(frame)
+            # ✅ Upload frame to GPU tensor (BGR)
+            frame_tensor = torch.from_numpy(frame).to('cuda').float() / 255.0  # HWC BGR float32 normalized
+            frame_tensor = frame_tensor.permute(2, 0, 1)  # CHW
 
-            # Apply preprocessing
-            processed_frame, head_labels = self.apply_preprocessing(frame)
+            # ✅ Resize (if needed)
+            if self.custom_size_checkbox.isChecked():
+                width = max(self.width_box.value(), 1)
+                height = max(self.height_box.value(), 1)
+                frame_tensor = F.resize(frame_tensor, [height, width])
 
-            try:
-                # Convert from BGR to RGB for proper color display
-                processed_frame = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
-            except cv2.error as e:
-                logger.error(f"OpenCV error in cvtColor: {e}")
-                return
+            # ✅ Crop (if needed)
+            elif self.crop_images_checkbox.isChecked():
+                _, h, w = frame_tensor.shape
+                crop_width = min(max(self.width_box.value(), 1), w)
+                crop_height = min(max(self.height_box.value(), 1), h)
+                top = (h - crop_height) // 2
+                left = (w - crop_width) // 2
+                frame_tensor = F.crop(frame_tensor, top, left, crop_height, crop_width)
 
-            # Perform YOLO inference
+            # ✅ Prepare frame for model — convert back to uint8 NumPy BGR
+            frame_for_model = (frame_tensor * 255).byte().permute(1, 2, 0).cpu().numpy()
+
+            # ✅ Process frame and inference
+            processed_frame, head_labels = self.apply_preprocessing(frame_for_model)
+
+            # ✅ Make sure processed_frame is still uint8 and BGR!
+            if processed_frame.dtype != np.uint8:
+                processed_frame = (processed_frame * 255).astype(np.uint8)
+
+            # 🚀 YOLO expects BGR NumPy array
             annotated_frame, segmentations = self.perform_yolo_inference(processed_frame)
-            self.update_display(annotated_frame, segmentations)
 
+            # ✅ Prepare display (convert BGR to RGB for PyQt display)
+            if annotated_frame is not None:
+                display_frame = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
+                self.update_display(display_frame, segmentations)
 
-            # Convert back to BGR before saving to avoid incorrect colors
-            frame_to_save = cv2.cvtColor(processed_frame, cv2.COLOR_RGB2BGR)
-
-            # Save frames while playing if extraction is enabled
-            if self.extracting_frames:
-                try:
-                    frame_path = os.path.join(
-                        self.output_path,
-                        f"frame_{datetime.now().strftime('%Y%m%d_%H%M%S%f')}{self.get_image_extension()}"
-                    )
-                    cv2.imwrite(frame_path, frame_to_save)  # Save as BGR format
-                    logger.debug(f"Frame saved during playback: {frame_path}")
-                except Exception as e:
-                    logging.error(f"Error saving frame: {e}")
-
-            # Display frame in the UI
-            self.update_display(annotated_frame)
+                # ✅ Optional: Save frames (save as BGR to avoid weird colors)
+                if self.extracting_frames:
+                    try:
+                        frame_path = os.path.join(
+                            self.output_path,
+                            f"frame_{datetime.now().strftime('%Y%m%d_%H%M%S%f')}{self.get_image_extension()}"
+                        )
+                        cv2.imwrite(frame_path, annotated_frame)  # Already BGR
+                        logger.debug(f"Frame saved during playback: {frame_path}")
+                    except Exception as e:
+                        logger.error(f"Error saving frame: {e}")
 
         else:
             self.stop_video_playback()
+            logger.warning("Video capture not opened or invalid frame received.")
+
 
 
 
@@ -5774,36 +5867,45 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
     # predict and reivew function       
     def process_images_cuda(self, image_files: List[str]) -> List[Image.Image]:
-        """Process images using OpenCV CUDA without resizing."""
+        """Process images using PyTorch with CUDA (but keep function name for compatibility)."""
         try:
             if not image_files:
                 return []
 
-            stream = cv2.cuda.Stream()
-            gpu_images = []
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            processed_images = []
+
+            to_tensor = transforms.ToTensor()  # Convert PIL Image to float tensor (C, H, W)
+            to_pil = transforms.ToPILImage()  # Convert Tensor back to PIL Image
 
             for image_file in image_files:
-                img = cv2.imread(image_file)
-                if img is None:
-                    logger.warning(f"Failed to read image: {image_file}")
+                try:
+                    img = Image.open(image_file).convert('RGB')
+                except Exception as e:
+                    logger.warning(f"Failed to open {image_file}: {e}")
                     continue
 
-                gpu_img = cv2.cuda_GpuMat()
-                gpu_img.upload(img, stream)
-                gpu_images.append(gpu_img)
+                try:
+                    # Upload to GPU
+                    img_tensor = to_tensor(img).to(device, non_blocking=True)
 
-            gpu_images_rgb = [
-                cv2.cuda.cvtColor(img, cv2.COLOR_BGR2RGB, stream=stream) for img in gpu_images
-            ]
+                    # (Optional) Add any GPU-side transformations here
+                    # e.g., img_tensor = torch.flip(img_tensor, dims=[2])  # Horizontal flip
 
-            stream.waitForCompletion()
+                    # Move back to CPU and convert to PIL
+                    img_pil = to_pil(img_tensor.cpu())
+                    processed_images.append(img_pil)
 
-            pil_images = [Image.fromarray(img.download()) for img in gpu_images_rgb]
+                except Exception as e:
+                    logger.error(f"Error processing {image_file}: {e}")
+                    continue
 
-            return pil_images
+            return processed_images
+
         except Exception as e:
-            logger.error(f"Error processing images: {str(e)}")
+            logger.error(f"Error in process_images_cuda: {e}")
             return []
+
 
 
 
@@ -6617,9 +6719,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
     def determine_model_type(self, file_path):
         if file_path.endswith('.pt'):
-            return 'yolov8'
+            return 'pt'
         elif file_path.endswith('.engine'):
-            return 'yolov8_trt'
+            return 'trt'
         elif file_path.endswith('.onnx'):
             return 'onnx'
         elif file_path.endswith('.weights'):
@@ -8717,26 +8819,33 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
 
     def apply_edge_detection(self):
-        if self.outline_Checkbox.isChecked():
+        # ✅ Always generate the processed edge image for snapping
+        if hasattr(self, 'original_image'):
+            image_cv = self.original_image.copy()
+        else:
             image_qimage = self.image.toImage()
             image_cv = self.qimage_to_cv2(image_qimage)
+            self.original_image = image_cv.copy()
 
-            # Preprocess with Bilateral Filter (preserves edges)
-            preprocessed = cv2.bilateralFilter(image_cv, 9, 75, 75)
+        # Preprocess with Bilateral Filter (preserves edges)
+        preprocessed = cv2.bilateralFilter(image_cv, 9, 75, 75)
 
-            # Edge detection
-            edges = cv2.Canny(preprocessed, self.slider_min_value, self.slider_max_value)
+        # ✅ First, run Canny for snapping (keep it RAW, not cleaned)
+        edges_for_snapping = cv2.Canny(preprocessed, self.slider_min_value, self.slider_max_value)
 
-            # Morphological operations (remove noise)
-            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-            edges_clean = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
+        # ✅ Optional: if you want to keep the noise reduced for visuals
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+        edges_clean = cv2.morphologyEx(edges_for_snapping, cv2.MORPH_CLOSE, kernel)
 
-            # Overlay edges (in green, for clarity)
+        # ✅ Use the raw edges for snapping logic
+        self.processed_image = edges_for_snapping
+
+        # ✅ Debug display mode only (optional visualization)
+        if getattr(self, 'debug_edge_display_checkbox', None) and self.debug_edge_display_checkbox.isChecked():
             edges_colored = cv2.cvtColor(edges_clean, cv2.COLOR_GRAY2BGR)
-            edges_colored[np.where((edges_colored != [0,0,0]).all(axis=2))] = [0,255,0]  # green edges
+            edges_colored[np.where((edges_colored != [0, 0, 0]).all(axis=2))] = [0, 255, 0]  # green edges
 
             image_overlayed = cv2.addWeighted(image_cv, 0.8, edges_colored, 0.2, 0)
-
             image_overlayed = cv2.cvtColor(image_overlayed, cv2.COLOR_BGR2RGBA)
             image_qimage = self.cv2_to_qimage(image_overlayed)
 
@@ -8744,6 +8853,16 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
                 self.image = QPixmap.fromImage(image_qimage)
             else:
                 logger.error("Failed to convert OpenCV image back to QImage.")
+
+        else:
+            # ✅ Always restore original clean image to display
+            image_cv_rgba = cv2.cvtColor(self.original_image, cv2.COLOR_BGR2RGBA)
+            image_qimage = self.cv2_to_qimage(image_cv_rgba)
+
+            if image_qimage:
+                self.image = QPixmap.fromImage(image_qimage)
+            else:
+                logger.error("Failed to restore original image back to QImage.")
 
 
 
@@ -8990,7 +9109,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
         if self.outline_Checkbox.isChecked():
             edges = cv2.Canny(image, self.slider_min_value, self.slider_max_value)
-            image = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
+            self.processed_image = edges.copy()  # for snapping
+
+            # ✅ Only apply visual overlay if debug is checked
+            if getattr(self, 'debug_edge_display_checkbox', None) and self.debug_edge_display_checkbox.isChecked():
+                edges_colored = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
+                image = cv2.addWeighted(image, 0.8, edges_colored, 0.2, 0)
 
         if self.heatmap_Checkbox.isChecked():
             if len(image.shape) == 3:
