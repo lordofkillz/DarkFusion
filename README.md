@@ -13,19 +13,18 @@
     <td align="center">Pose Keypoints</td>
   </tr>
 </table>
-## UltraDarkFusion 4.2 – Next-Level Object Detection & Segmentation
-
 **UltraDarkFusion 4.2** is an advanced GUI for object detection, segmentation, keypoints and computer vision, designed to streamline dataset management, annotation, model training, and real-time inference.
 
 ### What's New in UltraDarkFusion 4.2?
 - **Full Segmentation Support** – segmentation labeling, training, and inference.
+- **Full pose Support** – keypoint Auto\labeling, training, and inference.
 - **Improved Dataset Management** – Enhanced tools for dataset preparation and duplicate removal.
 - **Optimized Model Training** – Enhanced performance with YOLO and SAM integration.
 - **TensorRT Inference** – Accelerate inference with TensorRT engine models.
 - **Expanded Analytics** – Detailed metrics for tracking model performance.
 
 ### Key Features
-- **Advanced Labeling** – Bounding box and segmentation annotations compatible with YOLO.
+- **Advanced Labeling** – Bounding box, segmentation, keypoints annotations compatible with YOLO.
 - **Video Processing** – Extract frames and process YouTube videos for dataset generation.
 - **Customizable UI & Themes** – Personalize your interface and workflow.
 - **Automatic Labeling** – Quickly annotate datasets using pre-trained weights.
@@ -107,7 +106,7 @@ Inspired by [DarkMark](https://github.com/stephanecharette/DarkMark), developed 
 
 ### **Goals for UltraDarkFusion**  
 - [ ] **Remove OpenCV DNN and create a Python wrapper for Darknet** 
-- [ ] **Add support for OBB (Oriented Bounding Boxes) and pose estimation** in development  
+- [ ] **Add support for OBB (Oriented Bounding Boxes)** in development  
 - [ ] **Remove the document-based help and train a chatbot for assistance**  
 - [ ] **Improve code efficiency (Ongoing...)**  
 - [ ] **Upload UltraDarkFusion to PyPI for easier installation and distribution**  
