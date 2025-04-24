@@ -13,7 +13,9 @@
     <td align="center">Pose Keypoints</td>
   </tr>
 </table>
+
 **UltraDarkFusion 4.2** is an advanced GUI for object detection, segmentation, keypoints and computer vision, designed to streamline dataset management, annotation, model training, and real-time inference.
+
 
 ### What's New in UltraDarkFusion 4.2?
 - **Full Segmentation Support** – segmentation labeling, training, and inference.
