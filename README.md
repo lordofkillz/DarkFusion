@@ -1,10 +1,23 @@
 ![UltraDarkFusion GUI](darkfusion2.gif)
+### 🔍 Annotation Support
 
-## UltraDarkFusion 4.0 – Next-Level Object Detection & Segmentation
+<table>
+  <tr>
+    <td><img src="boxes.png" alt="Bounding Boxes" width="300"/></td>
+    <td><img src="Segmentation.png" alt="Segmentation" width="300"/></td>
+    <td><img src="pose.png" alt="Pose Keypoints" width="300"/></td>
+  </tr>
+  <tr>
+    <td align="center">Bounding Boxes</td>
+    <td align="center">Segmentation</td>
+    <td align="center">Pose Keypoints</td>
+  </tr>
+</table>
+## UltraDarkFusion 4.2 – Next-Level Object Detection & Segmentation
 
-**UltraDarkFusion 4.0** is an advanced GUI for object detection, segmentation, and computer vision, designed to streamline dataset management, annotation, model training, and real-time inference.
+**UltraDarkFusion 4.2** is an advanced GUI for object detection, segmentation, keypoints and computer vision, designed to streamline dataset management, annotation, model training, and real-time inference.
 
-### What's New in UltraDarkFusion 4.0?
+### What's New in UltraDarkFusion 4.2?
 - **Full Segmentation Support** – segmentation labeling, training, and inference.
 - **Improved Dataset Management** – Enhanced tools for dataset preparation and duplicate removal.
 - **Optimized Model Training** – Enhanced performance with YOLO and SAM integration.
