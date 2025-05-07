@@ -1,8 +1,9 @@
-# PyTorch (CUDA 12.6)
---extra-index-url https://download.pytorch.org/whl/cu126
+# PyTorch (CUDA 12.8)
+--index-url https://download.pytorch.org/whl/cu128
 torch
 torchvision
 torchaudio
+
 
 # Core dependencies
 pandas==1.5.3
@@ -63,7 +64,7 @@ opencv-python-headless==4.9.0.80
 sip
 onnxruntime-gpu
 tensorrt
-numpy
+numpy==1.26.4
 git+https://github.com/facebookresearch/segment-anything.git
 pyqt5
 
