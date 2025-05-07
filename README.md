@@ -47,11 +47,11 @@ winget install Kitware.CMake
 - Ensure **Desktop Development with C++** and **Python Development** workloads are selected.
 
 ### Install CUDA and cuDNN
-- Install [CUDA 12.6](https://developer.nvidia.com/cuda-toolkit-archive)
-- Download cuDNN compatible with CUDA 12.6 from [NVIDIA Developer](https://developer.nvidia.com/cudnn)
+- Install [CUDA 12.8](https://developer.nvidia.com/cuda-toolkit-archive)
+- Download cuDNN compatible with CUDA 12.8 from [NVIDIA Developer](https://developer.nvidia.com/cudnn)
 - Extract and copy cuDNN files to:
   ```
-  C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6
+  C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8
   ```
 
 ### Clone UltraDarkFusion Repository and OpenCV
