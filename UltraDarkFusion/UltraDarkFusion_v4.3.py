@@ -38,7 +38,7 @@ from PIL import Image
 from PyQt5 import QtCore, QtWidgets, uic
 from PyQt5.QtCore import (QEvent, QModelIndex, QObject,
                           QRectF, QRunnable, Qt, QThread, QThreadPool,
-                          QTimer, QUrl, pyqtSignal, pyqtSlot, QPointF,QModelIndex,Qt,QEvent,QPropertyAnimation, QEasingCurve,QRect,QProcess,QRectF,QMetaObject,QSettings)
+                          QTimer, QUrl, pyqtSignal, pyqtSlot, QPointF,QModelIndex,Qt,QEvent,QPropertyAnimation, QEasingCurve,QRect,QProcess,QRectF,QMetaObject,QSettings,QLineF)
 from PyQt5.QtGui import (QBrush, QColor, QFont, QImage, QImageReader,
                          QImageWriter, QMovie, QPainter, QPen,
                          QPixmap,  QStandardItem,
@@ -93,6 +93,12 @@ import torchvision.transforms.functional as F
 import mediapipe as mp
 import numpy as np
 import mss
+import logging
+import os
+import sys
+import codecs
+from logging.handlers import RotatingFileHandler
+
 mp_pose = mp.solutions.pose.Pose(static_image_mode=True, min_detection_confidence=0.5)
 # global functions
 def get_color(class_id, num_classes, alpha=150):
@@ -105,12 +111,6 @@ def get_color(class_id, num_classes, alpha=150):
 # Setup logger configuration
 dotenv_path = os.path.join(os.getcwd(), ".env")
 load_dotenv(dotenv_path)
-
-import logging
-import os
-import sys
-import codecs
-from logging.handlers import RotatingFileHandler
 
 MAX_LOG_LINE_LENGTH = 120  # adjust this as needed
 
@@ -2005,20 +2005,87 @@ class SegmentationDrawer(QGraphicsPolygonItem):
 
 
     def mousePressEvent(self, event):
-        if self.edit_mode:
-            for handle in self.vertex_handles:
-                if handle.contains(handle.mapFromScene(event.scenePos())):
-                    handle.setCursor(Qt.ClosedHandCursor)
-                    handle.mousePressEvent(event)
-                    return
-            return
-        if event.button() == Qt.LeftButton:
+        scene_pos = event.scenePos()
 
+        if self.edit_mode:
+            # Handle moving with left click
+            if event.button() == Qt.LeftButton:
+                for handle in self.vertex_handles:
+                    if handle.contains(handle.mapFromScene(scene_pos)):
+                        handle.setCursor(Qt.ClosedHandCursor)
+                        handle.mousePressEvent(event)
+                        return
+
+            # ➕ Right-click to insert point
+            elif event.button() == Qt.RightButton:
+                nearest_index = self.find_nearest_edge_index(scene_pos)
+                if nearest_index is not None:
+                    self.insert_point_at(scene_pos, nearest_index)
+                    return
+
+        # Dragging the whole polygon if not in edit mode
+        if event.button() == Qt.LeftButton:
             self.setOpacity(0.5)
             self.setFlag(QGraphicsItem.ItemIsMovable, True)
-            self.dragStartPos = event.scenePos()
+            self.dragStartPos = scene_pos
             self.startPolygonPos = self.pos()
+
         super().mousePressEvent(event)
+
+    def find_nearest_edge_index(self, scene_pos, threshold=10):
+        min_dist = float('inf')
+        best_index = None
+
+        for i in range(len(self.points)):
+            p1 = self.polygon[i]
+            p2 = self.polygon[(i + 1) % len(self.points)]  # Wrap around
+
+            # Convert to vectors
+            x1, y1 = p1.x(), p1.y()
+            x2, y2 = p2.x(), p2.y()
+            px, py = scene_pos.x(), scene_pos.y()
+
+            dx, dy = x2 - x1, y2 - y1
+            if dx == dy == 0:
+                continue  # Avoid zero-length lines
+
+            # Project point onto line segment
+            t = max(0, min(1, ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)))
+            proj_x = x1 + t * dx
+            proj_y = y1 + t * dy
+            dist = ((proj_x - px) ** 2 + (proj_y - py) ** 2) ** 0.5
+
+            if dist < min_dist and dist <= threshold:
+                min_dist = dist
+                best_index = i + 1  # Insert after this index
+
+        return best_index
+
+
+    def insert_point_at(self, scene_pos, insert_index):
+        img_width = self.main_window.image.width()
+        img_height = self.main_window.image.height()
+        
+        local_pt = self.mapFromScene(scene_pos)
+        norm_x = local_pt.x() / img_width
+        norm_y = local_pt.y() / img_height
+
+        # Insert point
+        self.points.insert(insert_index, (norm_x, norm_y))
+        self.polygon.insert(insert_index, local_pt)
+        self.setPolygon(self.polygon)
+
+        # Rebuild all handles from scratch
+        for handle in self.vertex_handles:
+            self.scene().removeItem(handle)
+        self.vertex_handles = []
+
+        for idx, pt in enumerate(self.polygon):
+            handle = VertexHandle(self, idx)
+            handle.setPos(self.mapToScene(pt))
+            handle.setCursor(Qt.OpenHandCursor)
+            self.scene().addItem(handle)
+            self.vertex_handles.append(handle)
 
     def mouseMoveEvent(self, event):
         if self.edit_mode:
@@ -2049,7 +2116,7 @@ class SegmentationDrawer(QGraphicsPolygonItem):
             self.enter_edit_mode()
         else:
             self.finalize_edit_mode()
-    def simplify_points(self, min_distance=12, angle_threshold=130):
+    def simplify_points(self, min_distance=6, angle_threshold=130):
         if len(self.points) < 3:
             return
 
@@ -2077,10 +2144,13 @@ class SegmentationDrawer(QGraphicsPolygonItem):
             dist = np.linalg.norm(current - last_kept)
             angle = angle_between(pts[i - 1], current, next_pt)
 
-            if dist < 2.0:
-                continue
-            if angle >= angle_threshold and dist < (min_distance * 1.7):
-                continue
+            if dist < 1.0:
+                continue  # Still remove extremely close points
+
+            # Allow keeping more gentle angles if spaced out
+            if angle > angle_threshold and dist < (min_distance * 1.2):
+                continue  # Skip this point
+
 
             simplified_pts.append(current)
             last_kept = current
@@ -3600,7 +3670,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         ]
         self.setWindowIcon(self.icons[0])
         self.last_logged_file_name = None 
-
+        self.setMaximumSize(1920, 1080)
         # Check for CUDA availability in PyTorch and OpenCV
         self.pytorch_cuda_available = torch.cuda.is_available()
         self.opencv_cuda_available = cv2.cuda.getCudaEnabledDeviceCount() > 0
@@ -4036,8 +4106,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.new_class_input = False
         self.outline_Checkbox.clicked.connect(self.checkbox_clicked)
         self.super_resolution_Checkbox.triggered.connect(self.checkbox_clicked)
-        self.anti_slider.valueChanged.connect(self.slider_value_changed2)
+        self.edge_slider_min.valueChanged.connect(self.edge_slider_changed)
+        self.edge_slider_max.valueChanged.connect(self.edge_slider_changed)
         self.grayscale_Checkbox.stateChanged.connect(self.checkbox_clicked)
+        self.slider_min_value = 50   # sensible default for edge detection
+        self.slider_max_value = 150  # Canny works well with 50–150
         self.bounding_boxes = {}
         self.segmentation_checkbox.stateChanged.connect(self.on_segmentation_checkbox_checked)
         self.heatmap_Checkbox.stateChanged.connect(self.on_heatmap_toggle)
@@ -10764,17 +10837,17 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
     def checkbox_clicked(self):
         self.display_image(self.current_file)
 
-    def slider_value_changed2(self, value):
-        # ✅ Still do the logic — you might use it elsewhere
-        self.slider_min_value = value * 2
-        self.slider_max_value = value * 3
 
-        # ✅ Only log the current slider value
-        logger = logging.getLogger("UltraDarkFusionLogger")
-        logger.info(f"🎚️ Edge Slider updated → Value: {value}")
 
+    def edge_slider_changed(self):
+        self.slider_min_value = self.edge_slider_min.value()
+        self.slider_max_value = self.edge_slider_max.value()
+
+        if self.slider_min_value > self.slider_max_value:
+            self.slider_min_value, self.slider_max_value = self.slider_max_value, self.slider_min_value  # swap if needed
+
+        logging.info(f"🎚️ Min: {self.slider_min_value}, Max: {self.slider_max_value}")
         self.display_image(self.current_file)
-
 
     # Conversion utilities
     def qimage_to_cv2(self, img):
@@ -12867,17 +12940,21 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         if "it/s" in output or "%" in output:
             print(output, end="\r")  # Show progress inline, avoid cluttering logs
         else:
-            logger.info(output)  # Log only clean messages
+            print(output)  # Just print it, no logging will be done here resizes the ui to much.
+
 
 
     def handle_stderr(self):
         error = self.process.readAllStandardError().data().decode()
 
-        #  Avoid unnecessary logging of progress bars
         if "it/s" in error or "%" in error:
-            print(error, end="\r")  # Only show on console, not in logs
+            print(error, end="\r")
         else:
-            logger.error(error)  # Log real errors
+            # Color the error in red
+            print(f"\033[91m{error}\033[0m")  # Red color for errors
+
+
+
 
 
     def process_finished(self):
