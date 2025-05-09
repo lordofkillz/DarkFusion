@@ -1,12 +1,13 @@
 # PyTorch (CUDA 12.8)
---index-url https://download.pytorch.org/whl/cu128
-torch
-torchvision
-torchaudio
+torch==2.1.0+cu128
+torchvision==0.15.2+cu128
+torchaudio==2.1.0+cu128
+-f https://download.pytorch.org/whl/cu128
+
 
 
 # Core dependencies
-pandas==1.5.3
+pandas
 bcrypt==4.0.1
 pywin32==306
 scipy
