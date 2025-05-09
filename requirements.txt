@@ -1,5 +1,5 @@
 # PyTorch (CUDA 12.8)
-torch==2.1.0+cu128
+torch==2.7.0
 torchvision==0.15.2+cu128
 torchaudio==2.1.0+cu128
 -f https://download.pytorch.org/whl/cu128
