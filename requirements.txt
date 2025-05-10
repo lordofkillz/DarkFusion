@@ -1,0 +1,71 @@
+# PyTorch CUDA 12.8
+--extra-index-url https://download.pytorch.org/whl/cu128
+--pre
+torch==2.7.0
+torchvision
+torchaudio
+
+# Core dependencies
+pandas==1.5.3
+bcrypt==4.0.1
+pywin32==306
+scipy
+
+# Utility packages
+asyncio==3.4.3
+aiofiles==23.2.1
+seaborn==0.12.2
+matplotlib==3.6.3
+keyboard==0.13.5
+pypiwin32==223
+pyttsx3==2.90
+requests==2.27.1
+XInput-Python==0.4.0
+pythonnet
+inputs==0.5
+pynput==1.7.6
+mss==6.1.0
+cefpython3==66.1
+# Additional dependencies
+Pillow==10.1.0
+pytube
+pyAesCrypt==6.0.0
+tqdm==4.66.1
+ultralytics
+sahi
+pywebview==4.4.1
+imutils==0.5.4
+PyAutoGUI
+perlin-noise
+watchdog
+python-dotenv
+
+# ML & Vision-related libraries
+GPUtil
+scikit-image
+pycocotools==2.0.6
+scikit-learn
+qt-material==2.14
+validators
+dill==0.3.7
+pybboxes==0.1.6
+groundingdino-py
+diffusers
+addict
+yapf
+timm
+rectpack
+
+# Special dependencies
+mediapipe
+yt-dlp
+opencv-contrib-python==4.9.0.80
+opencv-python-headless==4.9.0.80
+sip
+onnxruntime-gpu
+tensorrt
+numpy
+git+https://github.com/facebookresearch/segment-anything.git
+pyqt5
+
+
