@@ -40,7 +40,7 @@ perlin-noise
 watchdog
 python-dotenv
 SpeechRecognition
-
+PyAudio
 # ML & Vision-related libraries
 GPUtil
 scikit-image
