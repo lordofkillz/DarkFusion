@@ -39,6 +39,7 @@ PyAutoGUI
 perlin-noise
 watchdog
 python-dotenv
+SpeechRecognition
 
 # ML & Vision-related libraries
 GPUtil
