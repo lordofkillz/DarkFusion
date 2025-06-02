@@ -1,68 +1,80 @@
 # PyTorch CUDA 12.8
---extra-index-url https://download.pytorch.org/whl/cu128
---pre
 torch==2.7.0+cu128
 torchvision
 torchaudio
+--index-url https://download.pytorch.org/whl/cu128
 
-# Core dependencies
+# Core libraries
+numpy
 pandas==1.5.3
-bcrypt==4.0.1
 scipy
+bcrypt==4.0.1
+dill==0.3.7
 
-# Utility packages
-seaborn==0.12.2
+# Visualization
 matplotlib==3.6.3
-keyboard==0.13.5
-pyttsx3==2.90
-deep-translator
-requests==2.27.1
-XInput-Python==0.4.0
-pythonnet
-inputs==0.5
-pynput==1.7.6
-mss==6.1.0
-cefpython3
-# Additional dependencies
-Pillow==10.1.0
-pytube
-pyAesCrypt==6.0.0
+seaborn==0.12.2
 tqdm==4.66.1
+
+# PyQt5 UI
+pyqt5
+qt-material==2.14
+pywebview==4.4.1
+cefpython3
+sip
+
+# GUI & Input Automation
+pyautogui
+keyboard==0.13.5
+pynput==1.7.6
+inputs==0.5
+XInput-Python==0.4.0
+watchdog
+
+# Windows-only support
+pywin32
+pythonnet
+
+# Audio / Speech
+pyttsx3==2.90
+SpeechRecognition
+
+# Web / API / Crypto / File I/O
+requests==2.27.1
+python-dotenv
+pyAesCrypt==6.0.0
+pytube
+yt-dlp
+validators
+
+# ML / Vision / Inference
 ultralytics
 sahi
-pywebview==4.4.1
-imutils==0.5.4
-PyAutoGUI
-perlin-noise
-watchdog
-python-dotenv
-SpeechRecognition
-# ML & Vision-related libraries
+mediapipe
+opencv-contrib-python==4.9.0.80
+opencv-python-headless==4.9.0.80
 GPUtil
 scikit-image
-pycocotools==2.0.6
 scikit-learn
-qt-material==2.14
-validators
-dill==0.3.7
-pybboxes==0.1.6
+pycocotools==2.0.6
+timm
+onnxruntime-gpu
+tensorrt
+
+# SAM / GroundingDINO / Diffusion
+git+https://github.com/facebookresearch/segment-anything.git
 groundingdino-py
 diffusers
 addict
-yapf
-timm
+
+# Image/Polygon Utils
+Pillow==10.1.0
+pybboxes==0.1.6
+perlin-noise
 rectpack
+imutils
 
-# Special dependencies
-mediapipe
-yt-dlp
-opencv-contrib-python==4.9.0.80
-opencv-python-headless==4.9.0.80
-sip
-onnxruntime-gpu
-tensorrt
-numpy
-git+https://github.com/facebookresearch/segment-anything.git
-pyqt5
-
+# Dev Tools / Formatting
+yapf
+deep-translator
 
