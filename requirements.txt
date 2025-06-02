@@ -8,7 +8,6 @@ torchaudio
 # Core dependencies
 pandas==1.5.3
 bcrypt==4.0.1
-pywin32
 scipy
 
 # Utility packages
