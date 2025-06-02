@@ -26,7 +26,7 @@ pythonnet
 inputs==0.5
 pynput==1.7.6
 mss==6.1.0
-cefpython3==66.1
+cefpython3
 # Additional dependencies
 Pillow==10.1.0
 pytube
