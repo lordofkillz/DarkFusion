@@ -16,7 +16,6 @@ aiofiles==23.2.1
 seaborn==0.12.2
 matplotlib==3.6.3
 keyboard==0.13.5
-pypiwin32==223
 pyttsx3==2.90
 deep-translator
 requests==2.27.1
