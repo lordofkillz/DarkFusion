@@ -8,7 +8,7 @@ torchaudio
 # Core dependencies
 pandas==1.5.3
 bcrypt==4.0.1
-pywin32==306
+pywin32
 scipy
 
 # Utility packages
@@ -19,7 +19,9 @@ matplotlib==3.6.3
 keyboard==0.13.5
 pypiwin32==223
 pyttsx3==2.90
+deep-translator
 requests==2.27.1
+pyaudio
 XInput-Python==0.4.0
 pythonnet
 inputs==0.5
