@@ -11,8 +11,6 @@ bcrypt==4.0.1
 scipy
 
 # Utility packages
-asyncio==3.4.3
-aiofiles==23.2.1
 seaborn==0.12.2
 matplotlib==3.6.3
 keyboard==0.13.5
