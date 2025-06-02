@@ -19,7 +19,6 @@ keyboard==0.13.5
 pyttsx3==2.90
 deep-translator
 requests==2.27.1
-pyaudio
 XInput-Python==0.4.0
 pythonnet
 inputs==0.5
