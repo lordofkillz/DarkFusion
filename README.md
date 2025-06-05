@@ -22,19 +22,24 @@
 **UltraDarkFusion** is an advanced GUI for object detection, segmentation, keypoints and computer vision, designed to streamline dataset management, annotation, model training, and real-time inference.
 
 
-### What's New in UltraDarkFusion?
-- **Full Segmentation Support** – segmentation labeling, training, and inference.
-- **Full Pose Support** – keypoint auto-labeling, training, and inference.
-- **Oriented Bounding Box (OBB) Support** – draw, label, and auto-generate rotated bounding boxes using YOLO OBB and SAM.
-- **Improved Dataset Management** – enhanced tools for dataset preparation, augmentation, and duplicate removal.
-- **TensorRT Inference** – accelerate your inference pipelines with TensorRT engine models.
-- **Expanded Analytics** – fine-grained metrics, smart deduplication, and tracking.
+### 🚀 What's New in UltraDarkFusion?
 
-### 🔑 Key Features
-- **Label Anything** – support for bounding boxes, segmentation masks, keypoints, and oriented bounding boxes — all in one tool.
-- **Video Processing** – extract frames or auto-label directly from YouTube videos.
-- **Customizable UI & Themes** – dark/light modes, class filters, and voice-activated labeling.
-- **Automatic Labeling** – annotate full datasets using pre-trained weights.
+- ✅ **Full Segmentation Support** – annotate, train, and run inference on masks with YOLO or SAM.
+- ✅ **Pose Estimation** – automatic keypoint detection, annotation, and training-ready exports.
+- ✅ **Oriented Bounding Boxes (OBB)** – draw, label, and auto-generate rotated boxes via YOLO OBB or SAM.
+- ✅ **Dataset Manager** – organize, deduplicate, and augment your datasets with built-in tools.
+- ⚡ **TensorRT Acceleration** – run inference using `.engine` models for max speed.
+- 🧠 **Multi-Backend Tracking** – BoT-SORT and ByteTrack support with `.pt`, `.onnx`, and `.engine` formats.
+- 🗣️ **Voice-Activated Class Switching** – change classes during labeling by saying the name.
+- 🌍 **Multilingual UI Translation** – dynamically switch languages across the entire interface.
+
+### 🎯 Key Features
+
+- 🎨 **Label Anything** – supports boxes, segmentation, keypoints, and OBB — all in one project.
+- 🎞️ **Video & YouTube Processing** – auto-label or extract frames directly from video files or YouTube links.
+- 🤖 **Automatic Annotation** – batch-label folders.
+- 🧩 **Flexible Inference** – switch between PyTorch, ONNX, and TensorRT seamlessly.
+- 🧼 **Cleaner UI** – toggle dark/light mode, filter by class, generate heatmaps, and apply custom QSS themes.
 
 ---
 
