@@ -1,0 +1,23 @@
+tracker_type: botsort
+
+# Association thresholds
+track_high_thresh: 0.6       # Match with strong confidence
+track_low_thresh: 0.1        # Lower-bound for secondary matching
+new_track_thresh: 0.7        # Confidence needed to start a new track
+
+# Buffer & Matching
+track_buffer: 30             # Frames to retain lost tracks before deleting
+match_thresh: 0.8            # IoU threshold for matching
+fuse_score: True             # Combine object score with IoU for matching
+
+# ReID settings
+with_reid: True              # Enable appearance-based ID matching
+proximity_thresh: 0.5        # Minimum IoU to even try ReID match
+appearance_thresh: 0.25      # Cosine similarity (lower is stricter)
+model: osnet_x0_25           # Backbone for ReID (auto-downloads if needed)
+
+# Global Motion Compensation (optional, improves cam shake)
+gmc_method: sparseOptFlow    # ['sparseOptFlow', 'None']
+
+# Dataset mode
+mot20: False                 # Use MOT20 behavior tweaks (usually False)
