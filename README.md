@@ -1,12 +1,13 @@
-![UltraDarkFusion GUI](darkfusion2.gif)
+![UltraDarkFusion GUI](samples/darkfusion2.gif)
+
 ### 🔍 Annotation Support
 
 <table>
   <tr>
-    <td><img src="boxes.png" alt="Bounding Boxes" width="300"/></td>
-    <td><img src="Segmentation.png" alt="Segmentation" width="300"/></td>
-    <td><img src="pose.png" alt="Pose Keypoints" width="300"/></td>
-    <td><img src="OBB.png" alt="Oriented Bounding Boxes" width="300"/></td>
+    <td><img src="samples/boxes.png" alt="Bounding Boxes" width="300"/></td>
+    <td><img src="samples/Segmentation.png" alt="Segmentation" width="300"/></td>
+    <td><img src="samples/pose.png" alt="Pose Keypoints" width="300"/></td>
+    <td><img src="samples/OBB.png" alt="Oriented Bounding Boxes" width="300"/></td>
   </tr>
   <tr>
     <td align="center">Bounding Boxes</td>
@@ -15,6 +16,7 @@
     <td align="center">Oriented Bounding Boxes</td>
   </tr>
 </table>
+
 
 
 **UltraDarkFusion** is an advanced GUI for object detection, segmentation, keypoints and computer vision, designed to streamline dataset management, annotation, model training, and real-time inference.
