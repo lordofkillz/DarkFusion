@@ -1,12 +1,12 @@
-# PyTorch CUDA 12.8
-torch==2.7.0+cu128
+--index-url https://download.pytorch.org/whl/cu128
+--extra-index-url https://pypi.org/simple
+
+torch
 torchvision
 torchaudio
---index-url https://download.pytorch.org/whl/cu128
 
-# Core libraries
 numpy
-pandas
+pandas>=2.1.4,<2.3.0
 scipy
 bcrypt==4.0.1
 dill==0.3.7
