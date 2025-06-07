@@ -1,9 +1,9 @@
 --index-url https://download.pytorch.org/whl/cu128
 --extra-index-url https://pypi.org/simple
 
-torch
-torchvision
-torchaudio
+# Core ML stack (from PyTorch index)
+torch==2.7.0+cu128
+torchvision==0.22.0+cu128
 
 numpy
 pandas>=2.1.4,<2.3.0
