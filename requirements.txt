@@ -10,6 +10,7 @@ pandas>=2.1.4,<2.3.0
 scipy
 bcrypt==4.0.1
 dill==0.3.7
+mss
 
 # Visualization
 matplotlib==3.6.3
