@@ -1,0 +1,67 @@
+=
+
+/* Root variable replacements */
+QWidget {
+  background-color: #1e1e2f;
+  color: #d8d8db;
+  font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  font-size: 12pt;
+}
+
+/* Background image */
+QMainWindow {
+  background-image: url("C:/DarkFusion/background.jpg");
+  background-attachment: fixed;
+  background-repeat: no-repeat;
+  background-position: center;
+}
+
+/* Push Buttons */
+QPushButton {
+  background-color: #2780e6;
+  color: white;
+  border: 1px solid #1e63b3;
+  padding: 5px 10px;
+  border-radius: 6px;
+}
+
+QPushButton:hover {
+  background-color: #1e63b3;
+}
+
+/* Checkboxes and Labels */
+QCheckBox,
+QLabel,
+QRadioButton {
+  color: #d8d8db;
+}
+
+/* ComboBox */
+QComboBox {
+  background-color: #2f2f3f;
+  color: #ffffff;
+  padding: 3px;
+  border: 1px solid #444;
+}
+
+/* Sliders */
+QSlider::groove:horizontal {
+  height: 6px;
+  background: #444;
+}
+
+QSlider::handle:horizontal {
+  background: #2780e6;
+  width: 14px;
+}
+
+/* Scrollbars */
+QScrollBar:vertical {
+  background: #222;
+  width: 12px;
+}
+
+QScrollBar::handle:vertical {
+  background: #2780e6;
+  border-radius: 6px;
+}
