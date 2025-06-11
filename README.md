@@ -63,7 +63,7 @@ mkdir build install
 ```
 
 ### Mandatory Downloads
-- [Download SAM Weights and Files](https://drive.google.com/uc?export=download&id=1Tux3ncgLcCagQ0N3cC25XP4O_UwsjXbP)
+- [Download SAM Weights and Files]https://drive.google.com/file/d/1I6VYRf_Dco_A5REtTBkvjizFTwHmcaeM/view?usp=sharing
   - Extract to `C:\DarkFusion\UltraDarkFusion`
 
 
