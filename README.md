@@ -78,7 +78,7 @@ mkdir build install
 cd C:\DarkFusion\
 fusion_install.bat
 ```
-### Compile OpenCV with CUDA (Optional)
+### Compile OpenCV with CUDA (Optional) **do not procced past this line if you do not know how to build opencv dnn or trouble shoot problem this is depreciated and will be removed in later version. **
 
 To compile OpenCV with CUDA acceleration (recommended for improved performance when using .weights):
 ### Install CUDA and cuDNN
