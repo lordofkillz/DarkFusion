@@ -46,7 +46,7 @@ pyttsx3==2.90
 SpeechRecognition
 
 # Web / API / Crypto / File I/O
-requests==2.27.1
+requests==2.32.4
 python-dotenv
 pyAesCrypt==6.0.0
 pytube
