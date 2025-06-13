@@ -14,6 +14,7 @@ mss
 
 # Visualization
 matplotlib==3.6.3
+plotly 
 seaborn==0.12.2
 tqdm==4.66.1
 
@@ -51,7 +52,6 @@ validators
 # ML / Vision / Inference
 ultralytics
 sahi
-mediapipe
 opencv-contrib-python==4.9.0.80
 opencv-python-headless==4.9.0.80
 GPUtil
