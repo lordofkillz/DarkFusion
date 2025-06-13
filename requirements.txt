@@ -5,9 +5,12 @@
 torch==2.7.0+cu128
 torchvision==0.22.0+cu128
 
-numpy
+# Core scientific packages (compatible with OpenCV and PyTorch bindings)
+numpy>=1.24.0,<2.0.0
 pandas>=2.1.4,<2.3.0
 scipy
+
+# Misc
 bcrypt==4.0.1
 dill==0.3.7
 mss
@@ -36,6 +39,7 @@ watchdog
 # Windows-only support
 pywin32
 pythonnet
+mediapipe
 
 # Audio / Speech
 pyttsx3==2.90
