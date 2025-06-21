@@ -70,7 +70,7 @@ mkdir build install
 ### Anaconda Setup
 - Download and install [Anaconda](https://www.anaconda.com/products/distribution).
 - Accept default installation settings.
-- for experinced devs, just create and environment and pip install -r requirments.txt
+- for experienced devs, just create and environment and pip install -r requirements.txt
 
 ### Setup Environment
 - Run `fusion_install.bat` as administrator to create and configure the environment:
