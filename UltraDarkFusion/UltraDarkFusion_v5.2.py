@@ -6,7 +6,6 @@ import cv2
 # Import necessary libraries and modules for the application
 from typing import Optional
 import logging
-from logging.handlers import WatchedFileHandler
 import concurrent.futures
 import cProfile
 from datetime import datetime
@@ -25,7 +24,6 @@ import pyautogui
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Type
 from ultralytics import YOLO
 import torch
 import numpy as np
@@ -38,11 +36,11 @@ from PIL import Image
 from PyQt5 import QtCore, QtWidgets, uic
 from PyQt5.QtCore import (QEvent, QModelIndex, QObject,
                           QRectF, QRunnable, Qt, QThread, QThreadPool,
-                          QTimer, QUrl, pyqtSignal, pyqtSlot, QPointF,QModelIndex,Qt,QEvent,QPropertyAnimation, QEasingCurve,QRect,QProcess,QRectF,QMetaObject,QSettings,QLineF,QLocale)
+                          QTimer, QUrl, pyqtSignal, pyqtSlot, QPointF,QModelIndex,Qt,QEvent,QPropertyAnimation, QEasingCurve,QRect,QProcess,QRectF,QSettings)
 from PyQt5.QtGui import (QBrush, QColor, QFont, QImage, QImageReader,
                          QImageWriter, QMovie, QPainter, QPen,
                          QPixmap,  QStandardItem,
-                         QStandardItemModel, QTransform, QLinearGradient,QIcon,QCursor,QStandardItemModel, QStandardItem,QMouseEvent,QKeyEvent,QPainterPath,QPolygonF,QPalette)
+                         QStandardItemModel, QLinearGradient,QIcon,QCursor,QStandardItemModel, QStandardItem,QMouseEvent,QKeyEvent,QPainterPath,QPolygonF,QPalette)
 from PyQt5.QtWidgets import (QApplication, QFileDialog,
                              QGraphicsDropShadowEffect, QGraphicsItem,
                              QGraphicsPixmapItem, QGraphicsRectItem,
@@ -84,9 +82,7 @@ import mediapipe as mp
 import sip
 import mss 
 import codecs
-from logging.handlers import WatchedFileHandler
 from dotenv import load_dotenv, set_key
-from torch.amp import autocast
 import codecs
 from logging.handlers import RotatingFileHandler
 import torch
@@ -102,23 +98,17 @@ from logging.handlers import RotatingFileHandler
 import speech_recognition as sr
 from shapely.geometry import box as shapely_box
 from shapely.geometry import Polygon
-from shapely.affinity import scale
 from deep_translator import GoogleTranslator
 from ultralytics import SAM
-import math
-from shapely.ops import unary_union
 from collections import Counter
 from datetime import datetime     
 from PyQt5.QtWidgets import QInputDialog
-
-# Third-party
 import pandas as pd
-import seaborn as sns
 import plotly.express as px
 import matplotlib.pyplot as plt
 from PyQt5.QtWidgets import QPushButton
 from ultralytics import *
-from PIL import Image, ImageOps
+from PIL import Image
 DEVICE = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 # global functions
 def get_color(class_id, num_classes, alpha=150, class_names=None):
@@ -1047,8 +1037,7 @@ class CustomGraphicsView(QGraphicsView):
 
 
     def _play_sound_and_remove_bbox(self, item):
-        """Plays sound effect and removes the bounding box safely, and refreshes thumbnail page."""
-        if sip.isdeleted(item):  # ✅ Prevent operating on deleted items
+        if sip.isdeleted(item):
             logger.warning("⚠️ Attempted to remove a deleted bounding box.")
             return
 
@@ -1056,23 +1045,33 @@ class CustomGraphicsView(QGraphicsView):
         self.sound_player.play()
 
         if item == self.selected_bbox:
-            self.selected_bbox = None  # ✅ Clear reference before removing
+            self.selected_bbox = None  
 
+        # Remove visually
+        if item in self.bboxes:
+            self.bboxes.remove(item)
         self.safe_remove_item(item)
 
-        # ✅ Immediately trigger save and refresh
-        self.main_window.save_bounding_boxes(
-            self.main_window.label_file or self.main_window.current_file,
-            self.main_window.image.width(),
-            self.main_window.image.height()
-        )
-        
-        # Show the current thumbnail page (defaults to current page, or page 0 if not set)
+        # Correctly handle the numeric true_line_index
+        line_index = getattr(item, 'true_line_index', None)
+        if line_index is not None and isinstance(line_index, int):
+            label_file = self.main_window.label_file or self.main_window.current_file.replace('.jpg', '.txt')
+            lines = self.main_window.load_label_lines(label_file)
+
+            if 0 <= line_index < len(lines):
+                removed_line = lines.pop(line_index)
+                self.main_window.save_label_lines(label_file, lines)
+                logger.info(f"✅ Successfully deleted line {line_index} from file.")
+            else:
+                logger.error(f"🚫 Invalid line index {line_index} for deletion. Check synchronization.")
+        else:
+            logger.warning(f"⚠️ true_line_index is missing or invalid: {line_index}")
+
         current_page = getattr(self.main_window, "current_page", 0)
         self.main_window.show_thumbnail_page(self.main_window.current_file, page=current_page)
-                
-        # Optionally: keep preview in sync, but do NOT rebuild again!
         self.main_window.display_image(self.main_window.current_file, rebuild_preview=False)
+
+
 
     def _save_and_play_sound(self):
         self.main_window.set_selected(None)
@@ -3118,8 +3117,8 @@ class BoundingBox:
         logging.warning(f"Unrecognized bbox format: {label_str}")
         return None
 
-    def to_str(self, remove_confidence=False):
-        class_id_str = f"{int(self.class_id)}"  # ✅ force integer formatting
+    def to_str(self, remove_confidence=True):
+        class_id_str = f"{int(self.class_id)}"
 
         if self.obb:
             obb_str = ' '.join(f"{coord:.6f}" for coord in self.obb)
@@ -3130,15 +3129,17 @@ class BoundingBox:
             return f"{class_id_str} {seg_str}"
 
         bbox_str = f"{class_id_str} {self.x_center:.6f} {self.y_center:.6f} {self.width:.6f} {self.height:.6f}"
-        
+
         if self.keypoints:
             kpt_str = ' '.join(f"{x:.6f} {y:.6f} {v:d}" for x, y, v in self.keypoints)
             return f"{bbox_str} {kpt_str}"
 
+        # Confidence now only written if explicitly requested
         if self.confidence is not None and not remove_confidence:
             bbox_str += f" {self.confidence:.6f}"
 
         return bbox_str
+
 
     def to_dict(self):
         return {
@@ -5334,7 +5335,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.keypoint_colors = {}  # Track color per index
         self.save_list_button.clicked.connect(self.save_keypoint_list)
         self.load_list_button.clicked.connect(lambda: self.load_keypoint_list_from_path())
-
+        #move files 
+        self.move_from.clicked.connect(self.select_source_folder)
+        self.move_to.clicked.connect(self.select_target_folder)
+        self.start_move_btn.clicked.connect(self.start_moving_files)
+        
         self.inference_checkbox.stateChanged.connect(self.toggle_inference)
         self.toggle_inference(self.inference_checkbox.checkState())
         self.voice_mode_checkbox.stateChanged.connect(self.toggle_voice_mode)
@@ -6115,6 +6120,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 if isinstance(item, SegmentationDrawer) and item.edit_mode:
                     return True
         return False
+
+ 
+ 
+ 
         
     def launch_split_data_ui(self):
         # Replace 'python' with the correct path if needed
@@ -9392,11 +9401,6 @@ class MainWindow(QtWidgets.QMainWindow):
             logger.info(f"Saved thumbnail: {thumbnail_filename}")
         except Exception as e:
             logger.error(f"Failed to save thumbnail {thumbnail_filename}: {e}")
-
-
-
-
-
 
 
     def start_debounce_timer(self, value):
@@ -13667,35 +13671,31 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as e:
             logger.error(f"Error while getting label file: {e}")
             return (None, False) if return_existence else None   
-
+        
     def display_bounding_boxes(self, rects, file_name, segmentations=None, obbs=None):
         scene = self.screen_view.scene()
+        view = self.screen_view
 
-        # 🟩 Display Bounding Boxes (and Keypoints)
-        for index, rect_tuple in enumerate(rects):
+        # 🔥 SPEEDUP: Disable view updates & indexing during batch add
+        if view:
+            view.setUpdatesEnabled(False)
+        scene.setItemIndexMethod(QGraphicsScene.NoIndex)
+
+        # 🟩 Load bounding boxes explicitly with true line indices
+        for line_index, rect_tuple in enumerate(rects):
+            rect, class_id, confidence, keypoints = None, None, None, None
+
             if len(rect_tuple) == 4:
                 rect, class_id, confidence, keypoints = rect_tuple
-
-                is_keypoint_data = (
-                    isinstance(keypoints, list) and
-                    all(isinstance(k, (list, tuple)) and len(k) == 3 for k in keypoints)
-                )
-                if not is_keypoint_data:
-                    logger.warning(f"⚠️ Ignoring suspicious keypoints for {file_name}: {keypoints}")
-                    keypoints = None
-
             elif len(rect_tuple) == 3:
                 rect, class_id, confidence = rect_tuple
-                keypoints = None
             elif len(rect_tuple) == 2:
                 rect, class_id = rect_tuple
-                confidence = None
-                keypoints = None
             else:
                 logger.warning(f"⚠️ Invalid bbox format in: {rect_tuple}")
                 continue
 
-            unique_id = f"{file_name}_{index}"
+            unique_id = f"{file_name}_{line_index}"  # ✅ Explicit ID based on true annotation line
 
             rect_item = BoundingBoxDrawer(
                 rect.x(), rect.y(), rect.width(), rect.height(),
@@ -13704,10 +13704,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 main_window=self,
                 confidence=confidence
             )
+
             rect_item.file_name = file_name
+            rect_item.true_line_index = line_index  # ✅ Critical: Explicitly store the original line index
             rect_item.setAcceptHoverEvents(True)
             rect_item.set_z_order(bring_to_front=False)
 
+            # 🔑 Handle keypoints explicitly, if any
             if keypoints:
                 points = [(x, y) for x, y, _ in keypoints]
                 flags = [int(v) for _, _, v in keypoints]
@@ -13719,14 +13722,13 @@ class MainWindow(QtWidgets.QMainWindow):
                     class_id=class_id,
                     file_name=file_name
                 )
-
                 rect_item.keypoint_drawer = keypoint_drawer
                 scene.addItem(keypoint_drawer)
 
             scene.addItem(rect_item)
-            self.bounding_boxes[f"{file_name}_{unique_id}"] = rect_item
+            self.bounding_boxes[unique_id] = rect_item
 
-        # 🔷 Display Segmentations
+        # 🔷 Display Segmentations explicitly (no change needed)
         if segmentations:
             for index, (class_id, points) in enumerate(segmentations):
                 if not points:
@@ -13744,26 +13746,29 @@ class MainWindow(QtWidgets.QMainWindow):
                 scene.addItem(seg_item)
                 self.bounding_boxes[unique_id] = seg_item
 
-        # 🟨 Display Oriented Bounding Boxes (OBBs)
+        # 🟨 Display Oriented Bounding Boxes (OBBs) explicitly (no change needed)
         if obbs:
             for index, (class_id, obb_points, angle) in enumerate(obbs):
                 unique_id = f"{file_name}_obb_{index}"
                 obb_item = OBBDrawer(
                     obb_points=obb_points,
-                    angle=angle,  # ✅ <--- this is the critical missing line
+                    angle=angle,
                     main_window=self,
                     class_id=class_id,
                     unique_id=unique_id,
                     file_name=file_name
                 )
-
                 obb_item.setAcceptHoverEvents(True)
                 obb_item.setZValue(0.3)
                 obb_item.update_opacity()
                 scene.addItem(obb_item)
                 self.bounding_boxes[unique_id] = obb_item
 
-
+        # ✅ RESTORE: Indexing and updates (once after everything is added)
+        scene.setItemIndexMethod(QGraphicsScene.BspTreeIndex)
+        if view:
+            view.setUpdatesEnabled(True)
+        scene.update()
 
 
     def auto_save_bounding_boxes(self):
@@ -13894,19 +13899,23 @@ class MainWindow(QtWidgets.QMainWindow):
             return bounding_boxes, segmentations, obb_boxes
 
         with open(label_file, 'r') as f:
-            for line in f:
+            for lineno, line in enumerate(f, start=1):
                 cleaned_line = line.strip()
                 if not cleaned_line:
                     continue
 
-                bbox = BoundingBox.from_str(cleaned_line)
+                try:
+                    bbox = BoundingBox.from_str(cleaned_line)
+                except Exception as e:
+                    logger.warning(f"⚠️ Exception parsing line {lineno} in {label_file}: '{cleaned_line}' ({e})")
+                    continue
+
                 if bbox is None:
-                    logger.warning(f"⚠️ Bad label line in {label_file}: {cleaned_line}")
+                    logger.warning(f"⚠️ Bad label line in {label_file} (line {lineno}): '{cleaned_line}'")
                     continue
 
                 # Now determine what kind of annotation this is:
                 if bbox.segmentation:
-                    # Segmentation polygon (normalized coords)
                     points = [
                         (bbox.segmentation[i], bbox.segmentation[i + 1])
                         for i in range(0, len(bbox.segmentation), 2)
@@ -13914,7 +13923,6 @@ class MainWindow(QtWidgets.QMainWindow):
                     segmentations.append((bbox.class_id, points))
 
                 elif bbox.obb:
-                    # Oriented bounding box (normalized coords + angle)
                     points = [
                         (bbox.obb[i], bbox.obb[i + 1])
                         for i in range(0, 8, 2)
@@ -13923,12 +13931,10 @@ class MainWindow(QtWidgets.QMainWindow):
                     obb_boxes.append((bbox.class_id, points, angle))
 
                 elif bbox.keypoints:
-                    # Regular bbox with keypoints (convert to Qt rect for drawing)
                     rect = bbox.to_rect(img_width, img_height)
                     bounding_boxes.append((rect, bbox.class_id, bbox.confidence, bbox.keypoints))
 
                 else:
-                    # Regular bbox (with or without confidence)
                     rect = bbox.to_rect(img_width, img_height)
                     bounding_boxes.append((rect, bbox.class_id, bbox.confidence))
 
@@ -16326,7 +16332,83 @@ class MainWindow(QtWidgets.QMainWindow):
             logger.error("Function finished with error.")
             self.combine_txt_button.setEnabled(True)
 
+    def select_source_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Source Directory")
+        if folder:
+            self.text_from.setText(folder)
 
+    def select_target_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Target Directory")
+        if folder:
+            self.text_to.setText(folder)
+    def move_file_pair(self, src_img, src_txt, dst_img, dst_txt):
+        # Move image file
+        shutil.move(src_img, dst_img)
+        # Move text file if exists
+        if os.path.exists(src_txt):
+            shutil.move(src_txt, dst_txt)
+
+    def bulk_move_files(self, source_dir, target_dir):
+        if not os.path.exists(target_dir):
+            os.makedirs(target_dir)
+
+        files = os.listdir(source_dir)
+        image_extensions = (".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".gif")
+
+        file_pairs = []
+        for f in files:
+            if f.lower().endswith(image_extensions):
+                img_src = os.path.join(source_dir, f)
+                txt_src = os.path.splitext(img_src)[0] + ".txt"
+                img_dst = os.path.join(target_dir, f)
+                txt_dst = os.path.splitext(img_dst)[0] + ".txt"
+                file_pairs.append((img_src, txt_src, img_dst, txt_dst))
+
+        # Use ThreadPoolExecutor for speed and concurrency
+        with ThreadPoolExecutor(max_workers=os.cpu_count() or 8) as executor:
+            futures = [executor.submit(self.move_file_pair, img_src, txt_src, img_dst, txt_dst) 
+                    for img_src, txt_src, img_dst, txt_dst in file_pairs]
+            
+            # Wait for all moves to complete
+            for future in futures:
+                future.result()
+    @pyqtSlot()
+    def start_moving_files(self):
+        source_dir = self.text_from.text().strip()
+        target_dir = self.text_to.text().strip()
+
+        if not source_dir or not target_dir:
+            QMessageBox.warning(self, "Warning", "Please select both source and target directories.")
+            return
+
+        if source_dir == target_dir:
+            QMessageBox.warning(self, "Warning", "Source and target directories cannot be the same.")
+            return
+
+        reply = QMessageBox.question(
+            self, "Confirmation",
+            f"Move all images and labels from:\n{source_dir}\nto:\n{target_dir}\n\nProceed?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        self.start_move_btn.setEnabled(False)
+        self.start_move_btn.setText("Moving...")
+
+        QTimer.singleShot(100, lambda: self.run_bulk_move(source_dir, target_dir))
+
+    def run_bulk_move(self, source_dir, target_dir):
+        try:
+            self.bulk_move_files(source_dir, target_dir)
+            QMessageBox.information(self, "Success", "Files moved successfully!")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"An error occurred: {e}")
+        finally:
+            self.start_move_btn.setEnabled(True)
+            self.start_move_btn.setText("Start Move")
+                    
 def run_pyqt_app():
     # Check if QApplication already exists
     app = QtWidgets.QApplication.instance()
