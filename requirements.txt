@@ -73,7 +73,7 @@ diffusers
 addict
 
 # Image/Polygon Utils
-Pillow==10.1.0
+Pillow==12.2.0
 pybboxes==0.1.6
 perlin-noise
 rectpack
