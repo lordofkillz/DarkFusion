@@ -2,7 +2,7 @@
 --extra-index-url https://pypi.org/simple
 
 # Core ML stack (from PyTorch index)
-torch==2.7.0+cu128
+torch==2.12.0
 torchvision==0.22.0+cu128
 
 # Core scientific packages (compatible with OpenCV and PyTorch bindings)
