@@ -9,8 +9,10 @@ running inference through PyTorch, ONNX, or TensorRT.
 ## Short walkthrough
 
 The walkthrough uses COCO images inside the current UltraDarkFusion 5.2
-interface and demonstrates boxes, polygon segmentation, OBB, pose/keypoints,
-and dataset review.
+interface. It demonstrates boxes, polygon segmentation, OBB, pose/keypoints,
+and the visual review workflow: left-click any cropped preview to locate and
+flash its exact annotation on the full image. Training and model export remain
+in the same workspace.
 
 [Watch or download the 20-second MP4](samples/darkfusion_walkthrough.mp4)
 
@@ -20,7 +22,17 @@ and dataset review.
 | --- | --- | --- | --- |
 | ![Boxes](samples/boxes.png) | ![Segmentation](samples/Segmentation.png) | ![Pose](samples/pose.png) | ![OBB](samples/OBB.png) |
 
-![Dataset review](samples/Review.png)
+### Visual annotation review
+
+Browse every image and its individual label crops together. Clicking a crop
+synchronizes the source image and flashes the matching box, polygon, or OBB so
+mistakes can be found without hunting through the frame.
+
+![Visual annotation review](samples/Review.png)
+
+### Train and export
+
+![Integrated training and model export](samples/TrainExport.png)
 
 ## Current capabilities
 
