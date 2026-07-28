@@ -17,7 +17,7 @@ C:\DarkFusion\UltraDarkFusion\Sam\groundingdino_swint_ogc.pth
 ```
 
 Bundle SHA-256:
-`F3F74E792CE3E3045F13224DFFDE7890679953F89E0C8C467A4691B75DA33C24`
+`2B26091FC94CE73A6EA1554D1E8CFE5DD3A5BE9F0EA8A66A8CA32DEC07FC9A5A`
 
 UltraDarkFusion can launch without the large checkpoints, but SAM3 snapping,
 SAM3 masks/augmentation, and GroundingDINO auto-labeling require them.
