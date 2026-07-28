@@ -75,6 +75,17 @@ cd C:\DarkFusion
 .\fusion_install.bat
 ```
 
+For complete SAM3 snapping, segmentation, augmentation, and GroundingDINO
+auto-labeling, also install the
+[DarkFusion 5.2 required model bundle (3.58 GB)](https://drive.google.com/file/d/1j9Y-WpUDjPt67_U43lafO-7dTkxLJuPS/view?usp=sharing).
+Open the downloaded ZIP and copy its `Sam` folder into
+`C:\DarkFusion\UltraDarkFusion`. The resulting paths must include:
+
+```text
+C:\DarkFusion\UltraDarkFusion\Sam\sam3.pt
+C:\DarkFusion\UltraDarkFusion\Sam\groundingdino_swint_ogc.pth
+```
+
 The installer:
 
 1. Finds Miniconda/Anaconda without assuming a username-specific path.
@@ -103,10 +114,12 @@ python UltraDarkFusion\UltraDarkFusion_v5.2.py
 
 ## Models
 
-Large model files are not stored in the Git repository. SAM3 snapping expects
-`UltraDarkFusion\Sam\sam3.pt`; GroundingDINO expects
-`UltraDarkFusion\Sam\groundingdino_swint_ogc.pth`. YOLO models can be selected
-from any local location.
+Large model files are not stored in the Git repository. Download the
+[required model bundle](https://drive.google.com/file/d/1j9Y-WpUDjPt67_U43lafO-7dTkxLJuPS/view?usp=sharing)
+and extract its `Sam` folder into `UltraDarkFusion` to enable all bundled SAM3
+and GroundingDINO features. The application can launch without these
+checkpoints, but those model-assisted tools will be unavailable. YOLO and
+YOLOE models can be selected from any local location.
 
 See [MODEL_SETUP.md](MODEL_SETUP.md) for the exact model layout and TensorRT
 export notes.

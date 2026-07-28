@@ -64,6 +64,15 @@ REQUIRED_IMPORTS = (
     "yt_dlp",
 )
 
+MODEL_BUNDLE_URL = (
+    "https://drive.google.com/file/d/"
+    "1j9Y-WpUDjPt67_U43lafO-7dTkxLJuPS/view?usp=sharing"
+)
+FEATURE_MODELS = {
+    "Sam/sam3.pt": 3_000_000_000,
+    "Sam/groundingdino_swint_ogc.pth": 600_000_000,
+}
+
 
 def main() -> int:
     if sys.version_info[:2] != (3, 12):
@@ -102,17 +111,24 @@ def main() -> int:
     except Exception:
         pass
 
-    optional_models = (
-        "Sam/sam3.pt",
-        "Sam/groundingdino_swint_ogc.pth",
-        "yolo26n-reid.onnx",
-    )
-    missing_models = [name for name in optional_models if not (APP_ROOT / name).is_file()]
-    if missing_models:
-        print("Optional model files not installed:")
-        for name in missing_models:
-            print(f"  - UltraDarkFusion/{name}")
-        print("See MODEL_SETUP.md.")
+    model_problems: list[str] = []
+    for name, minimum_size in FEATURE_MODELS.items():
+        path = APP_ROOT / name
+        if not path.is_file():
+            model_problems.append(f"missing: UltraDarkFusion/{name}")
+        elif path.stat().st_size < minimum_size:
+            model_problems.append(
+                f"incomplete: UltraDarkFusion/{name} "
+                f"({path.stat().st_size:,} bytes)"
+            )
+    if model_problems:
+        print("Required model bundle not fully installed:")
+        for problem in model_problems:
+            print(f"  - {problem}")
+        print(f"Download: {MODEL_BUNDLE_URL}")
+        print("Extract its Sam folder into UltraDarkFusion. See MODEL_SETUP.md.")
+    else:
+        print("SAM3 and GroundingDINO model files verified.")
 
     print("UltraDarkFusion launch requirements verified.")
     return 0

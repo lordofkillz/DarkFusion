@@ -4,8 +4,23 @@ Model checkpoints and TensorRT/ONNX exports are intentionally excluded from
 Git. They are large, hardware-specific, and standard GitHub repositories reject
 individual files larger than 100 MB.
 
-UltraDarkFusion itself launches without these optional checkpoints. Install the
-files for the features you use.
+## Required DarkFusion model bundle
+
+Download the
+[DarkFusion 5.2 required model bundle (3.58 GB)](https://drive.google.com/file/d/1j9Y-WpUDjPt67_U43lafO-7dTkxLJuPS/view?usp=sharing),
+then extract its `Sam` folder into the repository's `UltraDarkFusion` folder.
+On the standard installation path, verify that these files exist:
+
+```text
+C:\DarkFusion\UltraDarkFusion\Sam\sam3.pt
+C:\DarkFusion\UltraDarkFusion\Sam\groundingdino_swint_ogc.pth
+```
+
+Bundle SHA-256:
+`F3F74E792CE3E3045F13224DFFDE7890679953F89E0C8C467A4691B75DA33C24`
+
+UltraDarkFusion can launch without the large checkpoints, but SAM3 snapping,
+SAM3 masks/augmentation, and GroundingDINO auto-labeling require them.
 
 ## Required paths by feature
 
@@ -21,9 +36,8 @@ files for the features you use.
 GroundingDINO publishes its checkpoints from the official project:
 https://github.com/IDEA-Research/GroundingDINO
 
-SAM3 availability and licensing may depend on the model provider. Use a
-checkpoint compatible with the pinned Ultralytics version and place it at the
-exact path above.
+The published bundle contains the checkpoints used with the pinned DarkFusion
+environment. Keep the file names and directory layout unchanged.
 
 ## TensorRT engines
 

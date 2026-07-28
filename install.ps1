@@ -8,6 +8,7 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $requirementsPath = Join-Path $repoRoot "requirements.txt"
 $verifyScript = Join-Path $repoRoot "scripts\verify_install.py"
+$modelBundleUrl = "https://drive.google.com/file/d/1j9Y-WpUDjPt67_U43lafO-7dTkxLJuPS/view?usp=sharing"
 
 function Find-Conda {
     $command = Get-Command conda.exe -ErrorAction SilentlyContinue
@@ -72,5 +73,10 @@ Write-Host ""
 Write-Host "UltraDarkFusion installation completed."
 Write-Host "Launch it with run_darkfusion.bat."
 if (-not $SkipModels) {
-    Write-Host "Optional SAM3 and GroundingDINO files are described in MODEL_SETUP.md."
+    Write-Host ""
+    Write-Host "Required for complete SAM3 and GroundingDINO functionality:"
+    Write-Host $modelBundleUrl
+    Write-Host "Extract the downloaded Sam folder into:"
+    Write-Host (Join-Path $repoRoot "UltraDarkFusion")
+    Write-Host "See MODEL_SETUP.md for file paths and the SHA-256 checksum."
 }
