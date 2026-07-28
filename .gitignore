@@ -1,0 +1,93 @@
+# Secrets and machine-local configuration
+.env
+.env.*
+!.env.example
+settings.json
+class_thresholds.json
+ocr_macro.json
+points.json
+darkfusion.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Python/editor caches
+__pycache__/
+*.py[cod]
+*.pyd
+*.whl
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.vscode/
+.idea/
+*.code-workspace
+
+# DarkFusion generated state and reports
+.darkfusion/
+.codex*/
+debug/
+runs/
+**/runs/
+darkfusion_review/
+darkfusion_quarantine/
+tmp_*/
+tmp_*
+*_backup_*.py
+*_recovered_*.py
+train_recommendations.yaml
+baseline_validation.json
+batch_calibration.json
+best_hyperparameters.yaml
+repair_log.json
+review_manifest.json
+review_state.json
+scan_report.json
+skeleton_inspection_results.json
+
+# Datasets and user project files
+train.txt
+valid.txt
+test.txt
+obj.data
+obj.names
+obj.yaml
+data.yaml
+dataset.yaml
+classes.txt
+labels/
+datasets/
+hf_cache/
+
+# Models and inference exports (use MODEL_SETUP.md / release assets)
+*.pt
+*.pth
+*.weights
+*.engine
+*.engine.json
+*.onnx
+*.torchscript
+*.mlpackage
+*.tflite
+*.pb
+!UltraDarkFusion/Sam/FSRCNN_x4.pb
+*.bin
+*.safetensors
+
+# Video, archives, and generated media
+*.mp4
+*.mkv
+*.avi
+*.mov
+*.webm
+*.m4v
+*.zip
+*.7z
+*.rar
+UltraDarkFusion/styles/gifs/darkfusion (2).gif
+
+# Local development/scratch directories
+eagle/
+unfinished_Scripts/
+low_latency_vision_app/
+ik_build_optimizer/

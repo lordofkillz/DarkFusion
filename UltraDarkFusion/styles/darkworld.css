@@ -1,144 +1,305 @@
-/* General Background and Text Colors */
+/* Dark World: red-accent theme tuned for readability. */
 QWidget {
-    background-color: rgb(20, 20, 20); /* Dark, muted background */
-    color: rgb(200, 50, 50); /* Blood-red text for a vampiric feel */
-    border-radius: 6px;
+    background-color: #141111;
+    color: #eadfda;
+    font-family: "Segoe UI", Arial, sans-serif;
+    font-size: 10pt;
+    selection-background-color: #8f2f35;
+    selection-color: #ffffff;
 }
 
-/* Labels */
-QLabel {
-    color: rgb(220, 60, 60); /* Slightly brighter red for labels */
-    background-color: transparent; /* Let it blend with the eerie background */
+QMainWindow,
+QDialog {
+    background-color: #0f0d0d;
 }
 
-/* Frames */
-QFrame {
-    background: rgba(40, 0, 0, 0.8); /* Semi-transparent blood hue */
-    border: 1px solid rgb(100, 20, 20); /* Dark red borders */
-    border-radius: 4px;
+QLabel,
+QCheckBox,
+QRadioButton,
+QGroupBox {
+    background-color: transparent;
+    color: #eadfda;
 }
 
-/* Buttons */
-QPushButton {
-    background-color: rgb(80, 0, 0); /* Deep red */
-    color: rgb(200, 50, 50); /* Blood-red text */
-    border: 1px solid rgb(100, 20, 20); /* Dark red border */
-    border-radius: 6px;
+QMenuBar,
+QMenu,
+QToolBar,
+QStatusBar,
+QDockWidget {
+    background-color: #1b1515;
+    color: #eadfda;
+    border-color: #332323;
+}
+
+QMenuBar::item,
+QMenu::item {
+    padding: 5px 10px;
+}
+
+QMenuBar::item:selected,
+QMenu::item:selected {
+    background-color: #8f2f35;
+    color: #ffffff;
+}
+
+QDockWidget::title {
+    background-color: #241a1a;
     padding: 5px;
+    font-weight: 600;
 }
 
-QPushButton:hover {
-    background-color: rgb(120, 0, 0); /* Brighter red on hover */
-    border: 1px solid rgb(220, 60, 60); /* Highlighted border */
+QFrame,
+QGroupBox {
+    background-color: #191313;
+    border: 1px solid #3a2525;
+    border-radius: 6px;
 }
 
-QPushButton:pressed {
-    background-color: rgb(60, 0, 0); /* Darker pressed effect */
-    border: 1px solid rgb(150, 30, 30);
+QGroupBox {
+    margin-top: 12px;
+    padding-top: 8px;
 }
 
-/* Scrollbars */
-QScrollBar:vertical, QScrollBar:horizontal {
-    background-color: rgb(30, 0, 0); /* Dark blood red */
-    border: 1px solid rgb(100, 20, 20); /* Subtle red border */
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 8px;
+    padding: 0 4px;
 }
 
-QScrollBar::handle {
-    background-color: rgb(200, 50, 50); /* Blood-red scrollbar handle */
-    border-radius: 3px;
+QPushButton,
+QToolButton {
+    background-color: #2a1d1d;
+    color: #fff4ef;
+    border: 1px solid #5b2a2f;
+    border-radius: 5px;
+    padding: 5px 10px;
 }
 
-QScrollBar::handle:hover {
-    background-color: rgb(220, 60, 60); /* Brighter on hover */
+QPushButton:hover,
+QToolButton:hover {
+    background-color: #3a2426;
+    border-color: #c2414a;
 }
 
-/* Progress Bars */
+QPushButton:pressed,
+QToolButton:pressed {
+    background-color: #221717;
+    border-color: #ff8a3d;
+}
+
+QPushButton:disabled,
+QToolButton:disabled {
+    background-color: #1d1818;
+    color: #7c6d6b;
+    border-color: #2c2020;
+}
+
+QLineEdit,
+QTextEdit,
+QPlainTextEdit,
+QComboBox,
+QSpinBox,
+QDoubleSpinBox {
+    background-color: #100d0d;
+    color: #fff4ef;
+    border: 1px solid #432728;
+    border-radius: 5px;
+    padding: 4px 6px;
+}
+
+QLineEdit:focus,
+QTextEdit:focus,
+QPlainTextEdit:focus,
+QComboBox:focus,
+QSpinBox:focus,
+QDoubleSpinBox:focus {
+    border-color: #ff8a3d;
+}
+
+QComboBox::drop-down {
+    border-left: 1px solid #432728;
+    width: 20px;
+}
+
+QComboBox QAbstractItemView {
+    background-color: #141111;
+    color: #eadfda;
+    border: 1px solid #432728;
+    selection-background-color: #8f2f35;
+}
+
+QTabWidget::pane {
+    border: 1px solid #332323;
+    background-color: #141111;
+}
+
+QTabBar::tab {
+    background-color: #201717;
+    color: #d9c9c4;
+    border: 1px solid #332323;
+    padding: 6px 10px;
+    margin-right: 2px;
+    border-top-left-radius: 5px;
+    border-top-right-radius: 5px;
+}
+
+QTabBar::tab:selected {
+    background-color: #4a2227;
+    color: #ffffff;
+    border-color: #703239;
+}
+
+QTabBar::tab:!selected:hover {
+    background-color: #2b1d1e;
+    color: #ffffff;
+}
+
+QTableView,
+QTableWidget,
+QTreeView,
+QTreeWidget,
+QListView,
+QListWidget {
+    background-color: #100d0d;
+    alternate-background-color: #171111;
+    color: #eadfda;
+    border: 1px solid #332323;
+    gridline-color: #2a1d1d;
+    selection-background-color: #8f2f35;
+    selection-color: #ffffff;
+}
+
+QTableView::item,
+QTableWidget::item,
+QTreeView::item,
+QTreeWidget::item,
+QListView::item,
+QListWidget::item {
+    padding: 4px 6px;
+}
+
+QHeaderView::section {
+    background-color: #2a1d1d;
+    color: #fff4ef;
+    border: none;
+    border-right: 1px solid #3a2525;
+    border-bottom: 1px solid #3a2525;
+    padding: 5px;
+    font-weight: 600;
+}
+
 QProgressBar {
-    border: 1px solid rgb(100, 20, 20);
-    color: rgb(200, 50, 50);
-    background-color: rgb(30, 0, 0); /* Background */
+    background-color: #100d0d;
+    color: #fff4ef;
+    border: 1px solid #3a2525;
+    border-radius: 5px;
     text-align: center;
 }
 
 QProgressBar::chunk {
-    background: rgb(200, 50, 50); /* Blood red fill */
-    border-radius: 3px;
-}
-
-/* ComboBoxes */
-QComboBox {
-    background-color: rgb(40, 0, 0); /* Deep red */
-    color: rgb(200, 50, 50); /* Blood red text */
-    border: 1px solid rgb(100, 20, 20); /* Dark red border */
+    background-color: #c2414a;
     border-radius: 4px;
 }
 
-QComboBox::drop-down {
-    background-color: rgb(100, 20, 20); /* Darker drop-down button */
+QSlider::groove:horizontal {
+    height: 6px;
+    background: #332323;
+    border-radius: 3px;
+}
+
+QSlider::handle:horizontal {
+    background: #c2414a;
+    border: 1px solid #ff8a3d;
+    width: 14px;
+    margin: -5px 0;
+    border-radius: 7px;
+}
+
+QScrollBar:vertical,
+QScrollBar:horizontal {
+    background: #100d0d;
     border: none;
+    margin: 0;
 }
 
-QComboBox QAbstractItemView {
-    background-color: rgb(30, 0, 0); /* Dropdown background */
-    color: rgb(200, 50, 50); /* Dropdown text */
+QScrollBar:vertical {
+    width: 12px;
 }
 
-/* Tab Bars */
-QTabBar::tab {
-    background-color: rgb(30, 0, 0); /* Dark blood red */
-    color: rgb(200, 50, 50); /* Blood red text */
-    border: 1px solid rgb(100, 20, 20);
-    padding: 5px;
+QScrollBar:horizontal {
+    height: 12px;
 }
 
-QTabBar::tab:selected {
-    background-color: rgb(100, 20, 20); /* Brighter red when selected */
+QScrollBar::handle:vertical,
+QScrollBar::handle:horizontal {
+    background: #5b2a2f;
+    border-radius: 6px;
+    min-height: 24px;
+    min-width: 24px;
 }
 
-/* Menus */
-QMenuBar {
-    background-color: rgb(30, 0, 0); /* Subtle red */
-    color: rgb(200, 50, 50); /* Blood-red text */
+QScrollBar::handle:hover {
+    background: #8f2f35;
 }
 
-QMenuBar::item:selected {
-    background-color: rgb(100, 20, 20); /* Highlight */
+QScrollBar::add-line,
+QScrollBar::sub-line {
+    width: 0;
+    height: 0;
+}
+/* DarkFusion quick toggle buttons: compact inactive state, red active state. */
+QCheckBox#zoom_lock,
+QCheckBox#image_quality_checkbox,
+QCheckBox#outline_Checkbox,
+QCheckBox#rapid_del_checkbox,
+QCheckBox#auto_scan_checkbox,
+QCheckBox#voice_mode_checkbox {
+    background-color: rgba(32, 36, 42, 190);
+    color: #f2f5f8;
+    border: 1px solid #3a424d;
+    border-radius: 5px;
+    padding: 4px 10px;
+    spacing: 0;
 }
 
-QMenu {
-    background-color: rgb(40, 0, 0); /* Deep red */
-    color: rgb(200, 50, 50);
-    border: 1px solid rgb(100, 20, 20);
+QCheckBox#zoom_lock:hover,
+QCheckBox#image_quality_checkbox:hover,
+QCheckBox#outline_Checkbox:hover,
+QCheckBox#rapid_del_checkbox:hover,
+QCheckBox#auto_scan_checkbox:hover,
+QCheckBox#voice_mode_checkbox:hover {
+    background-color: rgba(45, 53, 64, 210);
+    border-color: #ff7377;
 }
 
-QMenu::item:selected {
-    background-color: rgb(100, 20, 20);
+QCheckBox#zoom_lock:checked,
+QCheckBox#image_quality_checkbox:checked,
+QCheckBox#outline_Checkbox:checked,
+QCheckBox#rapid_del_checkbox:checked,
+QCheckBox#auto_scan_checkbox:checked,
+QCheckBox#voice_mode_checkbox:checked {
+    background-color: #8f272b;
+    color: #ffffff;
+    border-color: #ff5a5f;
 }
 
-/* Line Edits */
-QLineEdit {
-    background-color: rgb(30, 0, 0);
-    color: rgb(200, 50, 50);
-    border: 1px solid rgb(100, 20, 20);
-    padding: 4px;
+QCheckBox#zoom_lock:checked:hover,
+QCheckBox#image_quality_checkbox:checked:hover,
+QCheckBox#outline_Checkbox:checked:hover,
+QCheckBox#rapid_del_checkbox:checked:hover,
+QCheckBox#auto_scan_checkbox:checked:hover,
+QCheckBox#voice_mode_checkbox:checked:hover {
+    background-color: #a83236;
+    border-color: #ff7377;
 }
 
-/* Checkboxes */
-QCheckBox {
-    color: rgb(200, 50, 50);
-}
-
-QCheckBox::indicator:checked {
-    background-color: rgb(200, 50, 50); /* Blood red for checked */
-    border: 1px solid rgb(100, 20, 20);
-}
-
-/* Radio Buttons */
-QRadioButton {
-    color: rgb(200, 50, 50);
-}
-
-QRadioButton::indicator:checked {
-    background-color: rgb(200, 50, 50); /* Blood red for checked */
-    border: 1px solid rgb(100, 20, 20);
+QCheckBox#zoom_lock::indicator,
+QCheckBox#image_quality_checkbox::indicator,
+QCheckBox#outline_Checkbox::indicator,
+QCheckBox#rapid_del_checkbox::indicator,
+QCheckBox#auto_scan_checkbox::indicator,
+QCheckBox#voice_mode_checkbox::indicator {
+    width: 0;
+    height: 0;
+    margin: 0;
 }

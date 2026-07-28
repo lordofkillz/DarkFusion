@@ -1,0 +1,17 @@
+{
+  "default_aim_point": [0.5, 0.18],
+  "files": {
+    "1.webp": { "aim_point": [0.5, 0.19], "enabled": true },
+    "2.png": { "aim_point": [0.5, 0.2], "enabled": true },
+    "3.png": { "aim_point": [0.5, 0.19], "enabled": true },
+    "4.png": { "aim_point": [0.5, 0.48], "enabled": true },
+    "5.png": { "aim_point": [0.5, 0.24], "enabled": true },
+    "6.png": { "aim_point": [0.58, 0.15], "enabled": true },
+    "7.png": { "aim_point": [0.19, 0.14], "enabled": true },
+    "8.png": { "aim_point": [0.56, 0.2], "enabled": true },
+    "9.png": { "aim_point": [0.57, 0.2], "enabled": true },
+    "10.png": { "aim_point": [0.5, 0.18], "enabled": true },
+    "11.webp": { "aim_point": [0.5, 0.16], "enabled": true },
+    "12.webp": { "aim_point": [0.5, 0.16], "enabled": true }
+  }
+}

@@ -1,85 +1,83 @@
---index-url https://download.pytorch.org/whl/cu128
---extra-index-url https://pypi.org/simple
+# UltraDarkFusion v5.2 - Windows / NVIDIA CUDA 12.8 environment
+#
+# Supported setup:
+#   conda create -n fusion python=3.12 -y
+#   conda activate fusion
+#   set PYTHONNOUSERSITE=1
+#   python -m pip install --upgrade pip setuptools wheel
+#   python -m pip install --no-user -r requirements.txt
+#
+# PyTorch CUDA wheels and NVIDIA TensorRT packages use these additional
+# indexes. PyPI remains the primary index for every other dependency.
+--extra-index-url https://download.pytorch.org/whl/cu128
+--extra-index-url https://pypi.ngc.nvidia.com
 
-# Core ML stack (from PyTorch index)
+# Installation/build helpers
+setuptools==78.1.1
+wheel==0.45.1
+ninja==1.13.0
+
+# CUDA and core numerical stack
 torch==2.7.0+cu128
 torchvision==0.22.0+cu128
-
-# Core scientific packages (compatible with OpenCV and PyTorch bindings)
-numpy>=1.24.0,<2.0.0
-pandas>=2.1.4,<2.3.0
-scipy
-
-# Misc
-bcrypt==4.0.1
-dill==0.3.7
-mss
-
-# Visualization
-matplotlib==3.6.3
-plotly 
-seaborn==0.12.2
+numpy==1.26.4
+scipy==1.15.3
+Pillow==12.2.0
+PyYAML==6.0.2
+psutil==7.0.0
+GPUtil==1.4.0
+nvidia-ml-py==13.610.43
 tqdm==4.66.1
 
-# PyQt5 UI
-pyqt5
-qt-material==2.14
-pywebview==4.4.1
-cefpython3
-sip
-
-# GUI & Input Automation
-pyautogui
-keyboard==0.13.5
-pynput==1.7.6
-inputs==0.5
-XInput-Python==0.4.0
-watchdog
-
-# Windows-only support
-pywin32
-pythonnet
-mediapipe
-
-# Audio / Speech
-pyttsx3==2.90
-SpeechRecognition
-
-# Web / API / Crypto / File I/O
-requests==2.27.1
-python-dotenv
-pyAesCrypt==6.0.0
-pytube
-yt-dlp
-validators
-
-# ML / Vision / Inference
-ultralytics
-sahi
+# OpenCV contrib contains the standard OpenCV modules too. Do not install
+# opencv-python or a headless build alongside it; competing cv2 wheels can
+# overwrite one another.
 opencv-contrib-python==4.9.0.80
-opencv-python-headless==4.9.0.80
-GPUtil
-scikit-image
-scikit-learn
+
+# YOLO, tracking, tuning, SAHI, SAM3, and GroundingDINO
+ultralytics==8.4.83
+ray[tune]==2.52.1
+pydantic==2.7.1
+lap==0.5.12
+sahi==0.11.23
+clip @ git+https://github.com/ultralytics/CLIP.git@88ade288431a46233f1556d1e141901b3ef0a36b
+groundingdino-py==0.4.0
+transformers==4.57.1
+tokenizers==0.22.0
+safetensors==0.5.3
+huggingface-hub==0.36.2
+supervision==0.6.0
+timm==1.0.15
 pycocotools==2.0.6
-timm
-onnxruntime-gpu
-tensorrt
+addict==2.4.0
+yapf==0.43.0
 
-# SAM / GroundingDINO / Diffusion
-git+https://github.com/facebookresearch/segment-anything.git
-groundingdino-py
-diffusers
-addict
+# Stable Diffusion inpainting
+diffusers==0.33.1
+accelerate==1.5.2
 
-# Image/Polygon Utils
-Pillow==10.1.0
-pybboxes==0.1.6
-perlin-noise
-rectpack
-imutils
+# ONNX and TensorRT backends
+onnx==1.17.0
+onnxruntime-gpu==1.22.0
+tensorrt==10.15.1.29
 
-# Dev Tools / Formatting
-yapf
-deep-translator
+# Desktop UI and charts
+PyQt5==5.15.11
+qt-material==2.14
+pyqtgraph==0.13.7
+pandas==2.2.3
+matplotlib==3.6.3
+plotly==6.1.2
 
+# DarkFusion runtime features
+scikit-learn==1.7.0
+mediapipe==0.10.21
+mss==10.0.0
+PyAutoGUI==0.9.54
+SpeechRecognition==3.14.3
+python-dotenv==1.1.0
+requests==2.32.4
+yt-dlp==2026.3.17
+deep-translator==1.9.1
+shapely==2.1.1
+perlin-noise==1.14

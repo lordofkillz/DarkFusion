@@ -1,244 +1,296 @@
-/*----- General Window/Widget -----*/
+/* Star Trek: blue panels with amber command accents. */
 QWidget {
-    background-color: #2b2b2b; /* Dark spaceship background */
-    color: #e6e6e6; /* Light metallic text color */
+    background-color: #121923;
+    color: #dde7f0;
+    font-family: "Segoe UI", Arial, sans-serif;
+    font-size: 10pt;
+    selection-background-color: #226b9a;
+    selection-color: #ffffff;
 }
 
-/*----- QLabel -----*/
-QLabel {
-    background-color: transparent; /* Transparent for cleaner look */
-    color: #00ccff; /* Futuristic blue text */
-    font-weight: bold;
+QMainWindow,
+QDialog {
+    background-color: #0d131b;
 }
 
-/*----- QMenuBar -----*/
-QMenuBar {
-    background-color: #2d2d2d;
-    border: 1px solid #444;
-    color: #e6e6e6;
-}
-
-QMenuBar::item {
+QLabel,
+QCheckBox,
+QRadioButton,
+QGroupBox {
     background-color: transparent;
-    padding: 5px;
+    color: #dde7f0;
 }
 
-QMenuBar::item:selected {
-    background-color: #00ccff; /* Highlighted with a futuristic blue */
-    color: #000;
+QMenuBar,
+QMenu,
+QToolBar,
+QStatusBar,
+QDockWidget {
+    background-color: #16202b;
+    color: #dde7f0;
+    border-color: #2b3b4a;
 }
 
-QMenuBar::item:pressed {
-    background-color: #444;
-    color: #fff;
-}
-
-/*----- QMenu -----*/
-QMenu {
-    background-color: #333;
-    border: 1px solid #000;
-    padding: 5px;
-    color: #e6e6e6;
-}
-
+QMenuBar::item,
 QMenu::item {
-    background-color: transparent;
-    padding: 5px 20px;
+    padding: 5px 10px;
 }
 
+QMenuBar::item:selected,
 QMenu::item:selected {
-    background-color: #00ccff; /* Blue for hover */
-    color: #000;
+    background-color: #226b9a;
+    color: #ffffff;
 }
 
-/*----- QPushButton (Futuristic Button) -----*/
-QPushButton {
-    background-color: #444; /* Dark metallic base */
-    color: #e6e6e6; /* Light text */
-    font-size: 14px;
-    border: 2px solid #2a547f;
+QDockWidget::title {
+    background-color: #1f2b38;
+    padding: 5px;
+    font-weight: 600;
+}
+
+QFrame,
+QGroupBox {
+    background-color: #161f2a;
+    border: 1px solid #2b3b4a;
+    border-radius: 6px;
+}
+
+QGroupBox {
+    margin-top: 12px;
+    padding-top: 8px;
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 8px;
+    padding: 0 4px;
+}
+
+QPushButton,
+QToolButton {
+    background-color: #223041;
+    color: #f4f8fb;
+    border: 1px solid #3c5063;
     border-radius: 5px;
-    padding: 8px;
+    padding: 5px 10px;
 }
 
-QPushButton:hover {
-    background-color: #2a547f; /* Glow effect with blue hover */
-    color: #fff;
+QPushButton:hover,
+QToolButton:hover {
+    background-color: #293a4f;
+    border-color: #f0a22a;
 }
 
-QPushButton:pressed {
-    background-color: #d10000; /* Red for alert (Star Trek Red Alert style) */
-    color: #fff;
+QPushButton:pressed,
+QToolButton:pressed {
+    background-color: #1a2633;
+    border-color: #d64a3a;
 }
 
-/*----- QCheckBox -----*/
-QCheckBox {
-    background-color: transparent;
-    color: #e6e6e6; /* White text */
+QPushButton:disabled,
+QToolButton:disabled {
+    background-color: #1a222c;
+    color: #788796;
+    border-color: #293541;
 }
 
-QCheckBox::indicator {
-    background-color: #333;
-    border: 1px solid #00ccff; /* Futuristic blue border */
-    width: 15px;
-    height: 15px;
+QLineEdit,
+QTextEdit,
+QPlainTextEdit,
+QComboBox,
+QSpinBox,
+QDoubleSpinBox {
+    background-color: #0d131b;
+    color: #f4f8fb;
+    border: 1px solid #334656;
+    border-radius: 5px;
+    padding: 4px 6px;
 }
 
-QCheckBox::indicator:checked {
-    background-color: #00ccff; /* Blue glow when checked */
+QLineEdit:focus,
+QTextEdit:focus,
+QPlainTextEdit:focus,
+QComboBox:focus,
+QSpinBox:focus,
+QDoubleSpinBox:focus {
+    border-color: #f0a22a;
 }
 
-QCheckBox::indicator:unchecked:hover {
-    border: 1px solid #ffcc00; /* Yellow border on hover */
+QComboBox::drop-down {
+    border-left: 1px solid #334656;
+    width: 20px;
 }
 
-/*----- QLineEdit (Input Fields) -----*/
-QLineEdit {
-    background-color: #444; /* Dark metallic background */
-    color: #00ccff; /* Blue text for a futuristic feel */
-    border: 1px solid #555;
-    padding: 5px;
+QComboBox QAbstractItemView {
+    background-color: #121923;
+    color: #dde7f0;
+    border: 1px solid #334656;
+    selection-background-color: #226b9a;
 }
 
-/*----- QListView -----*/
-QListView {
-    background-color: #333; /* Dark background */
-    color: #e6e6e6; /* Light text */
-    border: 1px solid #444;
-}
-
-QListView::item {
-    padding: 5px;
-    background-color: #333;
-    color: #e6e6e6;
-}
-
-QListView::item:hover {
-    background-color: #00ccff; /* Blue highlight on hover */
-    color: #000;
-}
-
-QListView::item:selected {
-    background-color: #2a547f;
-    color: #fff;
-}
-
-/*----- QTableView & QTableWidget (Tables) -----*/
-QTableView {
-    background-color: #2b2b2b;
-    color: #e6e6e6;
-    border: 1px solid #444;
-    gridline-color: #555;
-}
-
-QTableView::item:hover {
-    background-color: #00ccff; /* Blue hover */
-    color: #000;
-}
-
-QTableView::item:selected {
-    background-color: #2a547f; /* Futuristic blue */
-    color: #fff;
-}
-
-QHeaderView::section {
-    background-color: #444; /* Darker header */
-    color: #e6e6e6;
-    padding: 5px;
-}
-
-/*----- QProgressBar (Progress Indicators) -----*/
-QProgressBar {
-    border: 1px solid #444;
-    background-color: #333;
-    text-align: center;
-    color: #e6e6e6;
-}
-
-QProgressBar::chunk {
-    background-color: #00ccff; /* Blue for progress */
-}
-
-/*----- QTabWidget -----*/
 QTabWidget::pane {
-    background-color: #2b2b2b;
-    border: 1px solid #444;
+    border: 1px solid #2b3b4a;
+    background-color: #121923;
 }
 
 QTabBar::tab {
-    background-color: #444;
-    color: #e6e6e6;
-    padding: 8px;
-    border: 1px solid #555;
+    background-color: #1b2734;
+    color: #c7d3df;
+    border: 1px solid #2b3b4a;
+    padding: 6px 10px;
+    margin-right: 2px;
+    border-top-left-radius: 5px;
+    border-top-right-radius: 5px;
 }
 
 QTabBar::tab:selected {
-    background-color: #00ccff; /* Bright blue for active tab */
-    color: #000;
+    background-color: #243b50;
+    color: #ffffff;
+    border-color: #42627b;
 }
 
-/*----- QToolButton (Toolbar Buttons) -----*/
-QToolButton {
-    background-color: #444;
-    color: #e6e6e6;
-    border: 1px solid #555;
+QTabBar::tab:!selected:hover {
+    background-color: #223041;
+    color: #ffffff;
+}
+
+QTableView,
+QTableWidget,
+QTreeView,
+QTreeWidget,
+QListView,
+QListWidget {
+    background-color: #0d131b;
+    alternate-background-color: #141d27;
+    color: #dde7f0;
+    border: 1px solid #2b3b4a;
+    gridline-color: #223041;
+    selection-background-color: #226b9a;
+    selection-color: #ffffff;
+}
+
+QHeaderView::section {
+    background-color: #1f2b38;
+    color: #f4f8fb;
+    border: none;
+    border-right: 1px solid #314153;
+    border-bottom: 1px solid #314153;
+    padding: 5px;
+    font-weight: 600;
+}
+
+QProgressBar {
+    background-color: #0d131b;
+    color: #f4f8fb;
+    border: 1px solid #2b3b4a;
+    border-radius: 5px;
+    text-align: center;
+}
+
+QProgressBar::chunk {
+    background-color: #f0a22a;
     border-radius: 4px;
-    padding: 5px;
 }
 
-QToolButton:hover {
-    background-color: #2a547f; /* Blue glow */
+QSlider::groove:horizontal {
+    height: 6px;
+    background: #2b3b4a;
+    border-radius: 3px;
 }
 
-QToolButton:pressed {
-    background-color: #d10000; /* Red alert for pressed state */
+QSlider::handle:horizontal {
+    background: #f0a22a;
+    border: 1px solid #ffd37a;
+    width: 14px;
+    margin: -5px 0;
+    border-radius: 7px;
 }
 
-/*----- QScrollBar (Scrollbar) -----*/
-QScrollBar:horizontal, QScrollBar:vertical {
-    background-color: #333;
-    border: 1px solid #444;
+QScrollBar:vertical,
+QScrollBar:horizontal {
+    background: #0d131b;
+    border: none;
+    margin: 0;
 }
 
-QScrollBar::handle:horizontal, QScrollBar::handle:vertical {
-    background-color: #00ccff; /* Blue handle */
+QScrollBar:vertical {
+    width: 12px;
 }
 
-QScrollBar::add-line, QScrollBar::sub-line {
-    background-color: #444;
+QScrollBar:horizontal {
+    height: 12px;
 }
 
-/*----- QStatusBar (Status Area) -----*/
-QStatusBar {
-    background-color: #2b2b2b;
-    color: #e6e6e6;
+QScrollBar::handle:vertical,
+QScrollBar::handle:horizontal {
+    background: #3c5063;
+    border-radius: 6px;
+    min-height: 24px;
+    min-width: 24px;
 }
 
-/*----- QSizeGrip -----*/
-QSizeGrip {
-    background-color: #333;
+QScrollBar::handle:hover {
+    background: #226b9a;
 }
 
-/*----- QSpinBox & QDoubleSpinBox -----*/
-QSpinBox, QDoubleSpinBox {
-    background-color: #444;
-    color: #e6e6e6;
-    border: 1px solid #555;
-    padding: 5px;
+QScrollBar::add-line,
+QScrollBar::sub-line {
+    width: 0;
+    height: 0;
+}
+/* DarkFusion quick toggle buttons: compact inactive state, red active state. */
+QCheckBox#zoom_lock,
+QCheckBox#image_quality_checkbox,
+QCheckBox#outline_Checkbox,
+QCheckBox#rapid_del_checkbox,
+QCheckBox#auto_scan_checkbox,
+QCheckBox#voice_mode_checkbox {
+    background-color: rgba(32, 36, 42, 190);
+    color: #f2f5f8;
+    border: 1px solid #3a424d;
+    border-radius: 5px;
+    padding: 4px 10px;
+    spacing: 0;
 }
 
-QSpinBox::up-button, QDoubleSpinBox::up-button {
-    background-color: #555;
+QCheckBox#zoom_lock:hover,
+QCheckBox#image_quality_checkbox:hover,
+QCheckBox#outline_Checkbox:hover,
+QCheckBox#rapid_del_checkbox:hover,
+QCheckBox#auto_scan_checkbox:hover,
+QCheckBox#voice_mode_checkbox:hover {
+    background-color: rgba(45, 53, 64, 210);
+    border-color: #ff7377;
 }
 
-QSpinBox::down-button, QDoubleSpinBox::down-button {
-    background-color: #555;
+QCheckBox#zoom_lock:checked,
+QCheckBox#image_quality_checkbox:checked,
+QCheckBox#outline_Checkbox:checked,
+QCheckBox#rapid_del_checkbox:checked,
+QCheckBox#auto_scan_checkbox:checked,
+QCheckBox#voice_mode_checkbox:checked {
+    background-color: #8f272b;
+    color: #ffffff;
+    border-color: #ff5a5f;
 }
 
-QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
-    image: url(://arrow-up.png);
+QCheckBox#zoom_lock:checked:hover,
+QCheckBox#image_quality_checkbox:checked:hover,
+QCheckBox#outline_Checkbox:checked:hover,
+QCheckBox#rapid_del_checkbox:checked:hover,
+QCheckBox#auto_scan_checkbox:checked:hover,
+QCheckBox#voice_mode_checkbox:checked:hover {
+    background-color: #a83236;
+    border-color: #ff7377;
 }
 
-QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
-    image: url(://arrow-down.png);
+QCheckBox#zoom_lock::indicator,
+QCheckBox#image_quality_checkbox::indicator,
+QCheckBox#outline_Checkbox::indicator,
+QCheckBox#rapid_del_checkbox::indicator,
+QCheckBox#auto_scan_checkbox::indicator,
+QCheckBox#voice_mode_checkbox::indicator {
+    width: 0;
+    height: 0;
+    margin: 0;
 }

@@ -1,133 +1,138 @@
-![UltraDarkFusion GUI](samples/darkfusion2.gif)
+# UltraDarkFusion 5.2
 
-### 🔍 Annotation Support
+![UltraDarkFusion](samples/darkfusion2.gif)
 
-<table>
-  <tr>
-    <td><img src="samples/boxes.png" alt="Bounding Boxes" width="300"/></td>
-    <td><img src="samples/Segmentation.png" alt="Segmentation" width="300"/></td>
-    <td><img src="samples/pose.png" alt="Pose Keypoints" width="300"/></td>
-    <td><img src="samples/OBB.png" alt="Oriented Bounding Boxes" width="300"/></td>
-  </tr>
-  <tr>
-    <td align="center">Bounding Boxes</td>
-    <td align="center">Segmentation</td>
-    <td align="center">Pose Keypoints</td>
-    <td align="center">Oriented Bounding Boxes</td>
-  </tr>
-</table>
+UltraDarkFusion is a Windows desktop application for building YOLO datasets,
+labeling images and video, training models, reviewing validation failures, and
+running inference through PyTorch, ONNX, or TensorRT.
 
+## Annotation support
 
+| Bounding boxes | Segmentation | Pose | OBB |
+| --- | --- | --- | --- |
+| ![Boxes](samples/boxes.png) | ![Segmentation](samples/Segmentation.png) | ![Pose](samples/pose.png) | ![OBB](samples/OBB.png) |
 
-**UltraDarkFusion** is an advanced GUI for object detection, segmentation, keypoints and computer vision, designed to streamline dataset management, annotation, model training, and real-time inference.
+## Current capabilities
 
+- Bounding-box, polygon segmentation, pose/keypoint, and oriented-box labeling.
+- Zoom, pan, snap-assisted editing, configurable frame skipping, and batch
+  dataset workflows.
+- SAM3-assisted snapping, segmentation conversion, object effects, and
+  augmentation with cancellation controls.
+- GroundingDINO and YOLO-based automatic labeling.
+- Ultralytics training, validation, hyperparameter tuning, and detached
+  background runs that remain active when the UI closes.
+- Live training charts, artifact viewer, safe stop-after-epoch/stop-now
+  controls, run-folder access, and checkpoint access.
+- Validation Review for false positives, missed ground truth, wrong classes,
+  weak localization, duplicates, and poor keypoints across detect, segment,
+  pose, OBB, and classify tasks.
+- Dataset analysis for mixed annotations, invalid labels, small targets,
+  class balance, model stride, candidate image sizes, and task-aware
+  segmentation mask resolution.
+- PyTorch `.pt`, ONNX `.onnx`, TensorRT `.engine`, and legacy Darknet model
+  workflows.
+- SAHI/tiled inference, tracking, frame extraction, camera/desktop capture,
+  themes, translations, and voice-assisted class selection.
 
-### 🚀 What's New in UltraDarkFusion?
+## Supported system
 
-- ✅ **Full Segmentation Support** – annotate, train, and run inference on masks with YOLO or SAM.
-- ✅ **Pose Estimation** – automatic keypoint detection, annotation, and training-ready exports.
-- ✅ **Oriented Bounding Boxes (OBB)** – draw, label, and auto-generate rotated boxes via YOLO OBB or SAM.
-- ✅ **Dataset Manager** – organize, deduplicate, and augment your datasets with built-in tools.
-- ⚡ **TensorRT Acceleration** – run inference using `.engine` models for max speed.
-- 🧠 **Multi-Backend Tracking** – BoT-SORT and ByteTrack support with `.pt`, `.onnx`, and `.engine` formats.
-- 🗣️ **Voice-Activated Class Switching** – change classes during labeling by saying the name.
-- 🌍 **Multilingual UI Translation** – dynamically switch languages across the entire interface.
+- Windows 10/11, 64-bit.
+- Miniconda or Anaconda.
+- Python 3.12 in a dedicated environment named `fusion`.
+- NVIDIA GPU and current driver recommended.
+- The pinned PyTorch build uses CUDA 12.8 and supports modern NVIDIA GPUs,
+  including Blackwell/RTX 50-series.
 
-### 🎯 Key Features
+The normal Python installation does not require compiling OpenCV or installing
+a separate CUDA Toolkit. The PyTorch wheel provides its matching CUDA runtime.
+A locally installed CUDA Toolkit is only needed for specialized source builds.
 
-- 🎨 **Label Anything** – supports boxes, segmentation, keypoints, and OBB — all in one project.
-- 🎞️ **Video & YouTube Processing** – auto-label or extract frames directly from video files or YouTube links.
-- 🤖 **Automatic Annotation** – batch-label folders.
-- 🧩 **Flexible Inference** – switch between PyTorch, ONNX, and TensorRT seamlessly.
-- 🧼 **Cleaner UI** – toggle dark/light mode, filter by class, generate heatmaps, and apply custom QSS themes.
+## Install
 
----
+Install [Git](https://git-scm.com/download/win) and
+[Miniconda](https://docs.conda.io/projects/miniconda/en/latest/), then:
 
-## 🚀 Installation Guide
-
-### Required Build Tools
-Open Command Prompt and run:
-```batch
-winget install git.git (must restart shell after wards)
-winget install Kitware.CMake
-winget install --id Microsoft.VisualStudio.2019.BuildTools --source winget --override "--add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 --quiet --wait"
-```
-### Clone UltraDarkFusion Repository and OpenCV
-```batch
-cd C:\
-git clone https://github.com/lordofkillz/DarkFusion.git
-cd DarkFusion
-git clone --branch 4.9.0 https://github.com/opencv/opencv.git opencv-4.9.0
-git clone --branch 4.9.0 https://github.com/opencv/opencv_contrib.git opencv_contrib-4.9.0
-mkdir build install
+```powershell
+git clone https://github.com/lordofkillz/DarkFusion.git C:\DarkFusion
+cd C:\DarkFusion
+.\fusion_install.bat
 ```
 
-### Mandatory Downloads
-- [Download SAM Weights and Files]https://drive.google.com/file/d/1I6VYRf_Dco_A5REtTBkvjizFTwHmcaeM/view?usp=sharing
-  - Extract to `C:\DarkFusion\UltraDarkFusion`
+The installer:
 
+1. Finds Miniconda/Anaconda without assuming a username-specific path.
+2. Creates `fusion` with Python 3.12 when needed.
+3. prevents packages from leaking into the user-site directory.
+4. installs the pinned CUDA/ML/UI environment from `requirements.txt`.
+5. verifies the application files and critical imports.
 
-### Anaconda Setup
-- Download and install [Anaconda](https://www.anaconda.com/products/distribution).
-- Accept default installation settings.
-- for experienced devs, just create and environment and pip install -r requirements.txt
+Launch DarkFusion with:
 
-### Setup Environment
-- Run `fusion_install.bat` as administrator to create and configure the environment:
-```batch
-cd C:\DarkFusion\
-fusion_install.bat
+```powershell
+.\run_darkfusion.bat
 ```
-### Compile OpenCV with CUDA (Optional) **do not procced past this line if you do not know how to build opencv dnn or trouble shoot problem this is depreciated and will be removed in later version. **
 
-To compile OpenCV with CUDA acceleration (recommended for improved performance when using .weights):
-### Install CUDA and cuDNN
-- Install [CUDA 12.8](https://developer.nvidia.com/cuda-toolkit-archive)
-- Download cuDNN compatible with CUDA 12.8 from [NVIDIA Developer](https://developer.nvidia.com/cudnn)
-- Extract and copy cuDNN files to:
-  ```
-  C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8
-  ```
-download opencv and opencv-contrib versions with the same as your python versions place both both folders in c:\ create a build and install folder 
+Manual installation is also supported:
 
-
-```batch
-cd C:\DarkFusion\
-fusion_cuda.bat
+```powershell
+conda create -n fusion python=3.12 -y
+conda activate fusion
+$env:PYTHONNOUSERSITE = "1"
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install --no-user -r requirements.txt
+python scripts\verify_install.py
+python UltraDarkFusion\UltraDarkFusion_v5.2.py
 ```
-### Install CUDA and cuDNN
-- Install [CUDA 12.8](https://developer.nvidia.com/cuda-toolkit-archive)
-- Download cuDNN compatible with CUDA 12.8 from [NVIDIA Developer](https://developer.nvidia.com/cudnn)
-- Extract and copy cuDNN files to:
-  ```
-  C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8
-  ```
-### Install Darknet
 
-- Install [Darknet by Hank-AI](https://github.com/hank-ai/darknet).
+## Models
 
----
+Large model files are not stored in the Git repository. SAM3 snapping expects
+`UltraDarkFusion\Sam\sam3.pt`; GroundingDINO expects
+`UltraDarkFusion\Sam\groundingdino_swint_ogc.pth`. YOLO models can be selected
+from any local location.
 
-## Community and Support
-- **UltraDarkFusion Discord:** [Join Discord](https://discord.gg/fZTz8E44)
+See [MODEL_SETUP.md](MODEL_SETUP.md) for the exact model layout and TensorRT
+export notes.
 
-### Acknowledgments
-Special thanks to these open-source projects:
-- [SAM (Segment Anything)](https://github.com/facebookresearch/segment-anything)
+## What belongs in the repository
+
+The repository contains the application source, generated PyQt UI module,
+editable `.ui` file, training/validation worker scripts, styles, icons, sounds,
+translations, help documents, sight overlays, installer, dependency manifest,
+and verification tooling.
+
+The following stay local and are ignored:
+
+- `.env`, `settings.json`, databases, and machine-specific configuration.
+- datasets, labels, split lists, run directories, and validation reports.
+- `.pt`, `.pth`, `.weights`, `.onnx`, `.engine`, and other model artifacts.
+- videos, archives, caches, debug output, recovered copies, and backups.
+
+For large public checkpoints, use a GitHub Release or a dedicated model host
+instead of committing them to normal Git history.
+
+## Updating the generated UI
+
+After editing `UltraDarkFusion\UltraDarkFusion_v5.2.ui`, regenerate the Python
+module from the activated `fusion` environment:
+
+```powershell
+cd UltraDarkFusion
+.\generate_ui_py.ps1
+```
+
+Commit both `UltraDarkFusion_v5.2.ui` and
+`ui_ultradarkfusion_v5_2.py` together.
+
+## Community and acknowledgments
+
+- [UltraDarkFusion Discord](https://discord.gg/fZTz8E44)
+- [Ultralytics](https://github.com/ultralytics/ultralytics)
 - [GroundingDINO](https://github.com/IDEA-Research/GroundingDINO)
-- [Ultralytics YOLO](https://github.com/ultralytics/ultralytics)
 - [SAHI](https://github.com/obss/sahi)
+- [Darknet](https://github.com/hank-ai/darknet)
+- Inspired by [DarkMark](https://github.com/stephanecharette/DarkMark)
 
-Inspired by [DarkMark](https://github.com/stephanecharette/DarkMark), developed by Stephane from Hank-AI.
-
-### **Goals for UltraDarkFusion**  
-- [ ] **Remove OpenCV DNN and create a Python wrapper for Darknet** 
-- [ ] **Remove the document-based help and train a chatbot for assistance**  
-- [ ] **Improve code efficiency (Ongoing...)**  
-- [ ] **Upload UltraDarkFusion to PyPI for easier installation and distribution**  
-
-----
-
-
-
-
+UltraDarkFusion is licensed under the
+[GNU Affero General Public License v3](LICENSE.txt).

@@ -1,156 +1,323 @@
-
-/* General QWidget styling */
+/* UltraDarkFusion astro theme: same compact spacing/layout as default.css, with astro colors. */
 QWidget {
-    background-color: rgb(42, 7, 46); /* Deep cosmic purple */
-    color: rgb(238, 238, 238); /* Light text color */
-    selection-background-color: rgb(74, 25, 37); /* Maroon for selection */
-    selection-color: rgb(28, 28, 28); /* Dark text on selection */
+    background-color: rgb(42, 7, 46);
+    color: rgb(238, 238, 238);
     font-family: "Segoe UI", Arial, sans-serif;
-    font-size: 14px;
+    font-size: 10pt;
+    selection-background-color: rgb(74, 25, 37);
+    selection-color: #ffffff;
 }
 
-/* QLabel styling */
-QLabel {
+QMainWindow,
+QDialog {
+    background-color: rgb(32, 0, 36);
+}
+
+QLabel,
+QCheckBox,
+QRadioButton,
+QGroupBox {
     background-color: transparent;
-    color: rgb(238, 238, 238); /* Light gray text */
-    font-size: 13px;
-    padding: 2px 4px;
+    color: rgb(238, 238, 238);
 }
 
-/* QFrame styling */
-QFrame {
-    background-color: rgba(50, 10, 60, 0.8); /* Semi-transparent space purple */
-    border: 2px solid rgb(74, 25, 37); /* Maroon border */
+QMenuBar,
+QMenu,
+QToolBar,
+QStatusBar,
+QDockWidget {
+    background-color: rgb(32, 0, 36);
+    color: rgb(238, 238, 238);
+    border-color: rgb(74, 25, 37);
+}
+
+QMenuBar::item,
+QMenu::item {
+    padding: 5px 10px;
+    background: transparent;
+}
+
+QMenuBar::item:selected,
+QMenu::item:selected {
+    background-color: rgb(74, 25, 37);
+    color: #ffffff;
+}
+
+QDockWidget::title {
+    background-color: rgb(42, 7, 46);
+    padding: 5px;
+    font-weight: 600;
+}
+
+QFrame,
+QGroupBox {
+    border: 1px solid rgb(74, 25, 37);
+    border-radius: 6px;
+}
+
+QGroupBox {
+    margin-top: 12px;
+    padding-top: 8px;
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 8px;
+    padding: 0 4px;
+}
+
+QPushButton,
+QToolButton {
+    background-color: rgb(74, 25, 37);
+    color: rgb(238, 238, 238);
+    border: 1px solid rgb(58, 15, 68);
     border-radius: 5px;
-    margin: 4px;
+    padding: 5px 10px;
 }
 
-/* QToolBox styling */
-QToolBox {
-    background-color: rgb(32, 0, 36); /* Dark background for toolbox */
+QPushButton:hover,
+QToolButton:hover {
+    background-color: rgb(92, 37, 47);
+    border-color: #ff7377;
+}
+
+QPushButton:pressed,
+QToolButton:pressed {
+    background-color: rgb(58, 15, 68);
+    border-color: #ff5a5f;
+}
+
+QPushButton:disabled,
+QToolButton:disabled {
+    background-color: rgb(32, 0, 36);
+    color: rgba(238, 238, 238, 110);
+    border-color: rgb(58, 15, 68);
+}
+
+QLineEdit,
+QTextEdit,
+QPlainTextEdit,
+QComboBox,
+QSpinBox,
+QDoubleSpinBox {
+    background-color: rgb(32, 0, 36);
     color: rgb(238, 238, 238);
-    border: 1px solid rgb(74, 25, 37); /* Maroon border */
+    border: 1px solid rgb(74, 25, 37);
+    border-radius: 5px;
+    padding: 4px 6px;
 }
 
-QToolBox::tab {
-    background: rgb(42, 7, 46); /* Dark purple for toolbox tabs */
+QLineEdit:focus,
+QTextEdit:focus,
+QPlainTextEdit:focus,
+QComboBox:focus,
+QSpinBox:focus,
+QDoubleSpinBox:focus {
+    border-color: #ff7377;
+}
+
+QComboBox::drop-down {
+    border-left: 1px solid rgb(74, 25, 37);
+    width: 20px;
+}
+
+QComboBox QAbstractItemView {
+    background-color: rgb(32, 0, 36);
     color: rgb(238, 238, 238);
-    padding: 6px;
-    border-radius: 4px;
-    margin: 1px;
+    border: 1px solid rgb(74, 25, 37);
+    selection-background-color: rgb(74, 25, 37);
 }
 
-QToolBox::tab:selected {
-    background: rgb(74, 25, 37); /* Brighter maroon on selected tab */
-    font-weight: bold;
-}
-
-/* QTabWidget styling */
 QTabWidget::pane {
-    border-top: 2px solid rgb(74, 25, 37); /* Maroon border on pane */
+    border: 1px solid rgb(74, 25, 37);
+    background-color: rgb(42, 7, 46);
 }
 
 QTabBar::tab {
-    background: rgb(32, 0, 36); /* Dark purple for tabs */
+    background-color: rgb(32, 0, 36);
     color: rgb(238, 238, 238);
     border: 1px solid rgb(74, 25, 37);
-    padding: 6px;
-    border-top-left-radius: 4px;
-    border-top-right-radius: 4px;
+    padding: 6px 10px;
     margin-right: 2px;
+    border-top-left-radius: 5px;
+    border-top-right-radius: 5px;
 }
 
 QTabBar::tab:selected {
-    background: rgb(74, 25, 37); /* Brighter maroon on selected tab */
-    border-color: rgb(42, 7, 46);
+    background-color: rgb(74, 25, 37);
+    color: #ffffff;
+    border-color: rgb(92, 37, 47);
 }
 
-QTabBar::tab:hover {
-    background: rgb(92, 37, 47); /* Lighter maroon on hover */
+QTabBar::tab:!selected:hover {
+    background-color: rgb(92, 37, 47);
+    color: #ffffff;
 }
 
-/* QPushButton styling */
-QPushButton {
-    background-color: rgb(74, 25, 37); /* Maroon button */
+QToolBox,
+QToolBox::tab {
+    background-color: rgb(32, 0, 36);
     color: rgb(238, 238, 238);
-    border: 1px solid rgb(58, 15, 68); /* Darker border */
-    padding: 6px 12px;
-    border-radius: 8px;
-    font-size: 13px;
-}
-
-QPushButton::hover {
-    background-color: rgb(92, 37, 47); /* Lighter maroon on hover */
     border: 1px solid rgb(74, 25, 37);
 }
 
-QPushButton::pressed {
-    background-color: rgb(58, 15, 68); /* Darker purple on press */
-    border: 1px solid rgb(42, 7, 46);
+QToolBox::tab:selected {
+    background-color: rgb(74, 25, 37);
+    font-weight: 600;
 }
 
-/* QScrollArea styling */
-QScrollArea {
-    background-color: rgb(32, 0, 36); /* Dark purple background */
+QTableView,
+QTableWidget,
+QTreeView,
+QTreeWidget,
+QListView,
+QListWidget {
+    background-color: rgb(32, 0, 36);
+    alternate-background-color: rgb(42, 7, 46);
+    color: rgb(238, 238, 238);
     border: 1px solid rgb(74, 25, 37);
-    border-radius: 6px;
+    gridline-color: rgb(58, 15, 68);
+    selection-background-color: rgb(74, 25, 37);
+    selection-color: #ffffff;
+}
+
+QTableView::item,
+QTableWidget::item,
+QTreeView::item,
+QTreeWidget::item,
+QListView::item,
+QListWidget::item {
     padding: 4px;
 }
 
-/* QScrollBar styling */
-QScrollBar:vertical, QScrollBar:horizontal {
-    background-color: rgb(42, 7, 46); /* Dark purple */
-    width: 10px;
-    height: 10px;
-    margin: 2px;
+QHeaderView::section {
+    background-color: rgb(74, 25, 37);
+    color: #ffffff;
+    border: none;
+    border-right: 1px solid rgb(58, 15, 68);
+    border-bottom: 1px solid rgb(58, 15, 68);
+    padding: 5px;
+    font-weight: 600;
+}
+
+QProgressBar {
+    background-color: rgb(32, 0, 36);
+    color: #ffffff;
+    border: 1px solid rgb(74, 25, 37);
     border-radius: 5px;
+    text-align: center;
 }
 
-QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
-    background-color: rgb(238, 238, 238); /* Light gray handle */
-    min-height: 20px;
-    min-width: 20px;
-    border-radius: 5px;
+QProgressBar::chunk {
+    background-color: rgb(92, 37, 47);
+    border-radius: 4px;
 }
 
-QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover {
-    background-color: rgb(215, 215, 215); /* Slightly lighter handle on hover */
+QSlider::groove:horizontal {
+    height: 6px;
+    background: rgb(74, 25, 37);
+    border-radius: 3px;
 }
 
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical, 
-QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
-    background: none;
+QSlider::handle:horizontal {
+    background: #ff7377;
+    border: 1px solid #ffb0b3;
+    width: 14px;
+    margin: -5px 0;
+    border-radius: 7px;
 }
 
-/* QLineEdit styling */
-QLineEdit {
-    background-color: rgb(255, 255, 255); /* White input */
-    color: rgb(42, 7, 46); /* Dark purple text */
-    border: 1px solid rgb(74, 25, 37); /* Maroon border */
-    padding: 4px 6px;
+QScrollArea {
+    background-color: rgb(32, 0, 36);
+    border: 1px solid rgb(74, 25, 37);
     border-radius: 6px;
 }
 
-/* QCheckBox styling */
-QCheckBox {
-    spacing: 6px;
-    color: rgb(238, 238, 238);
-    font-size: 13px;
+QScrollBar:vertical,
+QScrollBar:horizontal {
+    background: rgb(32, 0, 36);
+    border: none;
+    margin: 0;
 }
 
-QCheckBox::indicator {
-    width: 16px;
-    height: 16px;
+QScrollBar:vertical {
+    width: 12px;
 }
 
-QCheckBox::indicator:checked {
-    background-color: rgb(74, 25, 37); /* Maroon check */
-    border: 1px solid rgb(42, 7, 46);
-    border-radius: 4px;
+QScrollBar:horizontal {
+    height: 12px;
 }
 
-QCheckBox::indicator:unchecked {
-    background-color: rgb(42, 7, 46); /* Dark purple for unchecked */
-    border: 1px solid rgb(58, 15, 68);
-    border-radius: 4px;
+QScrollBar::handle:vertical,
+QScrollBar::handle:horizontal {
+    background: rgb(92, 37, 47);
+    border-radius: 6px;
+    min-height: 24px;
+    min-width: 24px;
+}
+
+QScrollBar::handle:hover {
+    background: #ff7377;
+}
+
+QScrollBar::add-line,
+QScrollBar::sub-line {
+    width: 0;
+    height: 0;
+}
+
+QCheckBox#zoom_lock,
+QCheckBox#image_quality_checkbox,
+QCheckBox#outline_Checkbox,
+QCheckBox#rapid_del_checkbox,
+QCheckBox#auto_scan_checkbox,
+QCheckBox#voice_mode_checkbox {
+    background-color: rgba(32, 36, 42, 190);
+    color: #f2f5f8;
+    border: 1px solid #3a424d;
+    border-radius: 5px;
+    padding: 4px 10px;
+    spacing: 0;
+}
+
+QCheckBox#zoom_lock:hover,
+QCheckBox#image_quality_checkbox:hover,
+QCheckBox#outline_Checkbox:hover,
+QCheckBox#rapid_del_checkbox:hover,
+QCheckBox#auto_scan_checkbox:hover,
+QCheckBox#voice_mode_checkbox:hover {
+    background-color: rgba(45, 53, 64, 210);
+    border-color: #ff7377;
+}
+
+QCheckBox#zoom_lock:checked,
+QCheckBox#image_quality_checkbox:checked,
+QCheckBox#outline_Checkbox:checked,
+QCheckBox#rapid_del_checkbox:checked,
+QCheckBox#auto_scan_checkbox:checked,
+QCheckBox#voice_mode_checkbox:checked {
+    background-color: #8f272b;
+    color: #ffffff;
+    border-color: #ff5a5f;
+}
+
+QCheckBox#zoom_lock:checked:hover,
+QCheckBox#image_quality_checkbox:checked:hover,
+QCheckBox#outline_Checkbox:checked:hover,
+QCheckBox#rapid_del_checkbox:checked:hover,
+QCheckBox#auto_scan_checkbox:checked:hover,
+QCheckBox#voice_mode_checkbox:checked:hover {
+    background-color: #a83236;
+    border-color: #ff7377;
+}
+
+QCheckBox#zoom_lock::indicator,
+QCheckBox#image_quality_checkbox::indicator,
+QCheckBox#outline_Checkbox::indicator,
+QCheckBox#rapid_del_checkbox::indicator,
+QCheckBox#auto_scan_checkbox::indicator,
+QCheckBox#voice_mode_checkbox::indicator {
+    width: 0;
+    height: 0;
+    margin: 0;
 }
