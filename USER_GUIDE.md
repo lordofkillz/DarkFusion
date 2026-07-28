@@ -20,6 +20,16 @@ Use **Settings > Language** to change the interface language. All selectable
 languages are stored locally under `UltraDarkFusion/translations`; changing
 language does not require an internet connection.
 
+DarkFusion enables **Settings > General > Auto-scale UI for screen size** by
+default. It chooses a compact scale from the monitor's available logical
+resolution, after Windows and Qt display scaling are applied. Turn it off to
+select a manual scale from 75% to 125%, then choose **Apply UI Scale**.
+
+Window and dock positions are restored only when the saved monitor size and
+DPI are compatible with the current screen. If controls are clipped after a
+monitor or Windows scaling change, use **Tools > Reset Layout** to rebuild a
+responsive layout and replace the incompatible saved geometry.
+
 ## 2. Understand the workflow
 
 A productive DarkFusion session normally follows this order:
@@ -309,4 +319,3 @@ model works in the actual scenario rather than only memorizing the dataset.
 - Back up labels before overwrite or automatic repair operations.
 - Export TensorRT engines on the target hardware.
 - Keep an untouched validation set for honest comparisons between runs.
-

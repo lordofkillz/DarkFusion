@@ -885,6 +885,9 @@ PROJECT_SETTING_KEYS = {
 
 UI_LINE_HEIGHT_PERCENT = 122
 UI_LAYOUT_SPACING = 8
+UI_SCALE_MIN_PERCENT = 75
+UI_SCALE_MAX_PERCENT = 125
+CURRENT_UI_LAYOUT_VERSION = 2
 
 GLOBAL_LINE_SPACING_QSS = """
 /* DarkFusion global control sizing. Avoid QSS line-height because Qt can clip text. */
@@ -903,6 +906,26 @@ QPlainTextEdit {
 QAbstractItemView::item {
     padding-top: 5px;
     padding-bottom: 5px;
+}
+
+QCheckBox {
+    spacing: 6px;
+}
+
+QCheckBox::indicator {
+    width: 15px;
+    height: 15px;
+}
+
+QGroupBox {
+    margin-top: 12px;
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 10px;
+    padding: 0 4px;
 }
 """
 
@@ -6521,6 +6544,23 @@ class SettingsDialog(QtWidgets.QDialog):
         if hasattr(parent, "saveSettings"):
             parent.saveSettings()
 
+    def update_ui_scale_controls(self):
+        auto_scale = bool(self.auto_scale_ui_checkbox.isChecked())
+        self.ui_scale_slider.setEnabled(not auto_scale)
+        if auto_scale and hasattr(self.parent(), "recommended_ui_scale_percent"):
+            percent = int(self.parent().recommended_ui_scale_percent())
+            self.ui_scale_value_label.setText(f"{percent}% auto")
+        else:
+            self.ui_scale_value_label.setText(f"{int(self.ui_scale_slider.value())}%")
+
+    def apply_ui_scale_setting(self):
+        parent = self.parent()
+        parent.settings["autoScaleUi"] = bool(self.auto_scale_ui_checkbox.isChecked())
+        parent.settings["uiScalePercent"] = int(self.ui_scale_slider.value())
+        if hasattr(parent, "apply_ui_scale"):
+            parent.apply_ui_scale(persist=True)
+        self.update_ui_scale_controls()
+
     def init_general_tab(self):
         layout = QtWidgets.QVBoxLayout(self.general_tab)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -6558,6 +6598,47 @@ class SettingsDialog(QtWidgets.QDialog):
             self.language_combo.setCurrentIndex(index if index >= 0 else 0)
         self.language_combo.currentIndexChanged.connect(self.save_language_setting)
         appearance_layout.addRow("Language:", self.language_combo)
+
+        self.auto_scale_ui_checkbox = QtWidgets.QCheckBox("Auto-scale UI for screen size")
+        self.auto_scale_ui_checkbox.setToolTip(
+            "Choose a compact UI scale from the monitor's available logical resolution. "
+            "This is useful with Windows display scaling and smaller laptop screens."
+        )
+        self.auto_scale_ui_checkbox.setChecked(
+            bool(self.parent().settings.get("autoScaleUi", True))
+        )
+        appearance_layout.addRow("", self.auto_scale_ui_checkbox)
+
+        ui_scale_row = QtWidgets.QHBoxLayout()
+        self.ui_scale_slider = QtWidgets.QSlider(Qt.Horizontal)
+        self.ui_scale_slider.setRange(UI_SCALE_MIN_PERCENT, UI_SCALE_MAX_PERCENT)
+        self.ui_scale_slider.setSingleStep(5)
+        self.ui_scale_slider.setPageStep(10)
+        self.ui_scale_slider.setValue(
+            max(
+                UI_SCALE_MIN_PERCENT,
+                min(
+                    UI_SCALE_MAX_PERCENT,
+                    int(self.parent().settings.get("uiScalePercent", 100) or 100),
+                ),
+            )
+        )
+        self.ui_scale_value_label = QtWidgets.QLabel()
+        self.ui_scale_value_label.setMinimumWidth(72)
+        self.ui_scale_value_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        ui_scale_row.addWidget(self.ui_scale_slider, 1)
+        ui_scale_row.addWidget(self.ui_scale_value_label)
+        appearance_layout.addRow("UI scale:", ui_scale_row)
+
+        self.apply_ui_scale_button = QtWidgets.QPushButton("Apply UI Scale")
+        self.apply_ui_scale_button.setToolTip(
+            "Apply the selected scale and reflow the current window."
+        )
+        appearance_layout.addRow("", self.apply_ui_scale_button)
+        self.auto_scale_ui_checkbox.toggled.connect(self.update_ui_scale_controls)
+        self.ui_scale_slider.valueChanged.connect(self.update_ui_scale_controls)
+        self.apply_ui_scale_button.clicked.connect(self.apply_ui_scale_setting)
+        self.update_ui_scale_controls()
 
         layout.addWidget(appearance_group)
 
@@ -16911,8 +16992,64 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.language_dropdown = dropdown
         return dropdown
 
-    def _style_with_global_line_spacing(self, stylesheet):
+    def recommended_ui_scale_percent(self, screen=None):
+        """Return an extra app scale based on Qt's available logical pixels."""
+        if screen is None:
+            try:
+                screen = self.screen()
+            except Exception:
+                screen = None
+        if screen is None:
+            screen = QtWidgets.QApplication.primaryScreen()
+        if screen is None:
+            return 100
+
+        available = screen.availableGeometry()
+        width = max(1, int(available.width()))
+        height = max(1, int(available.height()))
+        if width < 1050 or height < 650:
+            return 75
+        if width < 1200 or height < 740:
+            return 85
+        if width < 1450 or height < 850:
+            return 90
+        if width < 1650 or height < 950:
+            return 95
+        return 100
+
+    def effective_ui_scale_percent(self):
+        settings = getattr(self, "settings", {}) or {}
+        if bool(settings.get("autoScaleUi", True)):
+            return self.recommended_ui_scale_percent()
+        try:
+            percent = int(settings.get("uiScalePercent", 100) or 100)
+        except (TypeError, ValueError):
+            percent = 100
+        return max(UI_SCALE_MIN_PERCENT, min(UI_SCALE_MAX_PERCENT, percent))
+
+    def _stylesheet_with_ui_scale(self, stylesheet):
         base = stylesheet or ""
+        if "DarkFusion effective UI scale:" in base:
+            return base
+        factor = self.effective_ui_scale_percent() / 100.0
+
+        def scale_font_size(match):
+            value = float(match.group(1))
+            unit = match.group(2)
+            scaled = max(7.0, value * factor)
+            clean = f"{scaled:.2f}".rstrip("0").rstrip(".")
+            return f"font-size: {clean}{unit}"
+
+        base = re.sub(
+            r"font-size\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*(pt|px)",
+            scale_font_size,
+            base,
+            flags=re.IGNORECASE,
+        )
+        return f"/* DarkFusion effective UI scale: {int(round(factor * 100))}% */\n{base}"
+
+    def _style_with_global_line_spacing(self, stylesheet):
+        base = self._stylesheet_with_ui_scale(stylesheet)
         additions = []
         if GLOBAL_LINE_SPACING_QSS.strip() not in base:
             additions.append(GLOBAL_LINE_SPACING_QSS)
@@ -16921,6 +17058,46 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if not base.strip():
             return "\n\n".join(additions)
         return "\n\n".join(additions) + f"\n\n{base.rstrip()}"
+
+    def apply_ui_scale(self, persist=False):
+        percent = self.effective_ui_scale_percent()
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            base_size = app.property("darkfusionBaseFontPointSize")
+            if not base_size:
+                base_size = app.font().pointSizeF()
+                if base_size <= 0:
+                    base_size = 9.0
+                app.setProperty("darkfusionBaseFontPointSize", float(base_size))
+            font = QtGui.QFont(app.font())
+            font.setPointSizeF(max(7.0, float(base_size) * percent / 100.0))
+            app.setFont(font)
+
+        if hasattr(self, "styleComboBox"):
+            self.apply_stylesheet()
+        self.setProperty("effectiveUiScalePercent", percent)
+        for widget in self.findChildren(QtWidgets.QWidget):
+            widget.updateGeometry()
+        if self.layout() is not None:
+            self.layout().invalidate()
+            self.layout().activate()
+        self._fit_window_to_available_screen(center=False)
+        QtCore.QTimer.singleShot(0, self._normalize_default_dock_sizes)
+        if persist:
+            self.saveSettings()
+
+    def _connect_ui_scale_screen_tracking(self):
+        handle = self.windowHandle()
+        if handle is None or getattr(self, "_ui_scale_screen_tracking_ready", False):
+            return
+        handle.screenChanged.connect(self._on_ui_scale_screen_changed)
+        self._ui_scale_screen_tracking_ready = True
+
+    def _on_ui_scale_screen_changed(self, _screen):
+        if bool(getattr(self, "settings", {}).get("autoScaleUi", True)):
+            self.apply_ui_scale(persist=False)
+        self._fit_window_to_available_screen(center=False)
+        QtCore.QTimer.singleShot(0, self._normalize_default_dock_sizes)
 
     def _apply_global_line_spacing(self, root=None):
         root = root or self
@@ -17830,7 +18007,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             return
         widget.setMinimumWidth(0)
         widget.setMinimumHeight(min_height)
-        widget.setMaximumHeight(max(34, min_height + 6))
+        # Do not cap control height. Windows text scaling and translated labels
+        # can make the native size hint taller than Designer's old 30-36 px
+        # limits, which caused checkbox text to paint below an empty control.
+        widget.setMaximumHeight(QtWidgets.QWIDGETSIZE_MAX)
         if isinstance(widget, (QtWidgets.QLineEdit, QtWidgets.QComboBox)):
             widget.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         elif isinstance(widget, (QtWidgets.QSpinBox, QtWidgets.QDoubleSpinBox)):
@@ -18623,7 +18803,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         widgets["gpu1"].setText("2 GPUs")
         widgets["gpu2"].setText("3 GPUs")
         widgets["map_check"].setText("No mAP")
-        widgets["label_27"].setText("Cache")
+        widgets["cache"].setText("Cache")
+        widgets["label_27"].setText("Limit")
         widgets["cache_input"].setMaximumWidth(86)
 
         row_one = self._row_layout(12)
@@ -21071,6 +21252,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         self.restore_persistent_ui_state()
         self.setup_persistent_settings_bindings()
+        QTimer.singleShot(0, self._connect_ui_scale_screen_tracking)
         self.show()
 
     # -----------------------------
@@ -21907,7 +22089,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             'roiState': {},
             'windowGeometry': '',
             'windowState': '',
+            'layoutStateVersion': 0,
+            'layoutScreenMetrics': {},
             'reviewSplitterSizes': [],
+            'autoScaleUi': True,
+            'uiScalePercent': 100,
             'fontSizeSlider': None,
             'shadeSlider': None,
             'keypointDotSize': None,
@@ -22248,6 +22434,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         try:
             self.settings["windowGeometry"] = self._qbytearray_to_setting(self.saveGeometry())
             self.settings["windowState"] = self._qbytearray_to_setting(self.saveState())
+            self.settings["layoutStateVersion"] = CURRENT_UI_LAYOUT_VERSION
+            self.settings["layoutScreenMetrics"] = self.current_layout_screen_metrics()
         except Exception:
             pass
 
@@ -22539,34 +22727,102 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         return state
 
+    def current_layout_screen_metrics(self):
+        try:
+            screen = self.screen()
+        except Exception:
+            screen = None
+        if screen is None:
+            screen = QtWidgets.QApplication.primaryScreen()
+        if screen is None:
+            return {}
+        available = screen.availableGeometry()
+        return {
+            "width": int(available.width()),
+            "height": int(available.height()),
+            "logicalDpi": round(float(screen.logicalDotsPerInch()), 2),
+            "devicePixelRatio": round(float(screen.devicePixelRatio()), 3),
+        }
+
+    def _saved_layout_matches_current_screen(self):
+        if int(self.settings.get("layoutStateVersion", 0) or 0) != CURRENT_UI_LAYOUT_VERSION:
+            return False
+        saved = self.settings.get("layoutScreenMetrics", {})
+        current = self.current_layout_screen_metrics()
+        if not isinstance(saved, dict) or not saved or not current:
+            return False
+        try:
+            width_ratio = float(current["width"]) / max(1.0, float(saved["width"]))
+            height_ratio = float(current["height"]) / max(1.0, float(saved["height"]))
+            dpi_ratio = float(current["logicalDpi"]) / max(1.0, float(saved["logicalDpi"]))
+        except (KeyError, TypeError, ValueError):
+            return False
+        return (
+            0.78 <= width_ratio <= 1.28
+            and 0.78 <= height_ratio <= 1.28
+            and 0.80 <= dpi_ratio <= 1.25
+        )
+
+    def _fit_window_to_available_screen(self, center=True):
+        try:
+            screen = self.screen()
+        except Exception:
+            screen = None
+        if screen is None:
+            screen = QtWidgets.QApplication.primaryScreen()
+        if screen is None:
+            return
+        available = screen.availableGeometry()
+        max_width = max(560, available.width() - 24)
+        max_height = max(360, available.height() - 24)
+        width = min(max_width, max(900, min(1440, int(available.width() * 0.92))))
+        height = min(max_height, max(600, min(900, int(available.height() * 0.90))))
+        if center or self.width() > max_width or self.height() > max_height:
+            self.resize(width, height)
+        if center:
+            self.move(
+                available.x() + max(0, (available.width() - self.width()) // 2),
+                available.y() + max(0, (available.height() - self.height()) // 2),
+            )
+
+    def _normalize_default_dock_sizes(self):
+        menu_dock = getattr(self, "menu_dock", None)
+        status_dock = getattr(self, "dockWidget_3", None)
+        try:
+            if isinstance(menu_dock, QtWidgets.QDockWidget):
+                workflow_width = max(340, min(540, int(self.width() * 0.38)))
+                self.resizeDocks([menu_dock], [workflow_width], Qt.Horizontal)
+            if isinstance(status_dock, QtWidgets.QDockWidget):
+                status_height = max(140, min(220, int(self.height() * 0.22)))
+                self.resizeDocks([status_dock], [status_height], Qt.Vertical)
+        except Exception as exc:
+            logger.debug(f"Could not normalize default dock sizes: {exc}")
+
     def restore_persistent_ui_state(self):
         if not hasattr(self, "settings"):
             return
 
         self._restoring_settings = True
         try:
-            screen = QtWidgets.QApplication.primaryScreen()
-            available = screen.availableGeometry() if screen is not None else None
+            layout_matches_screen = self._saved_layout_matches_current_screen()
             geometry = self._setting_to_qbytearray(self.settings.get("windowGeometry", ""))
             restored_geometry = False
-            if not geometry.isEmpty():
+            if layout_matches_screen and not geometry.isEmpty():
                 restored_geometry = bool(self.restoreGeometry(geometry))
             if not restored_geometry:
-                if available is not None:
-                    width = min(1280, max(760, available.width() - 120))
-                    height = min(820, max(520, available.height() - 120))
-                    self.resize(width, height)
-                else:
-                    self.resize(1280, 820)
+                self._fit_window_to_available_screen(center=True)
 
             state = self._setting_to_qbytearray(self.settings.get("windowState", ""))
-            if not state.isEmpty():
+            if layout_matches_screen and not state.isEmpty():
                 self.restoreState(state)
-            if available is not None:
-                max_width = max(560, available.width() - 40)
-                max_height = max(360, available.height() - 40)
-                if self.width() > max_width or self.height() > max_height:
-                    self.resize(min(self.width(), max_width), min(self.height(), max_height))
+            else:
+                self.restoreState(self.initial_state)
+                self.settings["windowGeometry"] = ""
+                self.settings["windowState"] = ""
+                self.settings["layoutStateVersion"] = CURRENT_UI_LAYOUT_VERSION
+                self.settings["layoutScreenMetrics"] = self.current_layout_screen_metrics()
+                QtCore.QTimer.singleShot(0, self._normalize_default_dock_sizes)
+            self._fit_window_to_available_screen(center=False)
 
             for widget_name, setting_key in (
                 ("font_size_slider", "fontSizeSlider"),
@@ -26925,10 +27181,19 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.sahiSettingsDialog.exec_()
 
     def resetLayout(self):
-        # Restore the initial layout state
-        self.restoreGeometry(self.initial_geometry)
+        # Restore the responsive default instead of replaying geometry captured
+        # on a different monitor or under a different Windows DPI setting.
         self.restoreState(self.initial_state)
+        self._fit_window_to_available_screen(center=True)
+        self._normalize_default_dock_sizes()
         self.apply_review_splitter_sizes()
+        if hasattr(self, "settings"):
+            self.settings["windowGeometry"] = ""
+            self.settings["windowState"] = ""
+            self.settings["layoutStateVersion"] = CURRENT_UI_LAYOUT_VERSION
+            self.settings["layoutScreenMetrics"] = self.current_layout_screen_metrics()
+            self.settings["reviewSplitterSizes"] = []
+            self.saveSettings()
 
     def setup_review_panel_layout(self):
         """Keep the review file list visible while the preview table grows."""
@@ -56329,6 +56594,18 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
 
 def run_pyqt_app():
+    # These attributes must be configured before QApplication is created.
+    # Qt then works in logical pixels and keeps icons sharp across monitors.
+    try:
+        QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+        QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+        if hasattr(Qt, "HighDpiScaleFactorRoundingPolicy"):
+            QApplication.setHighDpiScaleFactorRoundingPolicy(
+                Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+            )
+    except Exception as exc:
+        logger.debug(f"Could not configure Qt high-DPI attributes: {exc}")
+
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(True)
     app._app_shutdown_requested = False
