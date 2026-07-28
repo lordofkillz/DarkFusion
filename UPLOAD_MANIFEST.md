@@ -13,6 +13,7 @@ UltraDarkFusion v5.2 repository.
 - `LICENSE.txt`
 - `README.md`
 - `MODEL_SETUP.md`
+- `USER_GUIDE.md`
 - `UPLOAD_MANIFEST.md`
 - `requirements.txt`
 - `fusion_install.bat`
@@ -46,7 +47,6 @@ UltraDarkFusion v5.2 repository.
 - `UltraDarkFusion/styles/`
 - `UltraDarkFusion/sounds/`
 - `UltraDarkFusion/translations/`
-- `UltraDarkFusion/documents/`
 - `UltraDarkFusion/images/`
 - `UltraDarkFusion/Sam/README.md`
 - `UltraDarkFusion/Sam/FSRCNN_x4.pb`

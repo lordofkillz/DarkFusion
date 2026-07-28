@@ -28,6 +28,11 @@ locate and flash its exact annotation on the full image.
 The short walkthrough above also shows the annotation modes and integrated
 training and model export.
 
+New users should follow the
+[complete DarkFusion workflow guide](USER_GUIDE.md) for collecting images,
+video and YouTube frame extraction, manual and automatic labeling, Dataset
+Analysis, training, tuning, and validation review.
+
 ## Current capabilities
 
 - Bounding-box, polygon segmentation, pose/keypoint, and oriented-box labeling.
@@ -49,7 +54,8 @@ training and model export.
 - PyTorch `.pt`, ONNX `.onnx`, TensorRT `.engine`, and legacy Darknet model
   workflows.
 - SAHI/tiled inference, tracking, frame extraction, camera/desktop capture,
-  themes, translations, and voice-assisted class selection.
+  themes, 19 bundled offline interface languages, and voice-assisted class
+  selection.
 
 ## Supported system
 
@@ -128,8 +134,8 @@ export notes.
 
 The repository contains the application source, generated PyQt UI module,
 editable `.ui` file, training/validation worker scripts, styles, icons, sounds,
-translations, help documents, sight overlays, installer, dependency manifest,
-and verification tooling.
+translations, sight overlays, installer, dependency manifest, user guide, and
+verification tooling.
 
 The following stay local and are ignored:
 

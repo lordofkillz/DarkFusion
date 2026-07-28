@@ -78,6 +78,5 @@ SpeechRecognition==3.14.3
 python-dotenv==1.1.0
 requests==2.32.4
 yt-dlp==2026.3.17
-deep-translator==1.9.1
 shapely==2.1.1
 perlin-noise==1.14

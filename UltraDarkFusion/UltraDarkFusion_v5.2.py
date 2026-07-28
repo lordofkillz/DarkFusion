@@ -93,7 +93,6 @@ import math
 import speech_recognition as sr
 from shapely.geometry import box as shapely_box
 from shapely.geometry import Polygon
-from deep_translator import GoogleTranslator
 from ultralytics import SAM
 from collections import Counter
 from PyQt5.QtWidgets import QInputDialog
@@ -16854,31 +16853,6 @@ QProgressBar[severity="danger"]::chunk {
         event.ignore()
 
 
-class WorkerSignals(QObject):
-    finished = pyqtSignal()
-    progress = pyqtSignal(str, str)  # original text, translated text
-    error = pyqtSignal(str, Exception)
-
-
-class TranslateWorker(QRunnable):
-
-    def __init__(self, texts, target_language='es'):
-        super().__init__()
-        self.texts = texts
-        self.target_language = target_language
-        self.signals = WorkerSignals()
-
-    def run(self):
-        translator = GoogleTranslator(source='en', target=self.target_language)
-        for text in self.texts:
-            try:
-                translated = translator.translate(text)
-                self.signals.progress.emit(text, translated)
-            except Exception as e:
-                self.signals.error.emit(text, e)
-        self.signals.finished.emit()
-
-
 class UiLoader:
 
     def __init__(self, main_window):
@@ -20859,13 +20833,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.heatmap_Checkbox.stateChanged.connect(self.on_heatmap_toggle)
         self.setup_quick_toggle_buttons()
 
-        # --- Legacy help combo and thumbnail paging ---
+        # --- Thumbnail paging ---
         self.save_path = None
-        if hasattr(self, "display_help"):
-            self.populate_combo_box()
-            self.display_help.currentIndexChanged.connect(self.load_file)
-
-
         self.yolo_files = []
         self._thumbnail_timer = QTimer(self)
         self._thumbnail_timer.setSingleShot(True)
@@ -21614,26 +21583,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.metrics_thread_active = True
         self.metrics_thread = Thread(target=self.gather_metrics, daemon=True)
         self.metrics_thread.start()
-
-    def populate_combo_box(self):
-        if not hasattr(self, "display_help"):
-            return
-
-        documents_folder = 'documents'
-        if os.path.exists(documents_folder):
-            text_files = [f for f in os.listdir(documents_folder) if f.endswith('.txt') and f is not None]
-            if text_files:
-                self.display_help.addItems(text_files)
-            else:
-                logging.warning("No text files found in the directory.")
-        else:
-            logging.warning(f"Help documents folder not found: {documents_folder}")
-
-
-
-    def read_text_file(file_path):
-        with open(file_path, 'r') as file:
-            return file.read()
 
     # -----------------------------
     # SETTINGS AND PROJECT STATE
@@ -23461,87 +23410,25 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if hasattr(self, "settings"):
             self.settings["languageCode"] = lang_code or "en"
             self.saveSettings()
-        logger.debug(f"Translating UI to: {lang_code}")
+        logger.debug(f"Loading bundled UI language: {lang_code}")
 
         self.translation_cache = self.load_translations(lang_code)
-
-        texts_to_translate = []
-        self.widgets_to_translate = []
-
+        missing_keys = []
         for key, original_text in self.original_ui_texts.items():
-            if key in self.translation_cache:
-                translated_text = self.translation_cache[key]
-                self.update_widget_by_key(key, translated_text)
-            else:
-                texts_to_translate.append(original_text)
-                self.widgets_to_translate.append((key, original_text))
-
-        if texts_to_translate:
-            worker = TranslateWorker(texts_to_translate, target_language=lang_code)
-            worker.signals.progress.connect(self.cache_and_update_widget_text)
-            worker.signals.finished.connect(lambda: self.save_translations(lang_code, self.translation_cache))
-            worker.signals.error.connect(lambda text, e: logger.warning(f"Error translating '{text}': {e}"))
-            self.threadpool.start(worker)
-        else:
-            logger.debug("UI translations loaded entirely from cache.")
-
-    def cache_and_update_widget_text(self, original_text, translated_text):
-        for key, text in self.widgets_to_translate:
-            if text == original_text:
-                self.translation_cache[key] = translated_text
-                self.update_widget_by_key(key, translated_text)
-                break
-
-    def update_ui_from_cache(self):
-        for key, _original_text in self.widgets_to_translate:
             translated_text = self.translation_cache.get(key)
-            if translated_text:
-                self.update_widget_by_key(key, translated_text)
+            if not translated_text:
+                translated_text = original_text
+                missing_keys.append(key)
+            self.update_widget_by_key(key, translated_text)
 
-    def update_widget_text(self, original_text, translated_text):
-        for item in self.widgets_to_translate:
-            widget_type = item[0]
-
-            if widget_type == 'widget_text':
-                widget = item[1]
-                if widget.text() == original_text:
-                    widget.setText(translated_text)
-
-            elif widget_type == 'combobox_item':
-                combo, index = item[1], item[2]
-                if combo.itemText(index) == original_text:
-                    combo.setItemText(index, translated_text)
-
-            elif widget_type == 'toolbox_item':
-                toolbox, index = item[1], item[2]
-                if toolbox.itemText(index) == original_text:
-                    toolbox.setItemText(index, translated_text)
-
-            elif widget_type == 'table_header':
-                table_widget, col = item[1], item[2]
-                header_item = table_widget.horizontalHeaderItem(col)
-                if header_item and header_item.text() == original_text:
-                    header_item.setText(translated_text)
-
-            elif widget_type == 'tabwidget_tab':
-                tab_widget, index = item[1], item[2]
-                if tab_widget.tabText(index) == original_text:
-                    tab_widget.setTabText(index, translated_text)
-
-            elif widget_type == 'action':
-                action = item[1]
-                if action.text() == original_text:
-                    action.setText(translated_text)
-
-            elif widget_type == 'menu':
-                menu = item[1]
-                if menu.title() == original_text:
-                    menu.setTitle(translated_text)
-
-            elif widget_type == 'window_title':
-                window = item[1]
-                if window.windowTitle() == original_text:
-                    window.setWindowTitle(translated_text)
+        if missing_keys:
+            logger.warning(
+                "Bundled translation '%s' is missing %d entries; using English fallback.",
+                lang_code,
+                len(missing_keys),
+            )
+        else:
+            logger.debug("Bundled UI language loaded without network translation.")
 
     def update_widget_by_key(self, key, translated_text):
         if '_item_' in key:
@@ -23600,7 +23487,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
     def get_translation_filepath(self, lang_code):
         translation_dir = Path(__file__).resolve().parent / "translations"
-        translation_dir.mkdir(parents=True, exist_ok=True)
         return translation_dir / f"{lang_code}.json"
 
     def load_translations(self, lang_code):
@@ -23609,15 +23495,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         filepath = self.get_translation_filepath(lang_code)
         if filepath.exists():
-            with open(filepath, "r", encoding="utf-8") as file:
-                self.translations_memory_cache[lang_code] = json.load(file)
-            return self.translations_memory_cache[lang_code]
+            try:
+                with open(filepath, "r", encoding="utf-8") as file:
+                    self.translations_memory_cache[lang_code] = json.load(file)
+                return self.translations_memory_cache[lang_code]
+            except (OSError, json.JSONDecodeError) as exc:
+                logger.warning("Could not load bundled translation '%s': %s", lang_code, exc)
         return {}
-
-    def save_translations(self, lang_code, translations):
-        filepath = self.get_translation_filepath(lang_code)
-        with open(filepath, "w", encoding="utf-8") as file:
-            json.dump(translations, file, ensure_ascii=False, indent=4)
 
     def toggle_voice_mode(self, state):
         if state == Qt.Checked:

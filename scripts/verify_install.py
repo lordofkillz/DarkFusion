@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import sys
 from pathlib import Path
 
@@ -36,7 +37,6 @@ REQUIRED_IMPORTS = (
     "GPUtil",
     "PIL",
     "cv2",
-    "deep_translator",
     "diffusers",
     "dotenv",
     "groundingdino",
@@ -72,6 +72,27 @@ FEATURE_MODELS = {
     "Sam/sam3.pt": 3_000_000_000,
     "Sam/groundingdino_swint_ogc.pth": 600_000_000,
 }
+TRANSLATION_CODES = (
+    "ar",
+    "de",
+    "en",
+    "es",
+    "fr",
+    "hi",
+    "id",
+    "it",
+    "ja",
+    "ko",
+    "nl",
+    "pl",
+    "pt",
+    "ru",
+    "th",
+    "tr",
+    "uk",
+    "vi",
+    "zh-CN",
+)
 
 
 def main() -> int:
@@ -87,6 +108,32 @@ def main() -> int:
         except Exception as exc:  # report every missing/broken binary binding
             import_failures.append(f"{module_name}: {exc}")
 
+    translation_failures: list[str] = []
+    translation_dir = APP_ROOT / "translations"
+    try:
+        english = json.loads((translation_dir / "en.json").read_text(encoding="utf-8"))
+        expected_keys = set(english)
+    except (OSError, json.JSONDecodeError) as exc:
+        expected_keys = set()
+        translation_failures.append(f"en.json: {exc}")
+
+    for code in TRANSLATION_CODES:
+        path = translation_dir / f"{code}.json"
+        if not path.is_file():
+            translation_failures.append(f"{code}.json is missing")
+            continue
+        try:
+            catalog = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            translation_failures.append(f"{code}.json: {exc}")
+            continue
+        if expected_keys and set(catalog) != expected_keys:
+            missing_count = len(expected_keys - set(catalog))
+            extra_count = len(set(catalog) - expected_keys)
+            translation_failures.append(
+                f"{code}.json: {missing_count} missing and {extra_count} extra keys"
+            )
+
     if missing_files:
         print("ERROR: required repository files are missing:")
         for name in missing_files:
@@ -97,7 +144,12 @@ def main() -> int:
         for failure in import_failures:
             print(f"  - {failure}")
 
-    if missing_files or import_failures:
+    if translation_failures:
+        print("ERROR: bundled translation catalogs are incomplete:")
+        for failure in translation_failures:
+            print(f"  - {failure}")
+
+    if missing_files or import_failures or translation_failures:
         return 1
 
     print(f"Python: {sys.version.split()[0]}")
@@ -130,6 +182,7 @@ def main() -> int:
     else:
         print("SAM3 and GroundingDINO model files verified.")
 
+    print(f"Bundled translations verified: {len(TRANSLATION_CODES)} languages.")
     print("UltraDarkFusion launch requirements verified.")
     return 0
 
