@@ -1031,6 +1031,67 @@ def connect_weak_bound_signal(signal, callback):
     return wrapper
 
 
+class DockHelpButtonController(QObject):
+    """Place a working context-help button beside a dock's native controls."""
+
+    def __init__(self, dock, callback, parent=None):
+        super().__init__(parent or dock)
+        self.dock = dock
+        self.button = QtWidgets.QToolButton(dock)
+        self.button.setText("?")
+        self.button.setObjectName(f"{dock.objectName()}_help_button")
+        self.button.setToolTip(f"About the {dock.windowTitle()} dock")
+        self.button.setAccessibleName(f"Help for {dock.windowTitle()} dock")
+        self.button.setAutoRaise(True)
+        self.button.setCursor(Qt.PointingHandCursor)
+        self.button.setFixedSize(20, 20)
+        self.button.setStyleSheet(
+            "QToolButton {"
+            "font-weight: 700;"
+            "border: 1px solid rgba(128, 144, 160, 120);"
+            "border-radius: 4px;"
+            "padding: 0;"
+            "}"
+            "QToolButton:hover {"
+            "border-color: #38bdf8;"
+            "background-color: rgba(56, 189, 248, 45);"
+            "}"
+        )
+        self.button.clicked.connect(callback)
+        dock.installEventFilter(self)
+        dock.topLevelChanged.connect(self._on_top_level_changed)
+        dock.windowTitleChanged.connect(self._on_title_changed)
+        self.reposition()
+
+    def _on_title_changed(self, title):
+        self.button.setToolTip(f"About the {title} dock")
+        self.button.setAccessibleName(f"Help for {title} dock")
+
+    def _on_top_level_changed(self, floating):
+        self.button.setVisible(not bool(floating))
+        if not floating:
+            QtCore.QTimer.singleShot(0, self.reposition)
+
+    def reposition(self):
+        if self.dock.isFloating():
+            self.button.hide()
+            return
+        # Leave room for Qt's native float and close buttons.
+        self.button.move(max(4, self.dock.width() - 70), 2)
+        self.button.raise_()
+        self.button.show()
+
+    def eventFilter(self, watched, event):
+        if watched is self.dock and event.type() in (
+            QEvent.Resize,
+            QEvent.Show,
+            QEvent.LayoutRequest,
+            QEvent.StyleChange,
+        ):
+            QtCore.QTimer.singleShot(0, self.reposition)
+        return False
+
+
 @contextlib.contextmanager
 def blocked_signals(widget):
     """Temporarily block Qt signals and restore the previous state."""
@@ -17270,6 +17331,76 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self._compact_advanced_panels()
         self.setStyleSheet(self._style_with_global_line_spacing(self.styleSheet()))
 
+    def setup_dock_context_help(self):
+        self._dock_help_controllers = []
+        self.register_dock_context_help(
+            getattr(self, "dockWidget_3", None),
+            "Status dock",
+            (
+                "Shows current operation progress and the controls used while reviewing "
+                "images: annotation mode, active class, navigation, theme, language, "
+                "Auto Scan, and CUDA activity."
+            ),
+            "2-understand-the-workflow",
+        )
+        self.register_dock_context_help(
+            getattr(self, "menu_dock", None),
+            "Workflow dock",
+            (
+                "Contains the main workflow tabs for collecting data, labeling, review, "
+                "dataset preparation, training/export, and advanced tools. Resize or float "
+                "this dock when a panel needs more horizontal space."
+            ),
+            "2-understand-the-workflow",
+        )
+
+    def register_dock_context_help(self, dock, help_title, summary, guide_section):
+        if not isinstance(dock, QtWidgets.QDockWidget):
+            return
+        if bool(dock.property("darkfusionContextHelpRegistered")):
+            return
+
+        dock.setProperty("darkfusionContextHelpRegistered", True)
+        controller = DockHelpButtonController(
+            dock,
+            lambda _checked=False, t=help_title, s=summary, g=guide_section:
+                self.show_dock_context_help(t, s, g),
+            self,
+        )
+        self._dock_help_controllers.append(controller)
+
+        view_menu = getattr(self, "menufunctions", None)
+        if isinstance(view_menu, QtWidgets.QMenu):
+            toggle_action = dock.toggleViewAction()
+            toggle_action.setText(f"Show {dock.windowTitle()} Dock")
+            if toggle_action not in view_menu.actions():
+                view_menu.addAction(toggle_action)
+
+    def show_dock_context_help(self, title, summary, guide_section=""):
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Information)
+        dialog.setWindowTitle(title)
+        dialog.setText(summary)
+        dialog.setInformativeText(
+            "Use the ? button for this explanation. The neighboring dock buttons "
+            "float/restore the panel and close it. A closed dock can be restored from View."
+        )
+        guide_button = dialog.addButton("Open User Guide", QMessageBox.ActionRole)
+        dialog.addButton(QMessageBox.Close)
+        dialog.exec_()
+        if dialog.clickedButton() is guide_button:
+            self.open_user_guide(guide_section)
+
+    def open_user_guide(self, guide_section=""):
+        guide_path = Path(APP_DIR).parent / "USER_GUIDE.md"
+        if guide_path.exists():
+            QtGui.QDesktopServices.openUrl(QUrl.fromLocalFile(str(guide_path)))
+            return
+        section = f"#{guide_section}" if guide_section else ""
+        QtGui.QDesktopServices.openUrl(
+            QUrl(f"https://github.com/lordofkillz/DarkFusion/blob/main/USER_GUIDE.md{section}")
+        )
+
     def _polish_laptop_layouts(self):
         """Relax Designer-era fixed sizing so docks can breathe on smaller screens."""
         self.setMinimumSize(560, 360)
@@ -20405,6 +20536,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.ensure_enhance_image_checkbox()
         self.setup_control_copy()
         self._polish_loaded_ui()
+        self.setup_dock_context_help()
         QtWidgets.QApplication.setStyle('Fusion')
         global start_time
         start_time = datetime.now()
@@ -51103,6 +51235,16 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         dock.setWidget(panel)
         self.addDockWidget(Qt.RightDockWidgetArea, dock)
         self.validation_review_dock = dock
+        self.register_dock_context_help(
+            dock,
+            "Validation Review dock",
+            (
+                "Explains the currently selected validation problem and lets you compare "
+                "ground truth with predictions, navigate issues, edit or keep labels, "
+                "quarantine images, and return to the dataset."
+            ),
+            "11-review-the-trained-model",
+        )
         dock.hide()
 
         previous_button.clicked.connect(lambda: self.navigate_validation_review_issue(-1))

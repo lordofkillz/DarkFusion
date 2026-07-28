@@ -44,6 +44,18 @@ A productive DarkFusion session normally follows this order:
 8. Review validation failures and test the resulting model on unseen video.
 9. Add or correct data for the failure cases, then train again.
 
+### Dock controls and help
+
+The **Status** dock contains progress, annotation mode, class selection, and
+review navigation. The **Workflow** dock contains the Collect, Label, Review,
+Prepare / Split, Train / Export, and Advanced tabs. Validation Review adds its
+own dock while reviewing model failures.
+
+Each dock has a real **?** button that explains the panel and can open this
+guide. The neighboring dock button floats or restores the panel; it is not a
+help button. The **X** hides the dock. Restore a hidden dock from the **View**
+menu. Use **Tools > Reset Layout** if dock sizing becomes unusable.
+
 Keep a backup before running any operation that overwrites, deletes, or
 automatically repairs labels.
 
