@@ -6,11 +6,21 @@ UltraDarkFusion is a Windows desktop application for building YOLO datasets,
 labeling images and video, training models, reviewing validation failures, and
 running inference through PyTorch, ONNX, or TensorRT.
 
+## Short walkthrough
+
+The walkthrough uses COCO images inside the current UltraDarkFusion 5.2
+interface and demonstrates boxes, polygon segmentation, OBB, pose/keypoints,
+and dataset review.
+
+[Watch or download the 20-second MP4](samples/darkfusion_walkthrough.mp4)
+
 ## Annotation support
 
-| Bounding boxes | Segmentation | Pose | OBB |
+| Bounding boxes | Segmentation | Pose / keypoints | OBB |
 | --- | --- | --- | --- |
 | ![Boxes](samples/boxes.png) | ![Segmentation](samples/Segmentation.png) | ![Pose](samples/pose.png) | ![OBB](samples/OBB.png) |
+
+![Dataset review](samples/Review.png)
 
 ## Current capabilities
 
