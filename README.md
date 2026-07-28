@@ -16,23 +16,17 @@ in the same workspace.
 
 [Watch or download the 20-second MP4](samples/darkfusion_walkthrough.mp4)
 
-## Annotation support
+## DarkFusion at a glance
 
-| Bounding boxes | Segmentation | Pose / keypoints | OBB |
-| --- | --- | --- | --- |
-| ![Boxes](samples/boxes.png) | ![Segmentation](samples/Segmentation.png) | ![Pose](samples/pose.png) | ![OBB](samples/OBB.png) |
+DarkFusion keeps the full image, individual annotation previews, dataset
+navigation, and editing tools together in one workspace. It supports bounding
+boxes, polygon segmentation, pose/keypoints, and OBB. Left-click a preview to
+locate and flash its exact annotation on the full image.
 
-### Visual annotation review
+![DarkFusion visual annotation workflow](samples/Review.png)
 
-Browse every image and its individual label crops together. Clicking a crop
-synchronizes the source image and flashes the matching box, polygon, or OBB so
-mistakes can be found without hunting through the frame.
-
-![Visual annotation review](samples/Review.png)
-
-### Train and export
-
-![Integrated training and model export](samples/TrainExport.png)
+The short walkthrough above also shows the annotation modes and integrated
+training and model export.
 
 ## Current capabilities
 
@@ -133,19 +127,6 @@ The following stay local and are ignored:
 
 For large public checkpoints, use a GitHub Release or a dedicated model host
 instead of committing them to normal Git history.
-
-## Updating the generated UI
-
-After editing `UltraDarkFusion\UltraDarkFusion_v5.2.ui`, regenerate the Python
-module from the activated `fusion` environment:
-
-```powershell
-cd UltraDarkFusion
-.\generate_ui_py.ps1
-```
-
-Commit both `UltraDarkFusion_v5.2.ui` and
-`ui_ultradarkfusion_v5_2.py` together.
 
 ## Community and acknowledgments
 
