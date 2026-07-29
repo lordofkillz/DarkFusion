@@ -9,12 +9,11 @@ running inference through PyTorch, ONNX, or TensorRT.
 ## Short walkthrough
 
 The walkthrough uses COCO images inside the current UltraDarkFusion 5.2
-interface. It demonstrates boxes, polygon segmentation, OBB, pose/keypoints,
-and the visual review workflow: left-click any cropped preview to locate and
-flash its exact annotation on the full image. Training and model export remain
-in the same workspace.
+interface. It demonstrates accurately fitted boxes, polygon segmentation, OBB,
+pose/keypoints, the visual review workflow, AI-assisted dataset tools, and the
+integrated Trainer's live metrics, health charts, and validation review.
 
-[Watch or download the 20-second MP4](samples/darkfusion_walkthrough.mp4)
+[Watch or download the 25-second MP4](samples/darkfusion_walkthrough.mp4)
 
 ## DarkFusion at a glance
 
@@ -25,8 +24,8 @@ locate and flash its exact annotation on the full image.
 
 ![DarkFusion visual annotation workflow](samples/Review.png)
 
-The short walkthrough above also shows the annotation modes and integrated
-training and model export.
+The short walkthrough above also shows the annotation modes and the integrated
+Trainer used to evaluate, train, tune, validate, and export models.
 
 New users should follow the
 [complete DarkFusion workflow guide](USER_GUIDE.md) for collecting images,
@@ -40,11 +39,15 @@ Analysis, training, tuning, and validation review.
   dataset workflows.
 - SAM3-assisted snapping, segmentation conversion, object effects, and
   augmentation with cancellation controls.
+- Stable Diffusion inpainting that removes labeled objects to create
+  hard-negative images with empty labels.
 - GroundingDINO and YOLO-based automatic labeling.
-- Ultralytics training, validation, hyperparameter tuning, and detached
-  background runs that remain active when the UI closes.
-- Live training charts, artifact viewer, safe stop-after-epoch/stop-now
-  controls, run-folder access, and checkpoint access.
+- Integrated Ultralytics Trainer with dataset evaluation and health checks,
+  image-size recommendations, batch calibration, hyperparameter/Ray tuning,
+  knowledge distillation, validation, and detached background runs.
+- Live metrics and health/loss charts, artifact viewer, safe
+  stop-after-epoch/stop-now controls, resume support, run-folder access, and
+  checkpoint access.
 - Validation Review for false positives, missed ground truth, wrong classes,
   weak localization, duplicates, and poor keypoints across detect, segment,
   pose, OBB, and classify tasks.

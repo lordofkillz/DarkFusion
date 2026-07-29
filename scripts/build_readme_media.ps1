@@ -11,26 +11,32 @@ $video = Join-Path $samples "darkfusion_walkthrough.mp4"
 $gif = Join-Path $samples "darkfusion2.gif"
 
 $filter = @"
-color=c=0x090c10:s=1280x912:d=2.5,setsar=1,fps=24[v0base];
-[v0base]drawtext=fontfile='$boldFont':text='LABEL FASTER. TRAIN CLEANER.':fontcolor=white:fontsize=58:x=(w-text_w)/2:y=345,drawtext=fontfile='$font':text='DarkFusion 5.2  |  One YOLO workflow':fontcolor=0x56e0c2:fontsize=31:x=(w-text_w)/2:y=440,fade=t=in:st=0:d=0.3,fade=t=out:st=2.2:d=0.3[v0];
-[0:v]scale=1280:912,setsar=1,fps=24,drawbox=x=0:y=820:w=iw:h=92:color=black@0.74:t=fill,drawtext=fontfile='$boldFont':text='BOUNDING BOXES':fontcolor=white:fontsize=38:x=42:y=842,fade=t=in:st=0:d=0.18,fade=t=out:st=1.17:d=0.18[v1];
-[1:v]scale=1280:912,setsar=1,fps=24,drawbox=x=0:y=820:w=iw:h=92:color=black@0.74:t=fill,drawtext=fontfile='$boldFont':text='POLYGON SEGMENTATION':fontcolor=white:fontsize=38:x=42:y=842,fade=t=in:st=0:d=0.18,fade=t=out:st=1.17:d=0.18[v2];
-[2:v]scale=1280:912,setsar=1,fps=24,drawbox=x=0:y=820:w=iw:h=92:color=black@0.74:t=fill,drawtext=fontfile='$boldFont':text='ORIENTED BOXES':fontcolor=white:fontsize=38:x=42:y=842,fade=t=in:st=0:d=0.18,fade=t=out:st=1.17:d=0.18[v3];
-[3:v]scale=1280:912,setsar=1,fps=24,drawbox=x=0:y=820:w=iw:h=92:color=black@0.74:t=fill,drawtext=fontfile='$boldFont':text='POSE + KEYPOINTS':fontcolor=white:fontsize=38:x=42:y=842,fade=t=in:st=0:d=0.18,fade=t=out:st=1.17:d=0.18[v4];
-[4:v]scale=1280:912,setsar=1,fps=24,drawbox=x=0:y=820:w=iw:h=92:color=black@0.76:t=fill,drawtext=fontfile='$boldFont':text='LEFT-CLICK A PREVIEW  >  FLASH THE EXACT ANNOTATION':fontcolor=white:fontsize=30:x=(w-text_w)/2:y=846,drawbox=x=858:y=355:w=106:h=107:color=white@0.95:t=4:enable='between(t,0.65,1.15)',drawbox=x=858:y=455:w=106:h=107:color=white@0.95:t=4:enable='between(t,2.35,2.85)',drawbox=x=858:y=555:w=106:h=107:color=white@0.95:t=4:enable='between(t,4.05,4.55)',fade=t=in:st=0:d=0.25,fade=t=out:st=5.75:d=0.25[v5];
-[5:v]scale=1280:912,setsar=1,fps=24,drawbox=x=0:y=820:w=iw:h=92:color=black@0.74:t=fill,drawtext=fontfile='$boldFont':text='TRAIN  |  TUNE  |  EXPORT':fontcolor=white:fontsize=36:x=42:y=839,drawtext=fontfile='$font':text='PyTorch  |  ONNX  |  TensorRT':fontcolor=0x56e0c2:fontsize=24:x=740:y=850,fade=t=in:st=0:d=0.25,fade=t=out:st=2.75:d=0.25[v6];
-color=c=0x090c10:s=1280x912:d=2.5,setsar=1,fps=24[v7base];
-[v7base]drawtext=fontfile='$boldFont':text='FROM RAW FRAMES TO CLEAN WEIGHTS':fontcolor=white:fontsize=50:x=(w-text_w)/2:y=360,drawtext=fontfile='$font':text='DarkFusion 5.2':fontcolor=0x56e0c2:fontsize=34:x=(w-text_w)/2:y=450,fade=t=in:st=0:d=0.3,fade=t=out:st=2.2:d=0.3[v7];
-[v0][v1][v2][v3][v4][v5][v6][v7]concat=n=8:v=1:a=0,format=yuv420p[outv]
+color=c=0x090c10:s=1280x912:d=2.3,setsar=1,fps=24[v0base];
+[v0base]drawtext=fontfile='$boldFont':text='LABEL FASTER. TRAIN CLEANER.':fontcolor=white:fontsize=58:x=(w-text_w)/2:y=345,drawtext=fontfile='$font':text='DarkFusion 5.2  |  One YOLO workflow':fontcolor=0x56e0c2:fontsize=31:x=(w-text_w)/2:y=440,fade=t=in:st=0:d=0.3,fade=t=out:st=2:d=0.3[v0];
+[0:v]scale=1280:912,setsar=1,fps=24,drawbox=x=0:y=820:w=iw:h=92:color=black@0.74:t=fill,drawtext=fontfile='$boldFont':text='ACCURATE BOUNDING BOXES':fontcolor=white:fontsize=38:x=42:y=842,fade=t=in:st=0:d=0.18,fade=t=out:st=1.57:d=0.18[v1];
+[1:v]scale=1280:912,setsar=1,fps=24,drawbox=x=0:y=820:w=iw:h=92:color=black@0.74:t=fill,drawtext=fontfile='$boldFont':text='POLYGON SEGMENTATION':fontcolor=white:fontsize=38:x=42:y=842,fade=t=in:st=0:d=0.18,fade=t=out:st=1.07:d=0.18[v2];
+[2:v]scale=1280:912,setsar=1,fps=24,drawbox=x=0:y=820:w=iw:h=92:color=black@0.74:t=fill,drawtext=fontfile='$boldFont':text='ORIENTED BOXES':fontcolor=white:fontsize=38:x=42:y=842,fade=t=in:st=0:d=0.18,fade=t=out:st=1.07:d=0.18[v3];
+[3:v]scale=1280:912,setsar=1,fps=24,drawbox=x=0:y=820:w=iw:h=92:color=black@0.74:t=fill,drawtext=fontfile='$boldFont':text='POSE + KEYPOINTS':fontcolor=white:fontsize=38:x=42:y=842,fade=t=in:st=0:d=0.18,fade=t=out:st=1.07:d=0.18[v4];
+[4:v]scale=1280:912,setsar=1,fps=24,drawbox=x=0:y=820:w=iw:h=92:color=black@0.76:t=fill,drawtext=fontfile='$boldFont':text='PREVIEW  >  LOCATE THE EXACT ANNOTATION':fontcolor=white:fontsize=31:x=(w-text_w)/2:y=846,drawbox=x=858:y=355:w=106:h=107:color=white@0.95:t=4:enable='between(t,0.65,1.15)',drawbox=x=858:y=455:w=106:h=107:color=white@0.95:t=4:enable='between(t,2.35,2.85)',drawbox=x=858:y=555:w=106:h=107:color=white@0.95:t=4:enable='between(t,4.05,4.55)',fade=t=in:st=0:d=0.25,fade=t=out:st=5.75:d=0.25[v5];
+color=c=0x090c10:s=1280x912:d=1.8,setsar=1,fps=24[v6base];
+[v6base]drawtext=fontfile='$boldFont':text='AI DATASET TOOLS':fontcolor=white:fontsize=55:x=(w-text_w)/2:y=330,drawtext=fontfile='$font':text='SAM3 assist  |  auto-label  |  Stable Diffusion negatives':fontcolor=0x56e0c2:fontsize=30:x=(w-text_w)/2:y=430,fade=t=in:st=0:d=0.25,fade=t=out:st=1.55:d=0.25[v6];
+[5:v]scale=1280:-2,crop=1280:912,setsar=1,fps=24,drawbox=x=0:y=820:w=iw:h=92:color=black@0.78:t=fill,drawtext=fontfile='$boldFont':text='TRAINER  |  LIVE METRICS':fontcolor=white:fontsize=36:x=42:y=842,fade=t=in:st=0:d=0.22,fade=t=out:st=1.98:d=0.22[v7];
+[6:v]scale=1280:-2,crop=1280:912,setsar=1,fps=24,drawbox=x=0:y=820:w=iw:h=92:color=black@0.78:t=fill,drawtext=fontfile='$boldFont':text='TRAINER  |  HEALTH + LOSS CURVES':fontcolor=white:fontsize=36:x=42:y=842,fade=t=in:st=0:d=0.22,fade=t=out:st=1.98:d=0.22[v8];
+[7:v]scale=1280:-2,crop=1280:912,setsar=1,fps=24,drawbox=x=0:y=820:w=iw:h=92:color=black@0.78:t=fill,drawtext=fontfile='$boldFont':text='TRAINER  |  VALIDATION REVIEW':fontcolor=white:fontsize=36:x=42:y=842,fade=t=in:st=0:d=0.22,fade=t=out:st=1.98:d=0.22[v9];
+color=c=0x090c10:s=1280x912:d=2.3,setsar=1,fps=24[v10base];
+[v10base]drawtext=fontfile='$boldFont':text='FROM RAW FRAMES TO CLEAN WEIGHTS':fontcolor=white:fontsize=50:x=(w-text_w)/2:y=350,drawtext=fontfile='$font':text='Label  |  Train  |  Tune  |  Validate  |  Export':fontcolor=0x56e0c2:fontsize=30:x=(w-text_w)/2:y=440,fade=t=in:st=0:d=0.3,fade=t=out:st=2:d=0.3[v10];
+[v0][v1][v2][v3][v4][v5][v6][v7][v8][v9][v10]concat=n=11:v=1:a=0,format=yuv420p[outv]
 "@
 
 & $Ffmpeg -y `
-    -loop 1 -t 1.35 -i (Join-Path $samples "boxes.png") `
-    -loop 1 -t 1.35 -i (Join-Path $samples "Segmentation.png") `
-    -loop 1 -t 1.35 -i (Join-Path $samples "OBB.png") `
-    -loop 1 -t 1.35 -i (Join-Path $samples "pose.png") `
+    -loop 1 -t 1.75 -i (Join-Path $samples "Boxes2129.png") `
+    -loop 1 -t 1.25 -i (Join-Path $samples "Segmentation.png") `
+    -loop 1 -t 1.25 -i (Join-Path $samples "OBB.png") `
+    -loop 1 -t 1.25 -i (Join-Path $samples "pose.png") `
     -i (Join-Path $samples "review_preview_interaction.mp4") `
-    -loop 1 -t 3 -i (Join-Path $samples "TrainExport.png") `
+    -loop 1 -t 2.2 -i (Join-Path $samples "TrainerLiveMetrics.png") `
+    -loop 1 -t 2.2 -i (Join-Path $samples "TrainerCharts.png") `
+    -loop 1 -t 2.2 -i (Join-Path $samples "TrainerValidation.png") `
     -filter_complex $filter -map "[outv]" -r 24 -c:v libx264 -preset medium -crf 22 `
     -movflags +faststart $video
 if ($LASTEXITCODE -ne 0) {
