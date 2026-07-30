@@ -18691,6 +18691,49 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self._compact_train_params_panel()
         self._compact_darknet_options_panel()
         self._compact_darknet_train_panel()
+        self._setup_ultralytics_tab_launcher()
+
+    def _setup_ultralytics_tab_launcher(self):
+        """Replace the legacy embedded Ultralytics controls with one trainer entry point."""
+        if getattr(self, "_ultralytics_tab_launcher_ready", False):
+            return
+
+        tab = getattr(self, "tab_17", None)
+        layout = getattr(self, "gridLayout_5", None)
+        if not isinstance(tab, QtWidgets.QWidget) or not isinstance(layout, QtWidgets.QGridLayout):
+            return
+
+        # Keep the legacy widgets alive as compatibility state holders for saved
+        # settings and older backend methods, but remove them from the visible
+        # workflow. The unified Training dialog now owns all visible controls.
+        for name in ("groupBox_10", "groupBox_8", "groupBox_9"):
+            widget = getattr(self, name, None)
+            if isinstance(widget, QtWidgets.QWidget):
+                widget.hide()
+
+        launcher = QtWidgets.QGroupBox("Ultralytics Trainer / Exporter", tab)
+        launcher.setObjectName("ultralytics_trainer_launcher")
+        launcher_layout = QtWidgets.QVBoxLayout(launcher)
+        launcher_layout.setContentsMargins(14, 18, 14, 14)
+        launcher_layout.setSpacing(10)
+
+        description = QtWidgets.QLabel(
+            "Training, validation review, metrics, checkpoints, and model export now live "
+            "in one Ultralytics workflow window."
+        )
+        description.setWordWrap(True)
+        launcher_layout.addWidget(description)
+
+        open_button = QtWidgets.QPushButton("Open Ultralytics Trainer / Exporter")
+        open_button.setObjectName("ultralytics_trainer_launcher_button")
+        open_button.setToolTip("Open the unified Ultralytics training, validation, and export workflow.")
+        launcher_layout.addWidget(open_button)
+
+        layout.addWidget(launcher, 0, 0, 1, 1)
+        layout.setRowStretch(1, 1)
+        self.ultralytics_trainer_launcher = launcher
+        self.ultralytics_trainer_launcher_button = open_button
+        self._ultralytics_tab_launcher_ready = True
 
     def _compact_ultralytics_train_panel(self):
         if getattr(self, "_ultralytics_train_panel_compacted", False):
@@ -20955,6 +20998,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.ultralytics.clicked.connect(self.ultralytics_train_clicked)
         if isinstance(getattr(self, "training_evaluator_button", None), QtWidgets.QPushButton):
             self.training_evaluator_button.clicked.connect(self.open_training_evaluator_dialog)
+        if isinstance(getattr(self, "ultralytics_trainer_launcher_button", None), QtWidgets.QPushButton):
+            self.ultralytics_trainer_launcher_button.clicked.connect(self.open_training_evaluator_dialog)
         self.model_config_path = None
         self.pretrained_model_path = None
         self.pt_path = None
@@ -21400,6 +21445,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         labeling_tabs = getattr(self, "tabWidget_3", None)
         video_tabs = getattr(self, "tabWidget_4", None)
         dataset_tabs = getattr(self, "tabWidget_6", None)
+        training_tabs = getattr(self, "tabWidget_5", None)
 
         self.rename_tab(main_tabs, "Video", "Collect")
         self.rename_tab(main_tabs, "Video Tools", "Collect")
@@ -21437,6 +21483,17 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             video_tabs.setCurrentIndex(0)
         self.rename_tab(dataset_tabs, "Prepare Dataset", "Prepare")
         self.rename_tab(dataset_tabs, "Augmentation", "Augment / Convert")
+        if training_tabs is not None and not getattr(self, "_ultralytics_tab_click_connected", False):
+            training_tabs.tabBarClicked.connect(self.on_training_workflow_tab_clicked)
+            self._ultralytics_tab_click_connected = True
+
+    def on_training_workflow_tab_clicked(self, index):
+        training_tabs = getattr(self, "tabWidget_5", None)
+        ultralytics_tab = getattr(self, "tab_17", None)
+        if training_tabs is None or ultralytics_tab is None:
+            return
+        if training_tabs.widget(int(index)) is ultralytics_tab:
+            self.open_training_evaluator_dialog()
 
     def on_main_workflow_tab_changed(self, index):
         main_tabs = getattr(self, "tabWidget", None)
@@ -22320,6 +22377,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             'trainingEvaluatorValidationPercent': '20%',
             'trainingEvaluatorValidationSourcePercent': '100%',
             'trainingEvaluatorLastRunDir': '',
+            'trainingEvaluatorLastTrainingRunDir': '',
             'trainingEvaluatorLastRunLog': '',
             'trainingEvaluatorLastRunTitle': '',
             'exportFormat': '',
@@ -26333,22 +26391,27 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         model_path = str(model_path or getattr(self, "weights_file_path", "") or "")
 
         model = getattr(self, "model", None)
-        candidates = [
-            getattr(model, "task", None),
-            getattr(getattr(model, "model", None), "task", None),
-            self._task_from_mapping(getattr(model, "overrides", None)),
-            self._task_from_mapping(getattr(getattr(model, "model", None), "args", None)),
-            self._task_from_mapping(getattr(getattr(model, "model", None), "yaml", None)),
-            self._task_from_mapping(getattr(model, "ckpt", None)),
-        ]
-
         lower_path = model_path.lower()
+        candidates = []
+        # Exported backends need their embedded task checked before model.task.
+        # Ultralytics must choose the predictor while YOLO(...) is constructed,
+        # and a generically named engine such as "last.engine" can otherwise be
+        # guessed as detection even though its metadata says segmentation.
         if lower_path.endswith(".engine"):
             candidates.append(self._task_from_mapping(self.read_engine_metadata(model_path)))
 
         sidecar_path = model_path + ".json" if model_path else ""
         if sidecar_path and os.path.exists(sidecar_path):
             candidates.append(self._task_from_mapping(read_json_file(sidecar_path, {})))
+
+        candidates.extend([
+            getattr(model, "task", None),
+            getattr(getattr(model, "model", None), "task", None),
+            self._task_from_mapping(getattr(model, "overrides", None)),
+            self._task_from_mapping(getattr(getattr(model, "model", None), "args", None)),
+            self._task_from_mapping(getattr(getattr(model, "model", None), "yaml", None)),
+            self._task_from_mapping(getattr(model, "ckpt", None)),
+        ])
 
         for candidate in candidates:
             mode = self.annotation_mode_for_model_task(candidate)
@@ -26367,6 +26430,50 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             return "detect", "Boxes"
 
         return None, None
+
+    def exported_model_task_hint(self, model_path):
+        """Return a task that must be supplied while constructing an exported model."""
+        model_path = self.normalize_path(model_path)
+        if not model_path:
+            return None
+
+        task = None
+        lower_path = model_path.lower()
+        if lower_path.endswith(".engine"):
+            task = self._task_from_mapping(self.read_engine_metadata(model_path))
+
+        sidecar_path = model_path + ".json"
+        if not task and os.path.exists(sidecar_path):
+            task = self._task_from_mapping(read_json_file(sidecar_path, {}))
+
+        if not task:
+            name = os.path.basename(lower_path)
+            if re.search(r"(^|[-_.])seg(ment)?($|[-_.])", name):
+                task = "segment"
+            elif re.search(r"(^|[-_.])pose($|[-_.])", name):
+                task = "pose"
+            elif re.search(r"(^|[-_.])obb($|[-_.])", name):
+                task = "obb"
+
+        task = str(task or "").strip().lower()
+        aliases = {
+            "seg": "segment",
+            "segmentation": "segment",
+            "detection": "detect",
+            "keypoint": "pose",
+            "keypoints": "pose",
+        }
+        task = aliases.get(task, task)
+        return task if task in {"detect", "segment", "classify", "pose", "obb", "semantic"} else None
+
+    def create_ultralytics_model(self, model_path):
+        """Construct YOLO with an explicit exported-model task when metadata provides one."""
+        model_path = self.normalize_path(model_path)
+        task = self.exported_model_task_hint(model_path)
+        if task:
+            logger.info("Loading Ultralytics model as task=%s from %s", task, model_path)
+            return YOLO(model_path, task=task)
+        return YOLO(model_path)
 
     def auto_set_annotation_mode_for_model(self, model_path=None, force=False):
         _task, mode = self.detect_loaded_model_task(model_path)
@@ -31628,10 +31735,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             return getattr(self, "model", None) is not None
 
         loaded_model_path = getattr(self, "loaded_model_path", None)
+        expected_task = self.exported_model_task_hint(weights_path)
+        loaded_task = str(getattr(getattr(self, "model", None), "task", "") or "").strip().lower()
         if (
             getattr(self, "model", None) is not None
             and loaded_model_path
             and os.path.abspath(str(loaded_model_path)) == os.path.abspath(str(weights_path))
+            and (not expected_task or loaded_task == expected_task)
         ):
             self.sync_pose_list_from_current_model(
                 model_path=weights_path,
@@ -31646,7 +31756,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         try:
             logger.info(f"Loading live inference model: {weights_path}")
-            self.model = YOLO(weights_path)
+            self.model = self.create_ultralytics_model(weights_path)
             self.loaded_model_path = weights_path
             self.weights_file_path = weights_path
             self.model_directory = os.path.dirname(weights_path)
@@ -37097,7 +37207,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 return
 
             try:
-                self.model = YOLO(file_name)
+                self.model = self.create_ultralytics_model(file_name)
                 self.loaded_model_path = self.normalize_path(file_name)
                 if not model_size_applied:
                     model_size_applied = self.apply_loaded_weight_input_size(file_name)
@@ -47748,6 +47858,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             "path": self.normalize_path(weights_path) if weights_path else "",
             "name": os.path.basename(weights_path) if weights_path else "No weights loaded",
             "task": "",
+            "class_count": 0,
             "strides": [8, 16, 32],
             "loaded": False,
             "error": "",
@@ -47778,6 +47889,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             model = YOLO(weights_path)
             info["loaded"] = True
             info["task"] = str(getattr(model, "task", "") or "")
+            model_names = getattr(model, "names", None)
+            if isinstance(model_names, (dict, list, tuple)):
+                info["class_count"] = len(model_names)
 
             raw_stride = getattr(getattr(model, "model", None), "stride", None)
             if raw_stride is not None:
@@ -48624,8 +48738,17 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         validation_source="",
         validation_percent=None,
         validation_source_percent=None,
+        progress_callback=None,
     ):
+        def report_progress(message):
+            if callable(progress_callback):
+                try:
+                    progress_callback(str(message))
+                except Exception:
+                    pass
+
         self._training_eval_last_validation_prep = {}
+        report_progress("Preparing dataset YAML and validation split...")
         data_yaml_path = self.normalize_path(getattr(self, "data_yaml_path", "") or "")
         data_yaml_error = ""
         validation_note = ""
@@ -48648,6 +48771,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         elif data_yaml_path and not os.path.exists(data_yaml_path):
             data_yaml_error = "Selected training YAML does not exist."
 
+        report_progress("Resolving dataset paths and classes...")
         yaml_data, yaml_dir = self._training_health_parse_data_yaml(data_yaml_path)
         dataset_dir = self._training_health_dataset_dir(data_yaml_path, yaml_data, yaml_dir) or self._training_eval_dataset_dir()
         if not dataset_dir:
@@ -48656,6 +48780,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         current_size = self._parse_training_imgsz_value(getattr(self, "imgsz_input", None).text() if getattr(self, "imgsz_input", None) is not None else "640")
         candidate_sizes = self._training_eval_candidate_sizes(candidate_sizes, current_size)
         weights_path = self._effective_eval_weights_path(use_training_weights, weights_path)
+        report_progress(
+            f"Loading checkpoint {os.path.basename(weights_path) if weights_path else 'metadata'}..."
+        )
         weight_info = self.inspect_training_eval_weights(weights_path)
         strides = weight_info.get("strides") or [8, 16, 32]
         min_stride = max(1, min(strides))
@@ -48699,6 +48826,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if not scanner.valid_classes:
             raise ValueError("No classes were found. Add classes.txt or select a classes file first.")
 
+        report_progress("Building the dataset image list...")
         image_files = self._training_eval_yaml_image_files(data_yaml_path, yaml_data, "train") if data_yaml_path else []
         if not image_files:
             image_files = scanner._iter_image_files(dataset_dir)
@@ -48747,7 +48875,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         expected_keypoints = scanner.expected_keypoint_count or None
         polygon_preference = self._polygon_label_parse_preference() if hasattr(self, "_polygon_label_parse_preference") else None
 
-        for image_path in image_files:
+        total_images_to_scan = len(image_files)
+        report_progress(f"Scanning {total_images_to_scan:,} dataset images...")
+        for image_index, image_path in enumerate(image_files, start=1):
+            if image_index == 1 or image_index % 100 == 0 or image_index == total_images_to_scan:
+                report_progress(
+                    f"Scanning dataset image {image_index:,} / {total_images_to_scan:,}..."
+                )
             try:
                 with Image.open(image_path) as img:
                     img_width, img_height = img.size
@@ -49117,7 +49251,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             "visible_keypoints": visible_keypoints,
             "task_warning": task_warning,
         }
+        report_progress("Finalizing training recommendations...")
         result["training_recommendations_yaml"] = self._write_training_recommendation_yaml(result)
+        report_progress("Dataset scan complete.")
         return result
 
     def format_training_evaluation_report(self, result):
@@ -49542,6 +49678,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             self.settings["trainingEvaluatorLastRunDir"] = run_dir
             self.settings["trainingEvaluatorLastRunLog"] = log_path
             self.settings["trainingEvaluatorLastRunTitle"] = record["title"]
+            command_tokens = [str(part).strip().lower() for part in (command or [])]
+            if "train" in command_tokens:
+                self.settings["trainingEvaluatorLastTrainingRunDir"] = run_dir
             self.queue_settings_save()
         return record
 
@@ -49632,6 +49771,114 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         except Exception as e:
             logger.warning(f"Could not read Ultralytics args from {args_path}: {e}")
             return {}, args_path
+
+    def _training_eval_restore_last_run_setup(self):
+        """Return one verified, internally consistent setup from the latest training run."""
+        settings = getattr(self, "settings", {}) if isinstance(getattr(self, "settings", None), dict) else {}
+        candidate_dirs = []
+
+        def add_run_dir(path):
+            path = self.normalize_path(path or "")
+            if path and os.path.isdir(path) and path not in candidate_dirs:
+                args, _args_path = self._training_eval_read_args_yaml(path)
+                if str(args.get("mode", "train") or "train").strip().lower() == "train":
+                    candidate_dirs.append(path)
+
+        add_run_dir(settings.get("trainingEvaluatorLastTrainingRunDir", ""))
+        for model_path in (
+            getattr(self, "pt_path", ""),
+            settings.get("ultralyticsPtPath", ""),
+            settings.get("trainingEvaluatorWeightsPath", ""),
+        ):
+            model_path = self.normalize_path(model_path or "")
+            parent = os.path.dirname(model_path)
+            if os.path.basename(parent).lower() == "weights":
+                add_run_dir(os.path.dirname(parent))
+
+        # A validation launch may be the most recently recorded command. Recover
+        # its model path from the log, then walk back from weights/*.pt to the
+        # training run whose args.yaml is authoritative.
+        last_command_run = self.normalize_path(settings.get("trainingEvaluatorLastRunDir", ""))
+        last_command_log = self.normalize_path(
+            settings.get("trainingEvaluatorLastRunLog", "")
+            or self._training_eval_log_path(last_command_run)
+        )
+        logged_args = self._training_eval_run_args_from_log(last_command_log)
+        logged_model = self.normalize_path(str(logged_args.get("model", "") or ""))
+        logged_parent = os.path.dirname(logged_model)
+        if os.path.basename(logged_parent).lower() == "weights":
+            add_run_dir(os.path.dirname(logged_parent))
+
+        discovered = self._training_eval_discover_latest_run(force=True) or {}
+        add_run_dir(discovered.get("run_dir", ""))
+        if not candidate_dirs:
+            return {}
+
+        run_dir = max(candidate_dirs, key=self._training_eval_run_modified_time)
+        record = {
+            "title": "Restored Training Run",
+            "run_dir": run_dir,
+            "log_path": self._training_eval_log_path(run_dir),
+            "process": None,
+            "pid": None,
+        }
+        if not run_dir:
+            return {}
+
+        args, args_path = self._training_eval_read_args_yaml(run_dir)
+        if not args:
+            return {}
+
+        data_yaml = self.normalize_path(str(args.get("data", "") or ""))
+        if data_yaml and not os.path.isabs(data_yaml):
+            data_yaml = self.normalize_path(os.path.join(run_dir, data_yaml))
+        if not data_yaml or not os.path.isfile(data_yaml):
+            data_yaml = ""
+
+        # Prefer the trained best checkpoint, but never select it merely because
+        # the file exists. Interrupted writes can leave a large yet invalid .pt.
+        model_from_args = self.normalize_path(str(args.get("model", "") or ""))
+        candidates = [
+            self.normalize_path(os.path.join(run_dir, "weights", "best.pt")),
+            self.normalize_path(os.path.join(run_dir, "weights", "last.pt")),
+            model_from_args,
+        ]
+        checkpoint = ""
+        weight_info = {}
+        seen = set()
+        for candidate in candidates:
+            key = os.path.normcase(candidate) if candidate else ""
+            if not candidate or key in seen or not os.path.isfile(candidate):
+                continue
+            seen.add(key)
+            info = self.inspect_training_eval_weights(candidate)
+            if info.get("loaded"):
+                checkpoint = candidate
+                weight_info = info
+                break
+            logger.warning(
+                "Skipping unusable checkpoint while restoring evaluator setup: %s (%s)",
+                candidate,
+                info.get("error") or "load failed",
+            )
+
+        task = str(args.get("task", "") or weight_info.get("task", "") or "").strip().lower()
+        if task not in {"detect", "segment", "classify", "pose", "obb"}:
+            task = str(weight_info.get("task", "") or "").strip().lower()
+
+        if checkpoint and data_yaml and isinstance(getattr(self, "settings", None), dict):
+            self.settings["trainingEvaluatorLastTrainingRunDir"] = run_dir
+
+        return {
+            "record": record,
+            "run_dir": run_dir,
+            "args_path": args_path,
+            "args": args,
+            "data_yaml": data_yaml,
+            "checkpoint": checkpoint,
+            "weight_info": weight_info,
+            "task": task,
+        }
 
     def _training_eval_int_value(self, value, default=0):
         try:
@@ -50148,7 +50395,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if not data_yaml_path or not os.path.exists(data_yaml_path):
             return ""
         try:
-            yaml_data, _yaml_dir = self._training_health_parse_data_yaml(data_yaml_path)
+            yaml_data, yaml_dir = self._training_health_parse_data_yaml(data_yaml_path)
             digest = hashlib.sha256()
             digest.update(data_yaml_path.encode("utf-8", errors="ignore"))
             try:
@@ -50156,11 +50403,40 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                     digest.update(f.read())
             except Exception:
                 pass
+            dataset_root = self.normalize_path((yaml_data or {}).get("path", "") or yaml_dir)
+            if dataset_root and not os.path.isabs(dataset_root):
+                dataset_root = self.normalize_path(os.path.join(yaml_dir, dataset_root))
             for split in ("train", "val"):
                 digest.update(f"\n[{split}]\n".encode("utf-8"))
-                for image_path in self._training_eval_yaml_image_files(data_yaml_path, yaml_data, split):
-                    digest.update(self.normalize_path(image_path).encode("utf-8", errors="ignore"))
+                entries = (yaml_data or {}).get(split)
+                entries = entries if isinstance(entries, list) else [entries]
+                for entry in entries:
+                    value = str(entry or "").strip().strip('"').strip("'")
+                    if not value:
+                        continue
+                    path = self.normalize_path(
+                        value if os.path.isabs(value) else os.path.join(dataset_root or yaml_dir, value)
+                    )
+                    digest.update(path.encode("utf-8", errors="ignore"))
                     digest.update(b"\n")
+                    # Hash list files sequentially instead of issuing tens of
+                    # thousands of os.path.isfile calls for their image paths.
+                    if os.path.isfile(path) and os.path.splitext(path)[1].lower() == ".txt":
+                        try:
+                            with open(path, "rb") as f:
+                                while True:
+                                    block = f.read(1024 * 1024)
+                                    if not block:
+                                        break
+                                    digest.update(block)
+                        except Exception:
+                            pass
+                    elif os.path.exists(path):
+                        try:
+                            stat = os.stat(path)
+                            digest.update(f"{stat.st_size}:{stat.st_mtime_ns}".encode("ascii"))
+                        except Exception:
+                            pass
             return digest.hexdigest()[:16]
         except Exception as e:
             logger.debug(f"Could not fingerprint training split {data_yaml_path}: {e}")
@@ -50376,10 +50652,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         label.setToolTip(tooltip)
 
     def _training_eval_baseline_run_name(self, result=None, force_cpu=False):
-        args = self._training_eval_baseline_args_from_result(result or {})
-        model_stem = os.path.splitext(os.path.basename(str(args.get("model", "") or "weights")))[0]
+        rec = (result or {}).get("recommendations", {}) if isinstance(result, dict) else {}
+        model_path = self.normalize_path(
+            rec.get("weights_path", "") or self._training_eval_model_path(result, prefer_recommendation=True)
+        )
+        model_stem = os.path.splitext(os.path.basename(str(model_path or "weights")))[0]
         model_stem = re.sub(r"[^a-zA-Z0-9_.-]+", "_", model_stem).strip("._-") or "weights"
-        imgsz = str(args.get("imgsz", "") or self._parse_training_imgsz_value())
+        imgsz = str(rec.get("imgsz", "") or self._parse_training_imgsz_value())
         device = "cpu" if force_cpu else "gpu"
         return f"baseline_{device}_{model_stem}_{imgsz}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
@@ -50732,7 +51011,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             return "success", "Ready"
         return "idle", "Idle"
 
-    def _training_eval_refresh_run_widgets(self, widgets, run_dir, log_path, message=""):
+    def _training_eval_refresh_run_widgets(
+        self,
+        widgets,
+        run_dir,
+        log_path,
+        message="",
+        include_diagnosis=True,
+    ):
         widgets = widgets or {}
         run_dir = self.normalize_path(run_dir)
         log_path = self.normalize_path(log_path or self._training_eval_log_path(run_dir))
@@ -50803,6 +51089,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         if metrics_changed:
             self._training_eval_update_metrics_table(widgets.get("metrics_table"), headers, rows)
+        if metrics_changed and include_diagnosis:
             self._training_eval_update_diagnosis_widgets(
                 widgets,
                 self._training_eval_results_diagnosis(headers, rows, run_dir),
@@ -51346,6 +51633,36 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             )
         scene.update()
 
+    @staticmethod
+    def _validation_review_issue_guidance(issue_type):
+        return {
+            "false_positive": (
+                "Red is a model prediction with no matching saved segment. If the object is real, "
+                "add or correct its dataset label. If it is not real, the saved label is fine and "
+                "the model made the mistake."
+            ),
+            "false_negative": (
+                "Orange is a saved dataset segment the model missed. Keep it when the label is "
+                "correct; edit or remove it only when the saved annotation is wrong."
+            ),
+            "wrong_class": (
+                "The prediction overlaps a saved annotation but uses a different class. Check and "
+                "correct the dataset class only if the saved class is wrong."
+            ),
+            "weak_localization": (
+                "The saved annotation and prediction match, but their shapes overlap poorly. "
+                "Compare both outlines and refine the dataset segment only when necessary."
+            ),
+            "duplicate_prediction": (
+                "The model predicted the same labeled object more than once. This is usually a "
+                "model error; verify the saved dataset segment before changing it."
+            ),
+            "poor_keypoints": (
+                "The predicted keypoints disagree with the saved keypoints. Inspect the saved "
+                "points and move only those that are actually incorrect."
+            ),
+        }.get(str(issue_type or ""), "Compare the saved annotation with the model prediction before editing.")
+
     def _write_active_validation_review_report(self):
         path = self.normalize_path(getattr(self, "validation_review_report_path", ""))
         report = getattr(self, "validation_review_report", None)
@@ -51390,6 +51707,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             issue_name,
             f"Task: {issue.get('task', '')}",
             f"Class: {issue.get('class_name', '')}",
+            f"Image: {os.path.basename(image_path)}",
+            f"Label: {os.path.basename(str(issue.get('label_path', '') or ''))}",
         ]
         if confidence is not None:
             details.append(f"Confidence: {float(confidence):.3f}")
@@ -51397,6 +51716,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             details.append(f"Overlap: {float(overlap):.3f}")
         if issue.get("detail"):
             details.extend(["", str(issue.get("detail"))])
+        details.extend(["", self._validation_review_issue_guidance(issue.get("type"))])
         self.validation_review_position_label.setText(f"Issue {index + 1} / {len(issues)}")
         self.validation_review_detail_label.setText("\n".join(details))
         self.statusBar().showMessage(f"Validation review: {issue_name}", 3000)
@@ -51404,6 +51724,18 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
     def open_validation_review_issue_in_labeler(self, issue, report_path="", queue=None):
         if not isinstance(issue, dict):
+            return False
+        requested_image_path = self.normalize_path(issue.get("image_path", ""))
+        if not requested_image_path or not os.path.isfile(requested_image_path):
+            QMessageBox.warning(
+                getattr(self, "training_evaluator_dialog", None) or self,
+                "Validation Review Image Missing",
+                (
+                    "This report does not contain a usable dataset image path:\n\n"
+                    f"{requested_image_path or '(empty path)'}\n\n"
+                    "Run Analyze Errors again to rebuild the report with real dataset paths."
+                ),
+            )
             return False
         issues = [item for item in list(queue or []) if isinstance(item, dict)]
         if issue not in issues:
@@ -51438,7 +51770,24 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             0,
         )
         self._ensure_validation_review_dock()
-        self._show_validation_review_issue(target_index)
+        if not self._show_validation_review_issue(target_index):
+            return False
+
+        # The Training window is modeless but normally covers the main labeler.
+        # Move it out of the way and explicitly focus the labeler so opening an
+        # issue has an immediate, visible result.
+        training_dialog = getattr(self, "training_evaluator_dialog", None)
+        if training_dialog is not None and not sip.isdeleted(training_dialog):
+            training_dialog.hide()
+        if self.isMinimized():
+            self.showNormal()
+        else:
+            self.show()
+        self.raise_()
+        self.activateWindow()
+        dock = self._ensure_validation_review_dock()
+        dock.show()
+        dock.raise_()
         return True
 
     def navigate_validation_review_issue(self, offset):
@@ -51543,13 +51892,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
     def open_training_evaluator_dialog(self):
         existing = getattr(self, "training_evaluator_dialog", None)
-        if existing is not None and not sip.isdeleted(existing) and existing.isVisible():
+        if existing is not None and not sip.isdeleted(existing):
+            existing.show()
             existing.raise_()
             existing.activateWindow()
             return
 
         dialog = QtWidgets.QDialog(self)
-        dialog.setWindowTitle("Training")
+        dialog.setWindowTitle("Ultralytics Trainer / Exporter")
         dialog.setAttribute(Qt.WA_DeleteOnClose, True)
         dialog.setSizeGripEnabled(True)
         dialog.setMinimumSize(560, 420)
@@ -51587,16 +51937,25 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         controls.setHorizontalSpacing(8)
         controls.setVerticalSpacing(8)
 
+        restored_setup = self._training_eval_restore_last_run_setup()
+        restored_args = restored_setup.get("args", {}) if isinstance(restored_setup, dict) else {}
+        restored_checkpoint = self.normalize_path(restored_setup.get("checkpoint", ""))
+        restored_data_yaml = self.normalize_path(restored_setup.get("data_yaml", ""))
+        restored_run_dir = self.normalize_path(restored_setup.get("run_dir", ""))
+
         use_training_weights = QtWidgets.QCheckBox("Use Train Setup")
         use_training_weights.setChecked(True)
         use_training_weights.setToolTip("When checked, evaluation inspects the model selected in Train Setup.")
-        eval_weights_edit = QtWidgets.QLineEdit(self.settings.get("trainingEvaluatorWeightsPath", ""))
+        eval_weights_edit = QtWidgets.QLineEdit(
+            restored_checkpoint or self.settings.get("trainingEvaluatorWeightsPath", "")
+        )
         eval_weights_edit.setPlaceholderText("Optional eval weights path")
         eval_weights_edit.setToolTip("Optional .pt or model .yaml used only for evaluator stride/task inspection.")
         browse_weights_btn = QtWidgets.QPushButton("Browse")
 
         current_model_path = self.normalize_path(
-            getattr(self, "model_config_path", None)
+            restored_checkpoint
+            or getattr(self, "model_config_path", None)
             or getattr(self, "pt_path", None)
             or self.settings.get("ultralyticsModelConfigPath", "")
             or self.settings.get("ultralyticsPtPath", "")
@@ -51613,14 +51972,17 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             or ""
         )
         current_data_yaml = self.normalize_path(
-            getattr(self, "data_yaml_path", None)
+            restored_data_yaml
+            or getattr(self, "data_yaml_path", None)
             or self.settings.get("ultralyticsDataYamlPath", "")
             or ""
         )
         if not current_data_yaml:
             current_data_yaml = self.autoload_training_data_yaml_for_dataset(self._training_eval_dataset_dir())
         current_runs_dir = self.normalize_path(
-            getattr(self, "runs_directory", "")
+            restored_args.get("project", "")
+            or (os.path.dirname(restored_run_dir) if restored_run_dir else "")
+            or getattr(self, "runs_directory", "")
             or self.settings.get("ultralyticsRunsDirectory", "")
             or self._training_eval_project_dir()
         )
@@ -51657,7 +52019,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         browse_runs_dir_btn = QtWidgets.QPushButton("Browse")
         browse_runs_dir_btn.setToolTip("Choose a custom runs folder, or leave blank for the dataset default.")
 
-        current_size = self._parse_training_imgsz_value(self.settings.get("trainingPreviewImgSize", self.settings.get("ultralyticsTrainImgSize", "640")))
+        current_size = self._parse_training_imgsz_value(
+            restored_args.get(
+                "imgsz",
+                self.settings.get("trainingPreviewImgSize", self.settings.get("ultralyticsTrainImgSize", "640")),
+            )
+        )
         imgsz_spin = QtWidgets.QSpinBox()
         imgsz_spin.setRange(160, 2048)
         imgsz_spin.setSingleStep(32)
@@ -51673,27 +52040,38 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         train_batch_spin = QtWidgets.QSpinBox()
         train_batch_spin.setRange(1, 512)
-        train_batch_spin.setValue(_setting_int_value("ultralyticsTrainBatch", 8, 1, 512))
+        restored_batch = self._training_eval_int_value(restored_args.get("batch"), 0)
+        train_batch_spin.setValue(
+            max(1, min(512, restored_batch))
+            if restored_batch > 0
+            else _setting_int_value("ultralyticsTrainBatch", 8, 1, 512)
+        )
         train_batch_spin.setToolTip("Requested training batch. DarkFusion still clamps unsafe values.")
 
         train_epochs_spin = QtWidgets.QSpinBox()
         train_epochs_spin.setRange(1, 10000)
-        train_epochs_spin.setValue(_setting_int_value("ultralyticsTrainEpochs", 50, 1, 10000))
+        restored_epochs = self._training_eval_int_value(restored_args.get("epochs"), 0)
+        train_epochs_spin.setValue(
+            max(1, min(10000, restored_epochs))
+            if restored_epochs > 0
+            else _setting_int_value("ultralyticsTrainEpochs", 50, 1, 10000)
+        )
         train_epochs_spin.setToolTip("Number of epochs for Start Training.")
 
         task_setup_combo = QtWidgets.QComboBox()
         for task_name in ("detect", "segment", "classify", "pose", "obb"):
             task_setup_combo.addItem(task_name)
         current_task = str(
-            getattr(self, "task_combobox", None).currentText()
+            restored_setup.get("task", "")
+            or (getattr(self, "task_combobox", None).currentText()
             if getattr(self, "task_combobox", None) is not None
-            else self.settings.get("ultralyticsTask", "detect")
+            else self.settings.get("ultralyticsTask", "detect"))
         ).strip().lower()
         task_index = task_setup_combo.findText(current_task, Qt.MatchFixedString)
         task_setup_combo.setCurrentIndex(task_index if task_index >= 0 else 0)
 
         train_rect_checkbox = QtWidgets.QCheckBox("Rect")
-        train_rect_checkbox.setChecked(bool(self.settings.get("ultralyticsRect", False)))
+        train_rect_checkbox.setChecked(bool(restored_args.get("rect", self.settings.get("ultralyticsRect", False))))
         train_rect_checkbox.setToolTip("Use rectangular training batches.")
         duplicate_labels_checkbox = QtWidgets.QCheckBox("Keep Duplicate Labels")
         duplicate_labels_checkbox.setChecked(bool(self.settings.get("ultralyticsKeepDuplicateLabels", False)))
@@ -51718,17 +52096,31 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         distill_weight_spin.setToolTip("Ultralytics distillation loss weight, passed as dis=.")
 
         train_patience_checkbox = QtWidgets.QCheckBox("Patience")
-        train_patience_checkbox.setChecked(bool(self.settings.get("ultralyticsPatienceEnabled", False)))
+        restored_patience = self._training_eval_int_value(restored_args.get("patience"), 0)
+        train_patience_checkbox.setChecked(
+            restored_patience > 0 or bool(self.settings.get("ultralyticsPatienceEnabled", False))
+        )
         train_patience_spin = QtWidgets.QSpinBox()
         train_patience_spin.setRange(1, 10000)
-        train_patience_spin.setValue(_setting_int_value("ultralyticsPatience", 40, 1, 10000))
+        train_patience_spin.setValue(
+            max(1, min(10000, restored_patience))
+            if restored_patience > 0
+            else _setting_int_value("ultralyticsPatience", 40, 1, 10000)
+        )
         train_patience_spin.setToolTip("Early-stop patience.")
 
         train_freeze_checkbox = QtWidgets.QCheckBox("Freeze")
-        train_freeze_checkbox.setChecked(bool(self.settings.get("ultralyticsFreezeEnabled", False)))
+        restored_freeze = self._training_eval_int_value(restored_args.get("freeze"), 0)
+        train_freeze_checkbox.setChecked(
+            restored_freeze > 0 or bool(self.settings.get("ultralyticsFreezeEnabled", False))
+        )
         train_freeze_spin = QtWidgets.QSpinBox()
         train_freeze_spin.setRange(0, 1000)
-        train_freeze_spin.setValue(_setting_int_value("ultralyticsFreeze", 0, 0, 1000))
+        train_freeze_spin.setValue(
+            max(0, min(1000, restored_freeze))
+            if restored_freeze > 0
+            else _setting_int_value("ultralyticsFreeze", 0, 0, 1000)
+        )
         train_freeze_spin.setToolTip("Freeze first N layers.")
 
         extra_args_edit = QtWidgets.QLineEdit(str(self.settings.get("ultralyticsExtraTrainArgs", "") or ""))
@@ -51893,18 +52285,35 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         batch_override_spin.setValue(_setting_int_value("trainingEvaluatorBatchOverride", int(train_batch_spin.value()), 1, 512))
         batch_override_spin.setMaximumWidth(82)
         workers_override_checkbox = QtWidgets.QCheckBox("Set Workers")
-        workers_override_checkbox.setChecked(bool(self.settings.get("trainingEvaluatorWorkersOverrideEnabled", True)))
+        restored_workers_present = "workers" in restored_args and restored_args.get("workers") is not None
+        workers_override_checkbox.setChecked(
+            restored_workers_present or bool(self.settings.get("trainingEvaluatorWorkersOverrideEnabled", True))
+        )
         workers_override_checkbox.setToolTip("Override Ultralytics dataloader workers. 0 is safest on Windows.")
         workers_override_spin = QtWidgets.QSpinBox()
         workers_override_spin.setRange(0, 32)
-        workers_override_spin.setValue(int(self.settings.get("trainingEvaluatorWorkersOverride", 0 if sys.platform.startswith("win") else 2) or 0))
+        restored_workers = self._training_eval_int_value(restored_args.get("workers"), 0)
+        workers_override_spin.setValue(
+            max(0, min(32, restored_workers))
+            if restored_workers_present
+            else int(self.settings.get("trainingEvaluatorWorkersOverride", 0 if sys.platform.startswith("win") else 2) or 0)
+        )
         workers_override_spin.setMaximumWidth(70)
         cache_mode_combo = QtWidgets.QComboBox()
         cache_mode_combo.setToolTip("Dataset cache mode. Off is safest; RAM is fastest but can consume lots of memory.")
         cache_mode_combo.addItem("Cache Off", "off")
         cache_mode_combo.addItem("Cache RAM", "ram")
         cache_mode_combo.addItem("Cache Disk", "disk")
-        cache_index = cache_mode_combo.findData(str(self.settings.get("trainingEvaluatorCacheMode", "off")).lower())
+        restored_cache = restored_args.get("cache") if "cache" in restored_args else None
+        if isinstance(restored_cache, str) and restored_cache.strip().lower() in {"disk", "ram"}:
+            cache_mode = restored_cache.strip().lower()
+        elif restored_cache is True:
+            cache_mode = "ram"
+        elif restored_cache is False:
+            cache_mode = "off"
+        else:
+            cache_mode = str(self.settings.get("trainingEvaluatorCacheMode", "off")).lower()
+        cache_index = cache_mode_combo.findData(cache_mode)
         cache_mode_combo.setCurrentIndex(cache_index if cache_index >= 0 else 0)
 
         controls.addWidget(QtWidgets.QLabel("Candidates"), 0, 0)
@@ -52041,10 +52450,23 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         validation_review_layout.setContentsMargins(8, 8, 8, 8)
         validation_review_layout.setSpacing(8)
 
+        review_workflow_help = QtWidgets.QLabel(
+            "<b>Fix validation problems in the original dataset</b><br>"
+            "1. Click <b>Find Problem Images</b> to compare the selected trained checkpoint with "
+            "every original image and saved label in the chosen split.<br>"
+            "2. Select an issue to compare the saved annotation with the model prediction.<br>"
+            "3. Click <b>Open Original in Labeler</b>, correct the annotation only when it is wrong, "
+            "save it, then continue to the next issue.<br>"
+            "<i>Metrics Only</i> calculates mAP/precision/recall; it does not create an editable image queue."
+        )
+        review_workflow_help.setWordWrap(True)
+        review_workflow_help.setStyleSheet(
+            "QLabel { background: #17212b; border: 1px solid #344454; "
+            "border-radius: 6px; padding: 9px; color: #dce6f0; }"
+        )
+        validation_review_layout.addWidget(review_workflow_help)
+
         review_controls = QtWidgets.QGridLayout()
-        review_checkpoint_edit = QtWidgets.QLineEdit()
-        review_checkpoint_edit.setPlaceholderText("Select best.pt, last.pt, or another checkpoint")
-        review_checkpoint_browse = QtWidgets.QPushButton("Checkpoint")
         review_split_combo = QtWidgets.QComboBox()
         review_split_combo.addItem("Validation", "val")
         review_split_combo.addItem("Test", "test")
@@ -52063,25 +52485,30 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         review_limit_spin.setRange(0, 10000000)
         review_limit_spin.setSpecialValueText("All")
         review_limit_spin.setValue(int(self.settings.get("trainingValidationReviewLimit", 0) or 0))
-        review_analyze_btn = QtWidgets.QPushButton("Analyze Errors")
-        review_validate_metrics_btn = QtWidgets.QPushButton("Run Metrics Validation")
-        review_load_btn = QtWidgets.QPushButton("Open Report")
+        review_limit_spin.setToolTip("Use All to scan the complete selected dataset split.")
+        review_analyze_btn = QtWidgets.QPushButton("1. Find Problem Images")
+        review_analyze_btn.setToolTip(
+            "Run the trained model on original dataset images and compare every prediction "
+            "with the matching saved annotation."
+        )
+        review_validate_metrics_btn = QtWidgets.QPushButton("Metrics Only (mAP)")
+        review_validate_metrics_btn.setToolTip(
+            "Calculate aggregate validation scores. This does not build the editable problem-image queue."
+        )
+        review_load_btn = QtWidgets.QPushButton("Open Saved Review")
         review_compare_btn = QtWidgets.QPushButton("Compare Report")
         review_export_btn = QtWidgets.QPushButton("Export CSV")
         review_stop_btn = QtWidgets.QPushButton("Stop Analysis")
         review_stop_btn.setEnabled(False)
 
-        review_controls.addWidget(QtWidgets.QLabel("Checkpoint"), 0, 0)
-        review_controls.addWidget(review_checkpoint_edit, 0, 1, 1, 4)
-        review_controls.addWidget(review_checkpoint_browse, 0, 5)
-        review_controls.addWidget(QtWidgets.QLabel("Split"), 1, 0)
-        review_controls.addWidget(review_split_combo, 1, 1)
-        review_controls.addWidget(QtWidgets.QLabel("Confidence"), 1, 2)
-        review_controls.addWidget(review_conf_spin, 1, 3)
-        review_controls.addWidget(QtWidgets.QLabel("Match IoU"), 1, 4)
-        review_controls.addWidget(review_iou_spin, 1, 5)
-        review_controls.addWidget(QtWidgets.QLabel("Images"), 2, 0)
-        review_controls.addWidget(review_limit_spin, 2, 1)
+        review_controls.addWidget(QtWidgets.QLabel("Split"), 0, 0)
+        review_controls.addWidget(review_split_combo, 0, 1)
+        review_controls.addWidget(QtWidgets.QLabel("Prediction confidence"), 0, 2)
+        review_controls.addWidget(review_conf_spin, 0, 3)
+        review_controls.addWidget(QtWidgets.QLabel("Match IoU"), 0, 4)
+        review_controls.addWidget(review_iou_spin, 0, 5)
+        review_controls.addWidget(QtWidgets.QLabel("Images to scan"), 1, 0)
+        review_controls.addWidget(review_limit_spin, 1, 1)
         review_action_row = self._row_layout(8)
         review_action_row.addWidget(review_validate_metrics_btn)
         review_action_row.addWidget(review_analyze_btn)
@@ -52090,12 +52517,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         review_action_row.addWidget(review_compare_btn)
         review_action_row.addWidget(review_export_btn)
         review_action_row.addStretch(1)
-        review_controls.addLayout(review_action_row, 2, 2, 1, 4)
+        review_controls.addLayout(review_action_row, 1, 2, 1, 4)
         review_controls.setColumnStretch(1, 1)
         validation_review_layout.addLayout(review_controls)
 
         review_status_label = QtWidgets.QLabel(
-            "Post-training review is idle. Select best.pt and analyze a validation split."
+            "Ready to find fixable problems in the original dataset. "
+            "The trained checkpoint and dataset are taken from Train Setup above."
         )
         review_status_label.setWordWrap(True)
         review_status_label.setStyleSheet("color: #9aa4af; font-weight: 700;")
@@ -52194,7 +52622,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         review_nav_row.addWidget(review_previous_btn)
         review_nav_row.addWidget(review_next_btn)
         review_side_layout.addLayout(review_nav_row)
-        review_open_labeler_btn = QtWidgets.QPushButton("Open in Labeler")
+        review_open_labeler_btn = QtWidgets.QPushButton("2. Open Original in Labeler")
         review_mark_btn = QtWidgets.QPushButton("Mark Reviewed")
         review_ignore_btn = QtWidgets.QPushButton("Ignore Issue")
         review_open_labeler_btn.setEnabled(False)
@@ -52209,6 +52637,453 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         review_splitter.setStretchFactor(2, 2)
         validation_review_layout.addWidget(review_splitter, 1)
         evaluator_tabs.addTab(validation_review_tab, "Validation")
+
+        export_tab = QtWidgets.QWidget()
+        export_layout = QtWidgets.QVBoxLayout(export_tab)
+        export_layout.setContentsMargins(10, 10, 10, 10)
+        export_layout.setSpacing(10)
+
+        export_help = QtWidgets.QLabel(
+            "<b>Export the trained Ultralytics checkpoint</b><br>"
+            "Choose Best/Last from the active training run or browse to <b>any compatible .pt weights</b>. "
+            "INT8 becomes ready when the selected format supports it and a calibration dataset YAML "
+            "is available. Exported files are written beside the selected checkpoint by Ultralytics."
+        )
+        export_help.setWordWrap(True)
+        export_help.setStyleSheet(
+            "QLabel { background: #17212b; border: 1px solid #344454; "
+            "border-radius: 6px; padding: 9px; color: #dce6f0; }"
+        )
+        export_layout.addWidget(export_help)
+
+        export_form = QtWidgets.QGridLayout()
+        export_form.setHorizontalSpacing(8)
+        export_form.setVerticalSpacing(8)
+
+        def usable_export_checkpoint(*candidates):
+            for raw_path in candidates:
+                candidate = self.normalize_path(raw_path)
+                if not candidate or not os.path.isfile(candidate) or not candidate.lower().endswith(".pt"):
+                    continue
+                info = self.inspect_training_eval_weights(candidate)
+                if info.get("loaded"):
+                    return candidate
+            record = self._training_eval_latest_saved_run()
+            run_dir = self.normalize_path((record or {}).get("run_dir", ""))
+            for name in ("best.pt", "last.pt"):
+                candidate = self.normalize_path(os.path.join(run_dir, "weights", name))
+                if candidate and os.path.isfile(candidate):
+                    info = self.inspect_training_eval_weights(candidate)
+                    if info.get("loaded"):
+                        return candidate
+            return ""
+
+        export_checkpoint_edit = QtWidgets.QLineEdit(
+            usable_export_checkpoint(
+                restored_checkpoint,
+                self.settings.get("exportModelPath", ""),
+                eval_weights_edit.text(),
+                train_model_edit.text(),
+            )
+        )
+        export_checkpoint_edit.setObjectName("trainer_export_checkpoint")
+        export_checkpoint_edit.setPlaceholderText("Trained .pt checkpoint")
+        export_checkpoint_edit.setToolTip("The trained Ultralytics .pt checkpoint to export.")
+        export_checkpoint_browse = QtWidgets.QPushButton("Browse")
+        export_checkpoint_browse.setObjectName("trainer_export_browse")
+        export_checkpoint_use_run = QtWidgets.QPushButton("Use Best / Last")
+        export_checkpoint_use_run.setObjectName("trainer_export_use_run")
+        checkpoint_row = self._row_layout(8)
+        checkpoint_row.addWidget(export_checkpoint_edit, 1)
+        checkpoint_row.addWidget(export_checkpoint_use_run)
+        checkpoint_row.addWidget(export_checkpoint_browse)
+        export_form.addWidget(QtWidgets.QLabel("Checkpoint"), 0, 0)
+        export_form.addLayout(checkpoint_row, 0, 1, 1, 5)
+
+        export_data_edit = QtWidgets.QLineEdit(current_data_yaml)
+        export_data_edit.setObjectName("trainer_export_data_yaml")
+        export_data_edit.setPlaceholderText("Dataset YAML (required for INT8 calibration)")
+        export_data_browse = QtWidgets.QPushButton("YAML")
+        export_data_browse.setObjectName("trainer_export_data_browse")
+        export_data_use_training = QtWidgets.QPushButton("Use Training Dataset")
+        export_data_use_training.setObjectName("trainer_export_use_training_data")
+        data_export_row = self._row_layout(8)
+        data_export_row.addWidget(export_data_edit, 1)
+        data_export_row.addWidget(export_data_use_training)
+        data_export_row.addWidget(export_data_browse)
+        export_form.addWidget(QtWidgets.QLabel("Calibration data"), 1, 0)
+        export_form.addLayout(data_export_row, 1, 1, 1, 5)
+
+        export_format_combo = QtWidgets.QComboBox()
+        export_format_combo.setObjectName("trainer_export_format")
+        legacy_format_combo = getattr(self, "convert_model", None)
+        legacy_formats = []
+        if isinstance(legacy_format_combo, QtWidgets.QComboBox):
+            legacy_formats = [
+                legacy_format_combo.itemText(index).strip()
+                for index in range(legacy_format_combo.count())
+                if legacy_format_combo.itemText(index).strip()
+            ]
+        for format_name in legacy_formats or (
+            "torchscript", "onnx", "openvino", "engine", "coreml",
+            "saved_model", "pb", "tflite", "edgetpu",
+        ):
+            export_format_combo.addItem(format_name)
+        saved_export_format = str(self.settings.get("exportFormat", "") or "").strip()
+        format_index = export_format_combo.findText(saved_export_format, Qt.MatchFixedString)
+        export_format_combo.setCurrentIndex(format_index if format_index >= 0 else 0)
+
+        export_precision_combo = QtWidgets.QComboBox()
+        export_precision_combo.setObjectName("trainer_export_precision")
+        export_precision_combo.addItem("FP32", "fp32")
+        export_precision_combo.addItem("FP16", "fp16")
+        export_precision_combo.addItem("INT8", "int8")
+        if bool(self.settings.get("exportInt8", False)):
+            export_precision_combo.setCurrentIndex(2)
+        elif bool(self.settings.get("exportHalf", False)):
+            export_precision_combo.setCurrentIndex(1)
+
+        export_gpu_checkbox = QtWidgets.QCheckBox("Use GPU")
+        export_gpu_checkbox.setObjectName("trainer_export_use_gpu")
+        export_gpu_checkbox.setChecked(bool(self.settings.get("exportUseGpu", True)) and torch.cuda.is_available())
+        export_gpu_checkbox.setEnabled(torch.cuda.is_available())
+
+        export_width_spin = QtWidgets.QSpinBox()
+        export_width_spin.setObjectName("trainer_export_width")
+        export_width_spin.setRange(32, 8192)
+        export_width_spin.setSingleStep(32)
+        export_height_spin = QtWidgets.QSpinBox()
+        export_height_spin.setObjectName("trainer_export_height")
+        export_height_spin.setRange(32, 8192)
+        export_height_spin.setSingleStep(32)
+        try:
+            export_width_spin.setValue(int(self.settings.get("exportWidth", 640) or 640))
+        except Exception:
+            export_width_spin.setValue(640)
+        try:
+            export_height_spin.setValue(int(self.settings.get("exportHeight", 640) or 640))
+        except Exception:
+            export_height_spin.setValue(640)
+
+        export_form.addWidget(QtWidgets.QLabel("Format"), 2, 0)
+        export_form.addWidget(export_format_combo, 2, 1)
+        export_form.addWidget(QtWidgets.QLabel("Precision"), 2, 2)
+        export_form.addWidget(export_precision_combo, 2, 3)
+        export_form.addWidget(export_gpu_checkbox, 2, 4)
+        export_form.addWidget(QtWidgets.QLabel("Width"), 3, 0)
+        export_form.addWidget(export_width_spin, 3, 1)
+        export_form.addWidget(QtWidgets.QLabel("Height"), 3, 2)
+        export_form.addWidget(export_height_spin, 3, 3)
+
+        export_batch_checkbox = QtWidgets.QCheckBox("Fixed batch")
+        export_batch_checkbox.setObjectName("trainer_export_batch_enabled")
+        export_batch_checkbox.setChecked(bool(self.settings.get("exportBatchEnabled", False)))
+        export_batch_spin = QtWidgets.QSpinBox()
+        export_batch_spin.setObjectName("trainer_export_batch")
+        export_batch_spin.setRange(1, 512)
+        export_batch_spin.setValue(int(self.settings.get("exportBatchSize", 1) or 1))
+        export_batch_spin.setEnabled(export_batch_checkbox.isChecked())
+        export_dynamic_checkbox = QtWidgets.QCheckBox("Dynamic shapes")
+        export_dynamic_checkbox.setObjectName("trainer_export_dynamic")
+        export_dynamic_checkbox.setChecked(bool(self.settings.get("exportDynamic", False)))
+        export_simplify_checkbox = QtWidgets.QCheckBox("Simplify graph")
+        export_simplify_checkbox.setObjectName("trainer_export_simplify")
+        export_simplify_checkbox.setChecked(bool(self.settings.get("exportSimplify", False)))
+        export_form.addWidget(export_batch_checkbox, 4, 0)
+        export_form.addWidget(export_batch_spin, 4, 1)
+        export_form.addWidget(export_dynamic_checkbox, 4, 2)
+        export_form.addWidget(export_simplify_checkbox, 4, 3)
+
+        export_nms_checkbox = QtWidgets.QCheckBox("Embed NMS")
+        export_nms_checkbox.setObjectName("trainer_export_nms")
+        export_nms_checkbox.setChecked(bool(self.settings.get("exportNms", False)))
+        export_agnostic_checkbox = QtWidgets.QCheckBox("Class agnostic")
+        export_agnostic_checkbox.setObjectName("trainer_export_agnostic")
+        export_agnostic_checkbox.setChecked(bool(self.settings.get("exportAgnosticNms", False)))
+        export_conf_spin = QtWidgets.QDoubleSpinBox()
+        export_conf_spin.setObjectName("trainer_export_conf")
+        export_conf_spin.setRange(0.001, 1.0)
+        export_conf_spin.setDecimals(3)
+        export_conf_spin.setSingleStep(0.025)
+        export_conf_spin.setValue(float(self.settings.get("exportConf", 0.25) or 0.25))
+        export_iou_spin = QtWidgets.QDoubleSpinBox()
+        export_iou_spin.setObjectName("trainer_export_iou")
+        export_iou_spin.setRange(0.01, 0.99)
+        export_iou_spin.setDecimals(2)
+        export_iou_spin.setSingleStep(0.05)
+        export_iou_spin.setValue(float(self.settings.get("exportIou", 0.7) or 0.7))
+        export_form.addWidget(export_nms_checkbox, 5, 0)
+        export_form.addWidget(export_agnostic_checkbox, 5, 1)
+        export_form.addWidget(QtWidgets.QLabel("Confidence"), 5, 2)
+        export_form.addWidget(export_conf_spin, 5, 3)
+        export_form.addWidget(QtWidgets.QLabel("IoU"), 5, 4)
+        export_form.addWidget(export_iou_spin, 5, 5)
+        export_form.setColumnStretch(1, 1)
+        export_form.setColumnStretch(3, 1)
+        export_layout.addLayout(export_form)
+
+        export_readiness = QtWidgets.QLabel()
+        export_readiness.setObjectName("trainer_export_readiness")
+        export_readiness.setWordWrap(True)
+        export_readiness.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        export_layout.addWidget(export_readiness)
+
+        export_action_row = self._row_layout(8)
+        export_button = QtWidgets.QPushButton("Export Model")
+        export_button.setObjectName("trainer_export_button")
+        export_open_output = QtWidgets.QPushButton("Open Output Folder")
+        export_open_output.setObjectName("trainer_export_open_output")
+        export_open_output.setEnabled(False)
+        export_action_row.addWidget(export_button)
+        export_action_row.addWidget(export_open_output)
+        export_action_row.addStretch(1)
+        export_layout.addLayout(export_action_row)
+
+        export_status = QtWidgets.QLabel("Choose a trained checkpoint and export format.")
+        export_status.setObjectName("trainer_export_status")
+        export_status.setWordWrap(True)
+        export_status.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        export_status.setStyleSheet("color: #9aa4af; font-weight: 700;")
+        export_layout.addWidget(export_status)
+        export_layout.addStretch(1)
+        evaluator_tabs.addTab(export_tab, "Export")
+
+        export_state = {"output": ""}
+
+        def refresh_export_controls():
+            export_format = export_format_combo.currentText().strip().lower()
+            precision_model = export_precision_combo.model()
+            fp16_supported = self.is_parameter_supported(export_format, "half")
+            int8_supported = self.is_parameter_supported(export_format, "int8")
+            precision_model.item(1).setEnabled(fp16_supported)
+            precision_model.item(2).setEnabled(int8_supported)
+            current_precision = str(export_precision_combo.currentData() or "fp32")
+            if (current_precision == "fp16" and not fp16_supported) or (
+                current_precision == "int8" and not int8_supported
+            ):
+                export_precision_combo.setCurrentIndex(0)
+            export_dynamic_checkbox.setEnabled(self.is_parameter_supported(export_format, "dynamic"))
+            export_simplify_checkbox.setEnabled(self.is_parameter_supported(export_format, "simplify"))
+            batch_supported = self.is_parameter_supported(export_format, "batch")
+            export_batch_checkbox.setEnabled(batch_supported)
+            export_batch_spin.setEnabled(batch_supported and export_batch_checkbox.isChecked())
+            nms_supported = self.is_parameter_supported(export_format, "nms")
+            export_nms_checkbox.setEnabled(nms_supported)
+            nms_options_enabled = nms_supported and export_nms_checkbox.isChecked()
+            export_agnostic_checkbox.setEnabled(nms_options_enabled)
+            export_conf_spin.setEnabled(nms_options_enabled)
+            export_iou_spin.setEnabled(nms_options_enabled)
+
+            checkpoint_path = self.normalize_path(export_checkpoint_edit.text().strip())
+            checkpoint_ready = bool(
+                checkpoint_path
+                and os.path.isfile(checkpoint_path)
+                and checkpoint_path.lower().endswith(".pt")
+            )
+            calibration_path = self.normalize_path(export_data_edit.text().strip())
+            calibration_ready = bool(
+                calibration_path
+                and os.path.isfile(calibration_path)
+                and calibration_path.lower().endswith((".yaml", ".yml"))
+            )
+            int8_selected = str(export_precision_combo.currentData() or "fp32") == "int8"
+            export_ready = checkpoint_ready and (not int8_selected or calibration_ready)
+            export_button.setEnabled(export_ready)
+
+            if not checkpoint_ready:
+                message = "● Select any existing Ultralytics .pt weights to enable export."
+                color = "#ff6b6b"
+            elif int8_selected and not calibration_ready:
+                message = (
+                    "● INT8 needs a calibration dataset YAML. Click Use Training Dataset "
+                    "or browse to the dataset that matches these weights."
+                )
+                color = "#f0b35a"
+            elif int8_selected:
+                message = (
+                    f"● INT8 ready — {os.path.basename(checkpoint_path)} will calibrate with "
+                    f"{os.path.basename(calibration_path)}."
+                )
+                color = "#45d483"
+            elif calibration_ready and int8_supported:
+                message = (
+                    f"● Ready to export {os.path.basename(checkpoint_path)}. "
+                    f"INT8 is also available with {os.path.basename(calibration_path)}."
+                )
+                color = "#45d483"
+            else:
+                message = f"● Ready to export {os.path.basename(checkpoint_path)}."
+                color = "#45d483"
+            export_readiness.setText(message)
+            export_readiness.setStyleSheet(
+                f"QLabel {{ color: {color}; background: #141c24; border: 1px solid {color}; "
+                "border-radius: 5px; padding: 7px; font-weight: 700; }"
+            )
+
+        def browse_export_checkpoint():
+            file_name, _selected_filter = QFileDialog.getOpenFileName(
+                dialog,
+                "Select Trained Ultralytics Checkpoint",
+                os.path.dirname(export_checkpoint_edit.text().strip()) or self._training_eval_project_dir(),
+                "Ultralytics Checkpoints (*.pt);;All Files (*)",
+            )
+            if file_name:
+                export_checkpoint_edit.setText(self.normalize_path(file_name))
+
+        def use_latest_export_checkpoint():
+            checkpoint = usable_export_checkpoint(
+                train_model_edit.text(),
+                eval_weights_edit.text(),
+                restored_checkpoint,
+            )
+            if checkpoint:
+                export_checkpoint_edit.setText(checkpoint)
+                export_status.setText(f"Using trained checkpoint: {checkpoint}")
+            else:
+                QMessageBox.warning(dialog, "Export", "No usable best.pt or last.pt checkpoint was found.")
+
+        def browse_export_data():
+            file_name, _selected_filter = QFileDialog.getOpenFileName(
+                dialog,
+                "Select Calibration Dataset YAML",
+                os.path.dirname(export_data_edit.text().strip()) or self._training_eval_dataset_dir(),
+                "Dataset YAML (*.yaml *.yml);;All Files (*)",
+            )
+            if file_name:
+                export_data_edit.setText(self.normalize_path(file_name))
+
+        def use_training_export_data():
+            candidate = self.normalize_path(
+                data_yaml_edit.text().strip()
+                or current_data_yaml
+                or self.settings.get("ultralyticsDataYamlPath", "")
+            )
+            if candidate and os.path.isfile(candidate):
+                export_data_edit.setText(candidate)
+                export_status.setText(f"Using training calibration dataset: {candidate}")
+            else:
+                QMessageBox.warning(
+                    dialog,
+                    "INT8 Calibration Dataset",
+                    "The current Train Setup does not contain an existing dataset YAML.",
+                )
+
+        def sync_legacy_export_state():
+            export_format = export_format_combo.currentText().strip()
+            precision = str(export_precision_combo.currentData() or "fp32")
+            self.settings.update({
+                "exportModelPath": self.normalize_path(export_checkpoint_edit.text().strip()),
+                "exportFormat": export_format,
+                "exportWidth": str(export_width_spin.value()),
+                "exportHeight": str(export_height_spin.value()),
+                "exportHalf": precision == "fp16",
+                "exportInt8": precision == "int8",
+                "exportUseGpu": bool(export_gpu_checkbox.isChecked()),
+                "exportDynamic": bool(export_dynamic_checkbox.isChecked()),
+                "exportSimplify": bool(export_simplify_checkbox.isChecked()),
+                "exportNms": bool(export_nms_checkbox.isChecked()),
+                "exportAgnosticNms": bool(export_agnostic_checkbox.isChecked()),
+                "exportBatchEnabled": bool(export_batch_checkbox.isChecked()),
+                "exportBatchSize": int(export_batch_spin.value()),
+                "exportConf": float(export_conf_spin.value()),
+                "exportIou": float(export_iou_spin.value()),
+            })
+            legacy_values = {
+                "imgsz_input_W": str(export_width_spin.value()),
+                "imgsz_input_H": str(export_height_spin.value()),
+            }
+            for name, value in legacy_values.items():
+                widget = getattr(self, name, None)
+                if isinstance(widget, QtWidgets.QLineEdit):
+                    widget.setText(value)
+            legacy_combo = getattr(self, "convert_model", None)
+            if isinstance(legacy_combo, QtWidgets.QComboBox):
+                index = legacy_combo.findText(export_format, Qt.MatchFixedString)
+                if index >= 0:
+                    legacy_combo.setCurrentIndex(index)
+            for name, checked in (
+                ("half_true", precision == "fp16"),
+                ("int8_true", precision == "int8"),
+                ("use_gpu_checkbox", export_gpu_checkbox.isChecked()),
+                ("dynamic_true", export_dynamic_checkbox.isChecked()),
+                ("simplify", export_simplify_checkbox.isChecked()),
+                ("nms_true_checkbox", export_nms_checkbox.isChecked()),
+                ("agnostic_checkbox", export_agnostic_checkbox.isChecked()),
+                ("batch_size_checkbox", export_batch_checkbox.isChecked()),
+            ):
+                widget = getattr(self, name, None)
+                if isinstance(widget, QtWidgets.QCheckBox):
+                    widget.setChecked(bool(checked))
+            for name, value in (
+                ("batch_input_spinbox", export_batch_spin.value()),
+                ("conf_spinbox", export_conf_spin.value()),
+                ("iou_spinbox", export_iou_spin.value()),
+            ):
+                widget = getattr(self, name, None)
+                if isinstance(widget, (QtWidgets.QSpinBox, QtWidgets.QDoubleSpinBox)):
+                    widget.setValue(value)
+            self.queue_settings_save()
+
+        def perform_trainer_export():
+            try:
+                sync_legacy_export_state()
+                params = self.build_ultralytics_export_params(
+                    export_format_combo.currentText(),
+                    export_width_spin.value(),
+                    export_height_spin.value(),
+                    use_gpu=export_gpu_checkbox.isChecked(),
+                    precision=export_precision_combo.currentData(),
+                    dynamic=export_dynamic_checkbox.isChecked(),
+                    simplify=export_simplify_checkbox.isChecked(),
+                    nms=export_nms_checkbox.isChecked(),
+                    agnostic_nms=export_agnostic_checkbox.isChecked(),
+                    confidence=export_conf_spin.value(),
+                    iou=export_iou_spin.value(),
+                    batch_enabled=export_batch_checkbox.isChecked(),
+                    batch=export_batch_spin.value(),
+                    data_yaml=export_data_edit.text().strip(),
+                )
+                export_button.setEnabled(False)
+                export_status.setText(
+                    f"Exporting {os.path.basename(export_checkpoint_edit.text().strip())} "
+                    f"to {export_format_combo.currentText()}..."
+                )
+                QApplication.setOverrideCursor(Qt.WaitCursor)
+                QApplication.processEvents()
+                output = self.run_ultralytics_export(export_checkpoint_edit.text().strip(), params)
+                export_state["output"] = output
+                export_open_output.setEnabled(bool(output and os.path.exists(output)))
+                export_status.setText(f"Export complete:\n{output}")
+                QMessageBox.information(dialog, "Export Complete", f"Exported model:\n{output}")
+            except Exception as e:
+                export_status.setText(f"Export failed: {e}")
+                QMessageBox.critical(dialog, "Export Failed", str(e))
+            finally:
+                QApplication.restoreOverrideCursor()
+                refresh_export_controls()
+
+        def open_export_output_folder():
+            output = self.normalize_path(export_state.get("output", ""))
+            if not output:
+                return
+            directory = output if os.path.isdir(output) else os.path.dirname(output)
+            if directory and os.path.isdir(directory):
+                os.startfile(directory)
+
+        export_checkpoint_browse.clicked.connect(browse_export_checkpoint)
+        export_checkpoint_use_run.clicked.connect(use_latest_export_checkpoint)
+        export_data_browse.clicked.connect(browse_export_data)
+        export_data_use_training.clicked.connect(use_training_export_data)
+        export_format_combo.currentIndexChanged.connect(lambda _index: refresh_export_controls())
+        export_precision_combo.currentIndexChanged.connect(lambda _index: refresh_export_controls())
+        export_batch_checkbox.toggled.connect(lambda _checked: refresh_export_controls())
+        export_nms_checkbox.toggled.connect(lambda _checked: refresh_export_controls())
+        export_checkpoint_edit.textChanged.connect(lambda _text: refresh_export_controls())
+        export_data_edit.textChanged.connect(lambda _text: refresh_export_controls())
+        export_button.clicked.connect(perform_trainer_export)
+        export_open_output.clicked.connect(open_export_output_folder)
+        refresh_export_controls()
+
         layout.addWidget(evaluator_tabs, 1)
 
         run_widgets = {
@@ -52269,18 +53144,22 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             "report_signature": None,
         }
 
-        def suggested_review_checkpoint():
+        def active_review_checkpoint():
+            selected = self.normalize_path(
+                train_model_edit.text().strip()
+                if use_training_weights.isChecked()
+                else eval_weights_edit.text().strip()
+            )
+            if selected:
+                return selected
+
             record = self._training_eval_latest_saved_run()
             run_dir = self.normalize_path((record or {}).get("run_dir", ""))
             for name in ("best.pt", "last.pt"):
                 candidate = self.normalize_path(os.path.join(run_dir, "weights", name))
                 if candidate and os.path.isfile(candidate):
                     return candidate
-            return self.normalize_path(eval_weights_edit.text().strip() or train_model_edit.text().strip())
-
-        initial_review_checkpoint = suggested_review_checkpoint()
-        if initial_review_checkpoint:
-            review_checkpoint_edit.setText(initial_review_checkpoint)
+            return ""
 
         def review_report_path_for(checkpoint, split):
             checkpoint = self.normalize_path(checkpoint)
@@ -52353,6 +53232,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 details.append(f"Status: {issue.get('review_status')}")
             if issue.get("detail"):
                 details.extend(["", str(issue.get("detail"))])
+            details.extend(["", self._validation_review_issue_guidance(issue.get("type"))])
             review_detail_label.setText("\n".join(details))
 
         def refresh_review_issue_table(select_issue_id=""):
@@ -52416,10 +53296,23 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 label.setText(f"{titles[key]}: {int(summary.get(key, 0) or 0)}")
             processed = int(report.get("processed_images", 0) or 0)
             total = int(report.get("total_images", 0) or 0)
+            dataset_total = int(report.get("dataset_total_images", total) or total)
             status = str(report.get("status", "") or "")
+            stage = str(report.get("stage", "") or "").replace("_", " ").strip().title()
             issue_count = len(report.get("issues", []) or [])
+            issue_images = int(report.get("issue_image_count", 0) or 0)
+            if not issue_images and issue_count:
+                issue_images = len({
+                    str(issue.get("image_path", ""))
+                    for issue in report.get("issues", []) or []
+                    if issue.get("image_path")
+                })
+            scan_scope = f"{processed:,}/{total:,} scanned"
+            if total < dataset_total:
+                scan_scope += f" (limited from {dataset_total:,})"
             review_status_label.setText(
-                f"{status.title() or 'Report'}: {processed}/{total} images · {issue_count} issues · "
+                f"{stage or status.title() or 'Report'}: {scan_scope} · "
+                f"{issue_count:,} issues on {issue_images:,} original images · "
                 f"{os.path.basename(str(report.get('model', '') or 'checkpoint'))}"
             )
 
@@ -52449,15 +53342,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             refresh_review_issue_table(selected_id)
             return True
 
-        def browse_review_checkpoint():
-            file_name = self.open_file_dialog("Select Validation Checkpoint", "Model Files (*.pt);;All Files (*)")
-            if file_name:
-                review_checkpoint_edit.setText(self.normalize_path(file_name))
-
         def browse_review_report():
             start_dir = os.path.dirname(
                 review_state.get("report_path")
-                or review_report_path_for(review_checkpoint_edit.text().strip(), review_split_combo.currentData())
+                or review_report_path_for(active_review_checkpoint(), review_split_combo.currentData())
             )
             file_name, _selected_filter = QFileDialog.getOpenFileName(
                 dialog,
@@ -52582,7 +53470,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             if os.path.isfile(report_path):
                 load_review_report(report_path)
             if exit_code == 0:
-                review_status_label.setText(review_status_label.text() + " · Analysis finished.")
+                review_status_label.setText(
+                    review_status_label.text()
+                    + " · Ready: select an issue, then click Open Original in Labeler."
+                )
             else:
                 review_status_label.setText(
                     f"Validation analysis stopped with exit code {exit_code}. "
@@ -52590,12 +53481,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 )
 
         def analyze_review_errors():
-            checkpoint = self.normalize_path(review_checkpoint_edit.text().strip() or suggested_review_checkpoint())
+            checkpoint = active_review_checkpoint()
             data_yaml = self.normalize_path(data_yaml_edit.text().strip())
             task = str(task_setup_combo.currentText() or "detect").strip().lower()
             split = str(review_split_combo.currentData() or "val")
             if not checkpoint or not os.path.isfile(checkpoint):
-                QMessageBox.warning(dialog, "Validation Review", "Select an existing .pt checkpoint first.")
+                QMessageBox.warning(dialog, "Validation Review", "Select an existing .pt model in Train Setup first.")
                 return
             if not data_yaml or not os.path.isfile(data_yaml):
                 QMessageBox.warning(dialog, "Validation Review", "Select an existing dataset YAML first.")
@@ -52655,7 +53546,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             review_analyze_btn.setEnabled(False)
             review_stop_btn.setEnabled(True)
             evaluator_tabs.setCurrentWidget(validation_review_tab)
-            review_status_label.setText("Validation error analysis is starting in a separate process...")
+            image_scope = "every original image" if int(review_limit_spin.value()) == 0 else (
+                f"the first {int(review_limit_spin.value()):,} original images"
+            )
+            review_status_label.setText(
+                f"Finding prediction/label disagreements across {image_scope} in the "
+                f"{str(review_split_combo.currentText()).lower()} split..."
+            )
             timer = review_state.get("timer")
             if timer is None:
                 timer = QTimer(dialog)
@@ -52691,7 +53588,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 list(review_state.get("visible_issues", []) or []),
             )
 
-        review_checkpoint_browse.clicked.connect(browse_review_checkpoint)
         review_analyze_btn.clicked.connect(analyze_review_errors)
         review_stop_btn.clicked.connect(stop_review_analysis)
         review_load_btn.clicked.connect(browse_review_report)
@@ -52717,7 +53613,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             candidates = [
                 self.normalize_path(self.settings.get("trainingValidationReviewLastReport", "")),
                 review_report_path_for(
-                    review_checkpoint_edit.text().strip(),
+                    active_review_checkpoint(),
                     review_split_combo.currentData(),
                 ),
             ]
@@ -53087,6 +53983,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 record.get("run_dir", ""),
                 record.get("log_path", ""),
                 message,
+                include_diagnosis=False,
             )
 
         latest_run_timer = QTimer(dialog)
@@ -53195,6 +54092,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             self._training_eval_set_activity_indicator(run_widgets, "running", "Working", "Evaluating dataset")
             status_label.setText("Evaluating dataset and preparing training recommendations...")
             QApplication.processEvents()
+
+            def show_evaluation_progress(message):
+                status_label.setText(str(message))
+                self._training_eval_set_activity_indicator(
+                    run_widgets, "running", "Working", str(message)
+                )
+                QApplication.processEvents()
+
             try:
                 result = self.evaluate_training_setup(
                     candidate_sizes=candidates_edit.text(),
@@ -53205,6 +54110,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                     validation_source=validation_source_edit.text().strip(),
                     validation_percent=validation_percent_combo.currentText(),
                     validation_source_percent=validation_source_percent_combo.currentText(),
+                    progress_callback=show_evaluation_progress,
                 )
                 self.training_evaluator_last_result = result
                 apply_result_to_training_controls(self.training_evaluator_last_result)
@@ -53314,9 +54220,93 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         def validate_weights(force_cpu=False):
             sync_settings()
-            result = ensure_evaluation_result()
-            if not result:
+            status_label.setText("Checking checkpoint and launching validation...")
+            self._training_eval_set_activity_indicator(
+                run_widgets, "running", "Working", "Preparing validation"
+            )
+            QApplication.processEvents()
+            selected_weights = self._effective_eval_weights_path(
+                use_training_weights.isChecked(),
+                eval_weights_edit.text().strip(),
+            )
+            if not selected_weights:
+                QMessageBox.warning(
+                    dialog,
+                    "Training Evaluator",
+                    "Select a model checkpoint before starting validation.",
+                )
+                self._training_eval_set_activity_indicator(
+                    run_widgets, "warning", "Needs attention", "No validation checkpoint selected"
+                )
                 return
+
+            weight_info = self.inspect_training_eval_weights(selected_weights)
+            if not weight_info.get("loaded"):
+                detail = str(weight_info.get("error") or "Unknown checkpoint load error")
+                message = (
+                    f"The selected checkpoint cannot be loaded:\n{selected_weights}\n\n{detail}\n\n"
+                    "The file may be incomplete or corrupt. If this is best.pt, try last.pt from "
+                    "the same weights folder."
+                )
+                QMessageBox.warning(dialog, "Invalid Validation Checkpoint", message)
+                status_label.setText(f"Validation not started: {os.path.basename(selected_weights)} could not be loaded.")
+                self._training_eval_set_activity_indicator(
+                    run_widgets, "error", "Error", "Checkpoint could not be loaded"
+                )
+                return
+
+            data_yaml = self.normalize_path(data_yaml_edit.text().strip())
+            yaml_data, _yaml_dir = self._training_health_parse_data_yaml(data_yaml)
+            yaml_names = yaml_data.get("names") if isinstance(yaml_data, dict) else None
+            if isinstance(yaml_names, (dict, list, tuple)):
+                dataset_class_count = len(yaml_names)
+            else:
+                try:
+                    dataset_class_count = int(yaml_data.get("nc", 0) or 0)
+                except (TypeError, ValueError):
+                    dataset_class_count = 0
+            checkpoint_class_count = int(weight_info.get("class_count", 0) or 0)
+            if checkpoint_class_count and dataset_class_count and checkpoint_class_count != dataset_class_count:
+                message = (
+                    f"The checkpoint and dataset do not match:\n\n"
+                    f"Checkpoint: {os.path.basename(selected_weights)} ({checkpoint_class_count} classes)\n"
+                    f"Dataset YAML: {data_yaml} ({dataset_class_count} classes)\n\n"
+                    "Select the obj.yaml that belongs to this checkpoint's dataset before validating."
+                )
+                QMessageBox.warning(dialog, "Checkpoint / Dataset Mismatch", message)
+                status_label.setText("Validation not started: checkpoint and dataset class counts do not match.")
+                self._training_eval_set_activity_indicator(
+                    run_widgets, "warning", "Needs attention", "Checkpoint / dataset mismatch"
+                )
+                return
+
+            # Validation does not need the expensive recommendation evaluator.
+            # Build its command directly from the visible, already-restored run
+            # settings so a large dataset is never scanned on the Qt UI thread.
+            model_task = str(weight_info.get("task", "") or "").strip().lower()
+            selected_task = model_task if model_task in {"detect", "segment", "classify", "pose", "obb"} else str(
+                task_setup_combo.currentText() or "detect"
+            ).strip().lower()
+            result = {
+                "data_yaml_path": data_yaml,
+                "image_count": 0,
+                "weight_info": weight_info,
+                "recommendations": {
+                    "data_yaml_path": data_yaml,
+                    "weights_path": selected_weights,
+                    "task": selected_task,
+                    "imgsz": int(imgsz_spin.value()),
+                    "batch": int(train_batch_spin.value()),
+                    "epochs": int(train_epochs_spin.value()),
+                    "patience": int(train_patience_spin.value()),
+                    "rect": bool(train_rect_checkbox.isChecked()),
+                    "freeze": int(train_freeze_spin.value()) if train_freeze_checkbox.isChecked() else 0,
+                    "amp": True,
+                    "train_args": [],
+                    "train_args_text": "",
+                },
+            }
+            self.training_evaluator_last_result = result
             try:
                 run_name = self._training_eval_baseline_run_name(result, force_cpu=force_cpu)
                 command = self.build_training_evaluator_command(result, mode="val", apply_optimized_args=False, run_name=run_name)
@@ -55092,6 +56082,86 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         logger.info("Training process finished.")
         self.process = None
 
+    def build_ultralytics_export_params(
+        self,
+        format_selected,
+        width,
+        height,
+        use_gpu=True,
+        precision="fp32",
+        dynamic=False,
+        simplify=False,
+        nms=False,
+        agnostic_nms=False,
+        confidence=0.25,
+        iou=0.7,
+        batch_enabled=False,
+        batch=1,
+        data_yaml="",
+    ):
+        """Build validated kwargs for the installed Ultralytics exporter."""
+        export_format = str(format_selected or "").strip().lower()
+        if not export_format:
+            raise ValueError("Choose an export format.")
+        width = self.parse_positive_int(width, "Export width")
+        height = self.parse_positive_int(height, "Export height")
+        precision = str(precision or "fp32").strip().lower()
+
+        params = {
+            "format": export_format,
+            "imgsz": [height, width],
+            "device": "0" if bool(use_gpu) and torch.cuda.is_available() else "cpu",
+        }
+
+        if precision == "fp16":
+            if not self.is_parameter_supported(export_format, "half"):
+                raise ValueError(f"{export_format} does not support FP16 export.")
+            params["quantize"] = 16
+        elif precision == "int8":
+            if not self.is_parameter_supported(export_format, "int8"):
+                raise ValueError(f"{export_format} does not support INT8 export.")
+            data_yaml = self.normalize_path(data_yaml)
+            if not data_yaml or not os.path.isfile(data_yaml):
+                raise ValueError("INT8 export requires an existing dataset YAML for calibration.")
+            params["quantize"] = 8
+            params["data"] = data_yaml
+        elif precision != "fp32":
+            raise ValueError(f"Unknown export precision: {precision}")
+
+        if bool(dynamic) and self.is_parameter_supported(export_format, "dynamic"):
+            params["dynamic"] = True
+        if bool(simplify) and self.is_parameter_supported(export_format, "simplify"):
+            params["simplify"] = True
+        if bool(batch_enabled) and self.is_parameter_supported(export_format, "batch"):
+            params["batch"] = max(1, int(batch))
+
+        if bool(nms):
+            if not self.is_parameter_supported(export_format, "nms"):
+                raise ValueError(f"{export_format} does not support embedded NMS.")
+            params.update({
+                "nms": True,
+                "conf": max(0.001, min(1.0, float(confidence))),
+                "iou": max(0.01, min(0.99, float(iou))),
+                "agnostic_nms": bool(agnostic_nms),
+            })
+        return params
+
+    def run_ultralytics_export(self, model_path, export_params):
+        """Load a PT checkpoint and export it with already validated parameters."""
+        model_path = self.normalize_path(model_path)
+        if not model_path or not os.path.isfile(model_path):
+            raise ValueError("Select an existing Ultralytics .pt checkpoint to export.")
+        if not model_path.lower().endswith(".pt"):
+            raise ValueError("Ultralytics export requires a .pt checkpoint.")
+
+        model = YOLO(model_path)
+        output = model.export(**dict(export_params or {}))
+        self.model = model
+        self.export_model_path = model_path
+        self.settings["exportModelPath"] = model_path
+        self.queue_settings_save()
+        return self.normalize_path(str(output))
+
     def load_model(self):
         home_directory = os.path.expanduser('~')
         fname, _ = QtWidgets.QFileDialog.getOpenFileName(self, 'Open file', home_directory, "Model files (*.pt *.onnx)")
@@ -55215,6 +56285,30 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             logger.error(f"Model export failed: {e}")
 
     def is_parameter_supported(self, format_selected, param):
+        export_format = str(format_selected or "").strip().lower()
+        parameter = str(param or "").strip().lower()
+        try:
+            from ultralytics.engine.exporter import (
+                FP16_FORMATS,
+                INT8_FORMATS,
+                export_formats,
+            )
+
+            if parameter == "half":
+                return export_format in FP16_FORMATS
+            if parameter == "int8":
+                return export_format in INT8_FORMATS
+
+            formats = export_formats()
+            arguments = list(formats.get("Argument", ()) or ())
+            supported = list(formats.get("Arguments", ()) or ())
+            if export_format in arguments:
+                index = arguments.index(export_format)
+                return parameter in set(supported[index] if index < len(supported) else ())
+        except Exception as e:
+            logger.debug("Could not read live Ultralytics export capabilities: %s", e)
+
+        # Compatibility fallback for older Ultralytics builds.
         supported_params = {
             'torchscript': {'imgsz', 'half', 'optimize', 'nms', 'batch', 'device'},
             'onnx': {'imgsz', 'half', 'dynamic', 'simplify', 'opset', 'nms', 'batch', 'device'},
@@ -55233,8 +56327,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             'rknn': {'imgsz', 'batch', 'name', 'device'}
         }
 
-        logger.debug(f"Checking if parameter '{param}' is supported for format '{format_selected}'")
-        return param in supported_params.get(format_selected, set())
+        logger.debug(f"Checking if parameter '{parameter}' is supported for format '{export_format}'")
+        return parameter in supported_params.get(export_format, set())
 
     def update_gui_elements(self, format_selected):
         self.half_true.setEnabled(self.is_parameter_supported(format_selected, 'half'))

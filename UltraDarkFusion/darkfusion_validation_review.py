@@ -408,13 +408,23 @@ def compare_image(image_path, task, class_names, ground_truth, predictions, matc
         ))
     for pred_index in sorted(unmatched_pred):
         pred = predictions[pred_index]
-        duplicate = any(
-            gt.get("class_id") == pred.get("class_id") and object_iou(gt, pred, task) >= match_iou
+        duplicate_matches = [
+            (object_iou(gt, pred, task), gt)
             for gt in ground_truth
-        )
+            if gt.get("class_id") == pred.get("class_id")
+            and object_iou(gt, pred, task) >= match_iou
+        ]
+        duplicate = bool(duplicate_matches)
+        duplicate_overlap, duplicate_gt = max(duplicate_matches, default=(None, None), key=lambda item: item[0])
         issue_type = "duplicate_prediction" if duplicate else "false_positive"
         issues.append(make_issue(
-            image_path, label_path, task, issue_type, pred=pred,
+            image_path,
+            label_path,
+            task,
+            issue_type,
+            gt=duplicate_gt,
+            pred=pred,
+            overlap=duplicate_overlap,
             detail="Prediction duplicates an already matched object." if duplicate else "Prediction was not matched to ground truth.",
         ))
     return issues
@@ -441,9 +451,11 @@ def main():
     parser.add_argument("--imgsz", type=int, default=640)
     parser.add_argument("--device", default="0")
     parser.add_argument("--max-images", type=int, default=0)
+    parser.add_argument("--chunk-size", type=int, default=256)
     args = parser.parse_args()
 
     images, class_names, _data = load_dataset(args.data, args.split)
+    dataset_total_images = len(images)
     if args.max_images > 0:
         images = images[: args.max_images]
     if not images:
@@ -467,47 +479,69 @@ def main():
         },
         "processed_images": 0,
         "total_images": len(images),
+        "dataset_total_images": dataset_total_images,
+        "scan_limit": max(0, int(args.max_images)),
+        "stage": "loading_model",
         "summary": {},
         "issues": [],
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
     write_report(normalized(args.output), report)
+    print(f"Loading {os.path.basename(args.model)} for {len(images)} images", flush=True)
 
     model = YOLO(normalized(args.model), task=args.task)
-    source = images[0] if len(images) == 1 else images
-    stream = model.predict(
-        source=source,
-        stream=True,
-        conf=max(0.001, min(1.0, args.conf)),
-        imgsz=max(32, int(args.imgsz)),
-        device=args.device,
-        save=False,
-        verbose=False,
-    )
+    report["stage"] = "reviewing_images"
+    write_report(normalized(args.output), report)
     counts = {}
-    for index, result in enumerate(stream, start=1):
-        image_path = normalized(result.path)
-        ground_truth = parse_ground_truth(image_path, args.task, class_names)
-        predictions = predictions_from_result(result, args.task, class_names)
-        issues = compare_image(
-            image_path,
-            args.task,
-            class_names,
-            ground_truth,
-            predictions,
-            max(0.0, min(1.0, args.match_iou)),
-            max(0.0, min(1.0, args.good_iou)),
+    processed = 0
+    chunk_size = max(1, min(2048, int(args.chunk_size or 256)))
+    for chunk_start in range(0, len(images), chunk_size):
+        chunk = images[chunk_start:chunk_start + chunk_size]
+        source = chunk[0] if len(chunk) == 1 else chunk
+        stream = model.predict(
+            source=source,
+            stream=True,
+            conf=max(0.001, min(1.0, args.conf)),
+            imgsz=max(32, int(args.imgsz)),
+            device=args.device,
+            save=False,
+            verbose=False,
         )
-        report["issues"].extend(issues)
-        for issue in issues:
-            counts[issue["type"]] = counts.get(issue["type"], 0) + 1
-        report["processed_images"] = index
-        report["summary"] = dict(sorted(counts.items()))
-        if index % 100 == 0:
-            write_report(normalized(args.output), report)
-            print(f"Reviewed {index}/{len(images)} images; {len(report['issues'])} issues", flush=True)
+        for result_index, result in enumerate(stream):
+            processed += 1
+            # Ultralytics converts a list of paths into PIL images internally and
+            # may expose synthetic result names such as ``image83.jpg``.  The
+            # prediction stream preserves source order, so retain the matching
+            # real dataset path instead of writing an unusable temporary name to
+            # the validation review report.
+            image_path = normalized(chunk[result_index]) if result_index < len(chunk) else normalized(result.path)
+            ground_truth = parse_ground_truth(image_path, args.task, class_names)
+            predictions = predictions_from_result(result, args.task, class_names)
+            issues = compare_image(
+                image_path,
+                args.task,
+                class_names,
+                ground_truth,
+                predictions,
+                max(0.0, min(1.0, args.match_iou)),
+                max(0.0, min(1.0, args.good_iou)),
+            )
+            report["issues"].extend(issues)
+            for issue in issues:
+                counts[issue["type"]] = counts.get(issue["type"], 0) + 1
+            report["processed_images"] = processed
+            report["summary"] = dict(sorted(counts.items()))
+            if processed % 100 == 0:
+                write_report(normalized(args.output), report)
+                print(f"Reviewed {processed}/{len(images)} images; {len(report['issues'])} issues", flush=True)
 
     report["status"] = "complete"
+    report["stage"] = "complete"
+    report["issue_image_count"] = len({
+        issue.get("image_path", "")
+        for issue in report["issues"]
+        if issue.get("image_path")
+    })
     report["completed_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
     report["elapsed_seconds"] = round(time.time() - started, 3)
     report["issues"].sort(key=lambda issue: (-float(issue.get("severity", 0.0)), issue.get("image_path", "")))
