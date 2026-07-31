@@ -3001,7 +3001,6 @@ class CustomGraphicsView(QGraphicsView):
     def _finalize_annotation_and_refresh(self, play_sound=True):
         img_width, img_height = self._get_image_dimensions()
         current_file = getattr(self.main_window, "current_file", None)
-        Ul
 
         if not current_file or not os.path.exists(current_file):
             logger.debug("Skipping save/refresh: no active dataset image.")
@@ -4050,6 +4049,8 @@ class BoundingBoxDrawer(QGraphicsRectItem):
             img_width,
             img_height,
         )
+        if hasattr(self.main_window, "refresh_annotation_preview_after_save"):
+            self.main_window.refresh_annotation_preview_after_save(self.main_window.current_file)
 
     def _try_sam_snap_edit_bbox(self):
         """
@@ -4469,6 +4470,8 @@ class KeypointDrawer(QGraphicsItem):
         if hasattr(self.main_window, "save_bounding_boxes") and self.main_window.is_keypoint_mode():
             img_width, img_height = self._get_image_dimensions()
             self.main_window.save_bounding_boxes(self.file_name, img_width, img_height)
+            if hasattr(self.main_window, "refresh_annotation_preview_after_save"):
+                self.main_window.refresh_annotation_preview_after_save(self.file_name)
 
     def update_points(self):
         for item in self.point_items:
@@ -4539,6 +4542,8 @@ class KeypointDrawer(QGraphicsItem):
                 img_width,
                 img_height
             )
+            if hasattr(self.main_window, "refresh_annotation_preview_after_save"):
+                self.main_window.refresh_annotation_preview_after_save(self.main_window.current_file)
 
 
 class SegmentationDrawer(QGraphicsPolygonItem):
@@ -5150,6 +5155,8 @@ class SegmentationDrawer(QGraphicsPolygonItem):
             self.main_window.image.width(),
             self.main_window.image.height(),
         )
+        if hasattr(self.main_window, "refresh_annotation_preview_after_save"):
+            self.main_window.refresh_annotation_preview_after_save(self.file_name)
 
         logger.info(f"Segmentation finalized and saved for {self.file_name}")
 
@@ -5187,6 +5194,8 @@ class SegmentationDrawer(QGraphicsPolygonItem):
             self.main_window.image.width(),
             self.main_window.image.height(),
         )
+        if hasattr(self.main_window, "refresh_annotation_preview_after_save"):
+            self.main_window.refresh_annotation_preview_after_save(self.file_name)
 
         if self.scene():
             self.scene().update()
@@ -35701,7 +35710,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 return False
 
             if hasattr(self, "preview_list"):
-                if not self.preview_list.isVisible():
+                # A preview widget inside an inactive tab reports isVisible() as
+                # false even when the user has enabled Preview. Do not let tab
+                # placement freeze its contents; keep the table synchronized so
+                # it is current as soon as the Preview tab is opened.
+                if not bool(self.settings.get("labelPreviewVisible", True)):
                     return False
 
                 if not self.preview_list.isEnabled():
@@ -42863,6 +42876,26 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             line_index += 1
 
         return len(annotation_items)
+
+    def refresh_annotation_preview_after_save(self, image_file=None):
+        """Synchronize annotation caches and the lazy Preview table after an in-place save."""
+        image_file = self.normalize_path(image_file or getattr(self, "current_file", ""))
+        current_file = self.normalize_path(getattr(self, "current_file", ""))
+        if (
+            not image_file
+            or not current_file
+            or image_file != current_file
+            or getattr(self, "_loading_image", False)
+        ):
+            return
+
+        scene = self.screen_view.scene()
+        self.sync_scene_annotation_cache(image_file)
+        self.update_blank_overlay_state(scene)
+        self.show_thumbnail_page(image_file, page=getattr(self, "current_page", 0))
+        if scene is not None:
+            scene.update()
+        self.screen_view.viewport().update()
 
     def scene_has_annotations(self, scene=None):
         if scene is None:
