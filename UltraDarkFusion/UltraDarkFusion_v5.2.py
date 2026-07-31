@@ -2737,6 +2737,10 @@ class CustomGraphicsView(QGraphicsView):
                 img_width,
                 img_height,
             )
+        if hasattr(self.main_window, "refresh_annotation_preview_after_save"):
+            self.main_window.refresh_annotation_preview_after_save(
+                self.main_window.current_file
+            )
 
     def _handle_keypoint_press(self, event, clicked_pos):
         if event.button() == Qt.RightButton:
@@ -20840,6 +20844,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if hasattr(self, "go_to_review_file_button"):
             self.go_to_review_file_button.clicked.connect(self.go_to_selected_review_file)
         self.preview_list.viewport().installEventFilter(self)
+        self.preview_list.verticalScrollBar().valueChanged.connect(
+            self._on_preview_scroll_value_changed
+        )
         self.rightClicked.connect(self.handle_right_click)
         self.leftClicked.connect(self.handle_left_click)
 
@@ -36021,6 +36028,69 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         max_page = max(0, (max(lines_count, 1) - 1) // page_size)
         return max(0, min(requested_page, max_page))
 
+    def _on_preview_scroll_value_changed(self, value):
+        """Append the next crop batch when the user reaches the bottom."""
+        if getattr(self, "_preview_loading_more", False):
+            return
+
+        scroll_bar = self.preview_list.verticalScrollBar()
+        if scroll_bar.maximum() <= 0 or value < scroll_bar.maximum() - 2:
+            return
+
+        if getattr(self, "_preview_loaded_count", 0) >= len(
+            getattr(self, "_preview_filtered_entries", [])
+        ):
+            return
+
+        QTimer.singleShot(0, self._append_next_preview_batch)
+
+    def _append_next_preview_batch(self):
+        if getattr(self, "_preview_loading_more", False):
+            return
+
+        entries = getattr(self, "_preview_filtered_entries", [])
+        loaded_count = int(getattr(self, "_preview_loaded_count", 0))
+        if loaded_count >= len(entries):
+            return
+
+        image_file = getattr(self, "_preview_batch_image_file", None)
+        pixmap = getattr(self, "_preview_batch_pixmap", None)
+        img_width = int(getattr(self, "_preview_batch_image_width", 0))
+        img_height = int(getattr(self, "_preview_batch_image_height", 0))
+        if not image_file or pixmap is None or pixmap.isNull():
+            return
+
+        batch_size = max(1, int(getattr(self, "page_size", 100)))
+        batch_end = min(len(entries), loaded_count + batch_size)
+        scroll_bar = self.preview_list.verticalScrollBar()
+        previous_value = scroll_bar.value()
+
+        self._preview_loading_more = True
+        self.preview_list.setUpdatesEnabled(False)
+        try:
+            for line_index, bbox in entries[loaded_count:batch_end]:
+                self._create_thumbnail_widget(
+                    image_file,
+                    bbox,
+                    line_index,
+                    img_width,
+                    img_height,
+                    pixmap,
+                )
+
+            self._preview_loaded_count = batch_end
+            self.current_page = max(0, (batch_end - 1) // batch_size)
+            self.preview_list.resizeRowsToContents()
+            self.setup_preview_list_style()
+        finally:
+            self.preview_list.setUpdatesEnabled(True)
+            self._preview_loading_more = False
+
+        scroll_bar.setValue(previous_value)
+        logger.info(
+            f"[preview] Loaded {batch_end}/{len(entries)} annotations for {image_file}"
+        )
+
     def delete_item(self, row, image_file, true_line_index):
         """Delete label and refresh preview cleanly from disk."""
         if self.is_placeholder_file(image_file):
@@ -36277,6 +36347,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         self.current_preview_image = image_file
         self.hide_preview_hover_zoom()
+        self._preview_filtered_entries = []
+        self._preview_loaded_count = 0
+        self._preview_batch_image_file = image_file
+        self._preview_batch_pixmap = None
+        self._preview_batch_image_width = 0
+        self._preview_batch_image_height = 0
 
         label_file = os.path.splitext(image_file)[0] + ".txt"
         lines = self.load_label_lines(label_file)
@@ -36316,8 +36392,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
             filtered_entries.append((line_index, bbox))
 
-        page = self._clamp_preview_page(len(filtered_entries), page)
-        self.current_page = page
+        self._preview_filtered_entries = filtered_entries
+        self._preview_batch_pixmap = pixmap
+        self._preview_batch_image_width = img_width
+        self._preview_batch_image_height = img_height
 
         scroll_position = self.preview_list.verticalScrollBar().value()
 
@@ -36327,24 +36405,22 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             logger.info(f"[preview] No visible labels for {image_file}")
             return
 
-        start = page * self.page_size
-        end = start + self.page_size
-        entries_page = filtered_entries[start:end]
-
-        if not entries_page:
-            self.preview_list.verticalScrollBar().setValue(0)
-            QApplication.processEvents()
-            logger.info(f"[preview] No visible labels for {image_file} on page {page}")
-            return
-
-        for line_index, bbox in entries_page:
+        batch_size = max(1, int(getattr(self, "page_size", 100)))
+        requested_batches = max(1, int(page) + 1)
+        load_count = min(len(filtered_entries), requested_batches * batch_size)
+        for line_index, bbox in filtered_entries[:load_count]:
             self._create_thumbnail_widget(image_file, bbox, line_index, img_width, img_height, pixmap)
 
+        self._preview_loaded_count = load_count
+        self.current_page = max(0, (load_count - 1) // batch_size)
         self.preview_list.resizeRowsToContents()
         self.setup_preview_list_style()
         self.preview_list.verticalScrollBar().setValue(scroll_position)
         QApplication.processEvents()
-        logger.info(f"[preview] Updated lazily for {image_file}, page {page}")
+        logger.info(
+            f"[preview] Updated lazily for {image_file}: "
+            f"{load_count}/{len(filtered_entries)} annotations loaded"
+        )
 
     def _run_debounced_thumbnail_page_now(self, image_file, page=0):
         """Run thumbnail display immediately without debounce."""
@@ -36352,6 +36428,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
     def load_label_lines(self, label_file):
         """Always return only valid, non-empty, stripped lines."""
+        if not label_file or not os.path.exists(label_file):
+            logger.debug(f"[load_label_lines] No label file yet: {label_file}")
+            return []
+
         try:
             with open(label_file, "r", encoding="utf-8") as f:
                 return [line.strip() for line in f if line.strip()]
@@ -36402,9 +36482,18 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             logger.info("Skipping thumbnail page for placeholder image")
             return
 
+        current_file = getattr(self, "current_file", None)
+        if (
+            current_file
+            and self.normalize_path(current_file) == self.normalize_path(image_file)
+        ):
+            # Keep the display-owned spelling of the path so Preview rows,
+            # scene items, and current_file all refer to the same image string.
+            image_file = current_file
+
         self._pending_thumbnail_args = (image_file, page)
 
-        if hasattr(self, "current_file") and self.current_file == image_file:
+        if current_file and self.normalize_path(current_file) == self.normalize_path(image_file):
             self._run_debounced_thumbnail_page_now(image_file, page)
         else:
             self._thumbnail_timer.start(80)
@@ -36422,11 +36511,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if getattr(self, "review_mode", False):
             return
 
-        if image_file != getattr(self, "current_file", None):
+        current_file = getattr(self, "current_file", None)
+        if self.normalize_path(image_file) != self.normalize_path(current_file):
             logger.info(f"[show_thumbnail_page] Skipped update: {image_file} (current is {self.current_file})")
             return
 
-        self._populate_preview_list_for_image(image_file, page)
+        self._populate_preview_list_for_image(current_file or image_file, page)
 
 
     def _selected_review_preview_row(self):
@@ -36560,8 +36650,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.highlight_thumbnail(row)
 
         if self.hide_labels:
-            self.hide_labels = False
-            self.toggle_label_visibility()
+            self.toggle_label_visibility(False)
 
         bounding_box_item = self.preview_list.item(row, 4)
         if bounding_box_item:
@@ -36583,9 +36672,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         found = False
 
-        bbox_unique_id = f"{image_file}_{bbox_index}"
-        seg_unique_id = f"{image_file}_seg_{bbox_index}"
-        obb_unique_id = f"{image_file}_obb_{bbox_index}"
+        normalized_image_file = self.normalize_path(image_file)
+        bbox_unique_id = f"{normalized_image_file}_{bbox_index}"
+        seg_unique_id = f"{normalized_image_file}_seg_{bbox_index}"
+        obb_unique_id = f"{normalized_image_file}_obb_{bbox_index}"
 
         for item in self.screen_view.scene().items():
             if not hasattr(item, "unique_id"):
@@ -36894,6 +36984,15 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             self.review_button.setText("Pause Preview")
             self.preview_list.setEnabled(True)
             logger.info("Review mode disabled: thumbnail view enabled.")
+            current_file = getattr(self, "current_file", None)
+            if current_file and not self.is_placeholder_file(current_file):
+                QTimer.singleShot(
+                    0,
+                    lambda path=current_file: self.show_thumbnail_page(
+                        path,
+                        page=getattr(self, "current_page", 0),
+                    ),
+                )
 
     def setup_preview_list_style(self):
         table = self.preview_list
@@ -42388,7 +42487,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 current_row_count = self.preview_list.rowCount()
                 first_item = self.preview_list.item(0, 0) if current_row_count > 0 else None
 
-                if current_row_count == 0 or first_item is None or first_item.text() != file_name:
+                preview_file = first_item.data(Qt.UserRole) if first_item is not None else ""
+                if (
+                    current_row_count == 0
+                    or first_item is None
+                    or self.normalize_path(preview_file) != self.normalize_path(file_name)
+                ):
                     self.show_thumbnail_page(file_name, page=page)
                 else:
                     logger.debug("Skipping preview rebuild: already up to date.")
@@ -42879,8 +42983,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
     def refresh_annotation_preview_after_save(self, image_file=None):
         """Synchronize annotation caches and the lazy Preview table after an in-place save."""
-        image_file = self.normalize_path(image_file or getattr(self, "current_file", ""))
-        current_file = self.normalize_path(getattr(self, "current_file", ""))
+        current_file_path = getattr(self, "current_file", "")
+        image_file = self.normalize_path(image_file or current_file_path)
+        current_file = self.normalize_path(current_file_path)
         if (
             not image_file
             or not current_file
@@ -42890,9 +42995,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             return
 
         scene = self.screen_view.scene()
-        self.sync_scene_annotation_cache(image_file)
+        self.sync_scene_annotation_cache(current_file_path)
         self.update_blank_overlay_state(scene)
-        self.show_thumbnail_page(image_file, page=getattr(self, "current_page", 0))
+        self.show_thumbnail_page(current_file_path, page=getattr(self, "current_page", 0))
         if scene is not None:
             scene.update()
         self.screen_view.viewport().update()
