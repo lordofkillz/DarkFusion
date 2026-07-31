@@ -19250,13 +19250,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         preview.setLineWidth(0)
         preview.setMidLineWidth(0)
         preview.setAlignment(Qt.AlignCenter)
-        preview.setScaledContents(True)
-        preview.setFixedSize(72, 48)
-        preview.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+        preview.setScaledContents(False)
+        preview.setMinimumSize(120, 90)
+        preview.setMaximumSize(360, 220)
+        preview.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        preview.installEventFilter(self)
 
         top_row.addWidget(button)
         top_row.addWidget(progress, 1)
-        top_row.addWidget(preview, 0, Qt.AlignVCenter)
         console = widgets["console"]
         if console is not None:
             console.clear()
@@ -19430,8 +19431,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         body_line = QtWidgets.QHBoxLayout()
         body_line.setContentsMargins(0, 0, 0, 0)
         body_line.setSpacing(10)
-        body_line.addWidget(controls_panel, 1)
+        body_line.addWidget(controls_panel, 3)
         body_line.addStretch(1)
+
+        preview = getattr(self, "image_label_2", None)
+        if preview is not None:
+            body_line.addWidget(preview, 0, Qt.AlignRight | Qt.AlignVCenter)
 
         panel_layout.addLayout(body_line)
         panel_layout.addStretch(1)
@@ -19451,7 +19456,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         size = label.size()
         if size.width() <= 0 or size.height() <= 0:
-            size = QtCore.QSize(72, 48)
+            size = QtCore.QSize(180, 120)
 
         source_size = movie.frameRect().size()
         if source_size.width() > 0 and source_size.height() > 0:
@@ -21487,8 +21492,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                     "Advanced": "CFG editing and anchor tools.",
                 },
             )
-            label_index = self.tab_index_by_text(main_tabs, ("Label",))
-            main_tabs.setCurrentIndex(label_index if label_index >= 0 else 0)
+            collect_index = self.tab_index_by_text(main_tabs, ("Collect",))
+            main_tabs.setCurrentIndex(collect_index if collect_index >= 0 else 0)
             main_tabs.currentChanged.connect(self.on_main_workflow_tab_changed)
 
         self.rename_tab(labeling_tabs, "Extras", "ROI / Extras")
@@ -35848,6 +35853,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
     def eventFilter(self, source, event):
         try:
+            if source is getattr(self, "image_label_2", None):
+                if event.type() == QEvent.Resize:
+                    QTimer.singleShot(0, self._scale_status_gif)
+                return False
+
             if source is getattr(self, "classes_dropdown", None):
                 if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
                     self.show_class_picker_popup()
@@ -37122,13 +37132,85 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             return
 
         else:
-            # Append to buffer for multi-key handling
-            self.keyBuffer += key
+            normalized_key = normalize_keybind_value(key)
+            if not normalized_key:
+                super().keyPressEvent(event)
+                return
 
-            # Restart timer every keystroke (for combos like "11", "a1", etc.)
+            configured_bindings = {
+                normalize_keybind_value(value)
+                for _setting, _label, value in self.keybind_entries()
+                if normalize_keybind_value(value)
+            }
+            class_bindings = {
+                normalize_keybind_value(
+                    getattr(self, "settings", {}).get(class_hotkey_key(class_name), "")
+                )
+                for class_name in self.current_keybind_class_names()
+            }
+            class_bindings.discard("")
+
+            # Holding a class key should not manufacture a multi-key sequence
+            # from keyboard auto-repeat (for example, zzz or 111).
+            if event.isAutoRepeat() and any(
+                binding.startswith(normalized_key) for binding in class_bindings
+            ):
+                event.accept()
+                return
+
+            if self.keyBuffer:
+                candidate = normalize_keybind_value(self.keyBuffer + normalized_key)
+                candidate_is_exact = candidate in configured_bindings
+                candidate_has_longer_match = any(
+                    binding.startswith(candidate) and binding != candidate
+                    for binding in configured_bindings
+                )
+
+                # An already-started valid sequence takes precedence over a
+                # single-key binding. This keeps 12 working even if 2 is also
+                # configured as its own shortcut.
+                if candidate_is_exact and not candidate_has_longer_match:
+                    self.keyBuffer = candidate
+                    self.processKeyPresses()
+                    event.accept()
+                    return
+
+                if candidate_is_exact or candidate_has_longer_match:
+                    self.keyBuffer = candidate
+                    if self.timer.isActive():
+                        self.timer.stop()
+                    self.timer.start(300)
+                    event.accept()
+                    return
+
+                # The old prefix and this key cannot form a configured
+                # shortcut. Discard that incomplete prefix and evaluate this
+                # key as the beginning of a fresh shortcut.
+                self.keyBuffer = ""
+
+            single_is_exact = normalized_key in configured_bindings
+            single_has_longer_match = any(
+                binding.startswith(normalized_key) and binding != normalized_key
+                for binding in configured_bindings
+            )
+
+            # Exact single-key bindings such as Z and X must fire immediately.
+            # Previously every key waited 300 ms, so rapid Z then X became the
+            # invalid combined shortcut "zx" and neither class was selected.
+            if single_is_exact and not single_has_longer_match:
+                self.keyBuffer = normalized_key
+                self.processKeyPresses()
+                event.accept()
+                return
+
+            self.keyBuffer = normalized_key
+
+            # Only ambiguous prefixes (such as 1 when 12 and 13 exist) need
+            # the short wait used for multi-key hotkeys.
             if self.timer.isActive():
                 self.timer.stop()
-            self.timer.start(300)  # Adjust timeout as needed
+            self.timer.start(300)
+            event.accept()
 
     def keyReleaseEvent(self, event):
         setting_key = self.keybind_setting_for_text(
