@@ -9895,7 +9895,7 @@ class Ui_mainWindow(object):
         self.zoom_lock.setToolTip(_translate("mainWindow", "Keep the current zoom and view position while moving between images."))
         self.zoom_lock.setText(_translate("mainWindow", "Zoom Lock"))
         self.label_53.setText(_translate("mainWindow", "Min Box Size"))
-        self.rapid_del_checkbox.setToolTip(_translate("mainWindow", "Enable repeated image deletion while holding the delete control."))
+        self.rapid_del_checkbox.setToolTip(_translate("mainWindow", "Hold right-click over annotations to remove them repeatedly. The image Delete button removes one image per click."))
         self.rapid_del_checkbox.setText(_translate("mainWindow", "Rapid Delete"))
         self.shade.setText(_translate("mainWindow", "Label Opacity"))
         self.box_size.setToolTip(_translate("mainWindow", "Set the minimum allowed bounding box size when drawing or saving labels."))

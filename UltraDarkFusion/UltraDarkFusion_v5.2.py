@@ -1182,9 +1182,6 @@ DEFAULT_KEYBINDS = OrderedDict((
     ("autoLabel", "l"),
 ))
 
-DEFAULT_NAVIGATION_DOUBLE_TAP_JUMP = 10
-NAVIGATION_DOUBLE_TAP_WINDOW_MS = 300
-
 PROJECT_SETTING_PREFIXES = (
     CLASS_HOTKEY_PREFIX,
     "classColor_",
@@ -3719,9 +3716,6 @@ class BoundingBoxDrawer(QGraphicsRectItem):
         self.alternate_flash_color = QColor(0, 0, 255)
         self.flash_timer = QTimer()
         self.flash_timer.timeout.connect(self.toggle_flash_color)
-        self.scroll_timer = QTimer()
-        self.scroll_timer.setSingleShot(True)
-        self.scroll_timer.timeout.connect(self.stop_flashing)
 
         self.normalize_rect()
         self.update_bbox()
@@ -5515,9 +5509,6 @@ class OBBDrawer(QGraphicsPolygonItem):
         self.alternate_flash_color = QColor(0, 0, 255)
         self.flash_timer = QTimer()
         self.flash_timer.timeout.connect(self.toggle_flash_color)
-        self.scroll_timer = QTimer()
-        self.scroll_timer.setSingleShot(True)
-        self.scroll_timer.timeout.connect(self.stop_flashing)
 
 
         self.class_name_item.setZValue(6)
@@ -6910,41 +6901,12 @@ class SettingsDialog(QtWidgets.QDialog):
                 form.addRow(label, field)
                 self.inputs[key] = field
 
-            if group_title == "Navigation":
-                try:
-                    saved_jump = int(
-                        self.parent().settings.get(
-                            "navigationDoubleTapJump",
-                            DEFAULT_NAVIGATION_DOUBLE_TAP_JUMP,
-                        )
-                    )
-                except (TypeError, ValueError):
-                    saved_jump = DEFAULT_NAVIGATION_DOUBLE_TAP_JUMP
-                self.navigation_double_tap_jump_spinbox = QtWidgets.QSpinBox(group)
-                self.navigation_double_tap_jump_spinbox.setRange(2, 100000)
-                self.navigation_double_tap_jump_spinbox.setSingleStep(10)
-                self.navigation_double_tap_jump_spinbox.setAccelerated(True)
-                self.navigation_double_tap_jump_spinbox.setValue(max(2, min(100000, saved_jump)))
-                self.navigation_double_tap_jump_spinbox.setToolTip(
-                    "Double-tap Next/Previous to move this many images. "
-                    "Hold the second tap to repeat this jump."
-                )
-                self.navigation_double_tap_jump_spinbox.valueChanged.connect(
-                    self.save_navigation_double_tap_jump
-                )
-                form.addRow("Double-tap image jump", self.navigation_double_tap_jump_spinbox)
-
             layout.addWidget(group)
 
         self.rebuild_hotkeys_ui()
         self.refresh_keybind_conflict_warnings()
 
         layout.addStretch()
-
-    def save_navigation_double_tap_jump(self, value):
-        value = max(2, min(100000, int(value)))
-        self.parent().settings["navigationDoubleTapJump"] = value
-        self.parent().saveSettings()
 
     def rebuild_hotkeys_ui(self):
         self.classHotkeyInputs.clear()
@@ -20664,7 +20626,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.label_log_handler.setFormatter(logging.Formatter("%(message)s"))
         self.logger.addHandler(self.label_log_handler)
 
-        self.console_output_timer = None
         self._setup_cuda_monitor_button()
         self.histogram_plot.triggered.connect(lambda: self.create_plot('histogram'))
         self.bar_plot.triggered.connect(lambda: self.create_plot('bar'))
@@ -20693,18 +20654,18 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         # --- Image navigation and delete controls ---
         self.img_video_button.triggered.connect(self.open_image_video)
-        self.next_button.clicked.connect(self.next_frame)
+        self.next_button.pressed.connect(self.next_frame)
+        self.next_button.released.connect(self.on_next_button_released)
         self.next_timer = QTimer(self)
         self.next_timer.timeout.connect(self.next_frame)
-        self.next_button.pressed.connect(self.start_next_timer)
-        self.next_button.released.connect(self.stop_next_timer)
         self.timmer_speed.valueChanged.connect(self.update_timer_speed)
         self.timer_interval = self.timmer_speed.value()
-        self.previous_button.clicked.connect(self.previous_frame)
+        self.previous_button.pressed.connect(self.previous_frame)
+        self.previous_button.released.connect(self.on_previous_button_released)
         self.prev_timer = QTimer(self)
         self.prev_timer.timeout.connect(self.previous_frame)
-        self.previous_button.pressed.connect(self.start_prev_timer)
-        self.previous_button.released.connect(self.stop_prev_timer)
+        self.scan_direction = None
+        self.auto_scan_checkbox.toggled.connect(self.toggle_auto_scan)
         self.navigation_busy = False
 
         # --- Annotation class controls and model thresholds ---
@@ -20712,9 +20673,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.add_item_signal[str].connect(self.add_item_to_classes_dropdown)
         self.classes_dropdown.currentIndexChanged.connect(self.change_class_id)
         self._highlighted_row = None
-        self.auto_save_timer = QTimer(self)
-        self.auto_save_timer.timeout.connect(self.auto_save_bounding_boxes)
-        # self.auto_save_timer.start(10000)  # disabled by default
         self.weights_file = None
         self.cfg_file = None
         self.weights_files = []
@@ -20737,11 +20695,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         # --- Crop and manual delete actions ---
         self.crop_img_button.clicked.connect(self.crop_images)
 
-        self.delete_timer = QTimer(self)
-        self.delete_timer.setInterval(100)  # The interval in milliseconds
-        self.delete_timer.timeout.connect(self.delete_current_image)
-        self.delete_button.pressed.connect(self.delete_timer.start)
-        self.delete_button.released.connect(self.delete_timer.stop)
+        self.delete_button.clicked.connect(self.delete_current_image)
 
         self.image_list = []
         self.class_to_id = {}
@@ -20912,19 +20866,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.playback_extraction_enabled = True  # Default true
         self.setup_mss()
 
-        # Video seek timers.
-        self.forward_timer = QTimer(self)
-        self.backward_timer = QTimer(self)
-
-        self.forward_timer.setInterval(100)
-        self.backward_timer.setInterval(100)
-
-        self.forward_button.clicked.connect(self.skip_forward)        # single press
-        self.forward_timer.timeout.connect(self.skip_forward)         # hold press
-
-
+        # Video playback speed controls.
+        self.forward_button.clicked.connect(self.skip_forward)
         self.back_button.clicked.connect(self.skip_backward)
-        self.backward_timer.timeout.connect(self.skip_backward)
 
         self.video_slider.setEnabled(False)  # Disabled until video is loaded
         self.video_slider.sliderReleased.connect(self.slider_seek)
@@ -21178,11 +21122,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         # --- Keyboard shortcuts and display filters ---
         self.class_colors = []
         self.keyBuffer = ""
-        self.keyTime = time.time()
-        self._navigation_tap_state = {
-            "nextButton": {"last_physical_press_ms": 0.0, "jump_hold_active": False},
-            "previousButton": {"last_physical_press_ms": 0.0, "jump_hold_active": False},
-        }
 
         self.timer = QTimer(self)
         self.timer.setSingleShot(True)
@@ -21704,7 +21643,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             ),
             "rapid_del_checkbox": (
                 "Rapid Del",
-                "Enable repeated image deletion while holding the delete control.",
+                "Hold right-click over annotations to remove them repeatedly. The image Delete button always removes one image per click.",
             ),
             "auto_scan_checkbox": (
                 "Auto Scan",
@@ -22042,18 +21981,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         return None
 
-    def navigation_double_tap_jump(self):
-        try:
-            value = int(
-                getattr(self, "settings", {}).get(
-                    "navigationDoubleTapJump",
-                    DEFAULT_NAVIGATION_DOUBLE_TAP_JUMP,
-                )
-            )
-        except (TypeError, ValueError):
-            value = DEFAULT_NAVIGATION_DOUBLE_TAP_JUMP
-        return max(2, min(100000, value))
-
     @staticmethod
     def _navigation_direction_sign(setting_key):
         if setting_key == "nextButton":
@@ -22080,61 +22007,18 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         return bool(moved)
 
     def handle_navigation_key_press(self, setting_key, event):
-        """
-        Single press/hold moves one image per repeat. A second physical press
-        inside the double-tap window completes the configured jump; holding that
-        second press repeats the configured jump on each OS key-repeat event.
-        """
+        """Move one image for each normal key press or OS key-repeat event."""
         if setting_key not in ("nextButton", "previousButton"):
             return False
 
         if event.modifiers() != Qt.NoModifier:
-            return self.run_navigation_keybind(setting_key, event.modifiers(), auto_scan=False)
+            return False
 
-        states = getattr(self, "_navigation_tap_state", None)
-        if not isinstance(states, dict):
-            states = {}
-            self._navigation_tap_state = states
-        state = states.setdefault(
-            setting_key,
-            {"last_physical_press_ms": 0.0, "jump_hold_active": False},
-        )
-
-        if event.isAutoRepeat():
-            amount = self.navigation_double_tap_jump() if state.get("jump_hold_active") else 1
-            self._run_navigation_offset(setting_key, amount)
-            return True
-
-        now_ms = time.monotonic() * 1000.0
-        last_press_ms = float(state.get("last_physical_press_ms", 0.0) or 0.0)
-        is_double_tap = (
-            last_press_ms > 0.0
-            and (now_ms - last_press_ms) <= NAVIGATION_DOUBLE_TAP_WINDOW_MS
-        )
-        # Consume taps in pairs. A rapid third tap starts a new single-tap
-        # sequence instead of being paired again with the second tap.
-        state["last_physical_press_ms"] = 0.0 if is_double_tap else now_ms
-        state["jump_hold_active"] = bool(is_double_tap)
-
-        if is_double_tap:
-            # The first tap already moved one image, so move jump-1 now. The total
-            # displacement for the double tap is exactly the configured value.
-            self._run_navigation_offset(
-                setting_key,
-                max(1, self.navigation_double_tap_jump() - 1),
-            )
-        else:
-            self._run_navigation_offset(setting_key, 1)
+        self._run_navigation_offset(setting_key, 1)
         return True
 
     def handle_navigation_key_release(self, setting_key, event):
-        if setting_key not in ("nextButton", "previousButton"):
-            return False
-        if not event.isAutoRepeat():
-            state = getattr(self, "_navigation_tap_state", {}).get(setting_key)
-            if isinstance(state, dict):
-                state["jump_hold_active"] = False
-        return True
+        return setting_key in ("nextButton", "previousButton")
 
     def run_navigation_keybind(self, setting_key, modifiers=Qt.NoModifier, auto_scan=False, stop_timers=True):
         if setting_key == "nextButton":
@@ -22147,10 +22031,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                     self.start_next_timer()
                 return True
 
-            if modifiers == Qt.ControlModifier:
-                self._run_navigation_offset("nextButton", self.navigation_double_tap_jump())
-                return True
-
         if setting_key == "previousButton":
             if modifiers == Qt.NoModifier:
                 if stop_timers:
@@ -22159,10 +22039,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 self.previous_frame()
                 if auto_scan and self.auto_scan_checkbox.isChecked():
                     self.start_prev_timer()
-                return True
-
-            if modifiers == Qt.ControlModifier:
-                self._run_navigation_offset("previousButton", self.navigation_double_tap_jump())
                 return True
 
         if setting_key == "deleteButton":
@@ -22266,6 +22142,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if project_settings:
             settings.update(project_settings)
 
+        # Removed navigation feature: discard the obsolete persisted value so
+        # the next settings save also cleans it from the user's configuration.
+        settings.pop("navigationDoubleTapJump", None)
+
         if not project_settings.get("classVisibility") and isinstance(app_settings.get("globalClassVisibility"), dict):
             settings["classVisibility"] = dict(app_settings.get("globalClassVisibility") or {})
         if not project_settings.get("activeClassName") and app_settings.get("globalActiveClassName"):
@@ -22312,7 +22192,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             'anchors': [],
             'batchSize': 1000,
             **DEFAULT_KEYBINDS,
-            'navigationDoubleTapJump': DEFAULT_NAVIGATION_DOUBLE_TAP_JUMP,
             'panOverlayFreePan': True,
             'panOverlayLocked': False,
             'panOverlayAlwaysShow': False,
@@ -24105,7 +23984,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.stop_video_reader_thread()
         self.stop_video_inference_thread()
 
-        for timer_attr in ("timer2", "forward_timer", "backward_timer"):
+        for timer_attr in ("timer2",):
             timer = getattr(self, timer_attr, None)
             if timer is None:
                 continue
@@ -24228,12 +24107,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             "process_timer",
             "next_timer",
             "prev_timer",
-            "delete_timer",
-            "forward_timer",
-            "backward_timer",
-            "auto_save_timer",
             "icon_timer",
-            "console_output_timer",
             "timer",
         ):
             self._stop_and_delete_timer(attr_name)
@@ -37328,10 +37202,19 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
             self._overlay_text_item = None
 
-        self._overlay_timer = QTimer(self)
-        self._overlay_timer.setSingleShot(True)
-        self._overlay_timer.timeout.connect(remove_overlay)
-        self._overlay_timer.start(duration)
+        timer = getattr(self, "_overlay_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            self._overlay_timer = timer
+        else:
+            try:
+                timer.timeout.disconnect()
+            except (TypeError, RuntimeError):
+                pass
+
+        timer.setSingleShot(True)
+        timer.timeout.connect(remove_overlay)
+        timer.start(duration)
 
     # all part of the auto label function.
 
@@ -42451,12 +42334,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         return inter_area / union_area if union_area else 0.0
 
-    def start_delete_timer(self):
-        self.delete_timer.start()
-
-    def stop_delete_timer(self):
-        self.delete_timer.stop()
-
     def delete_current_image(self):
         if self.current_file is None:
             return
@@ -44380,49 +44257,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
             scene.update()
 
-    def auto_save_bounding_boxes(self):
-        if getattr(self, "navigation_busy", False):
-            return
-
-        if getattr(self, "_loading_image", False):
-            return
-
-        if getattr(self, "_saving_labels", False):
-            return
-
-        if not getattr(self, "annotation_scene_active", True):
-            return
-
-        image_file = getattr(self, "current_file", None)
-        if not image_file or self.is_placeholder_file(image_file):
-            return
-
-        scene = self.screen_view.scene()
-        if scene is None:
-            return
-
-        items = scene.items()
-        rects = [item for item in items if isinstance(item, BoundingBoxDrawer)]
-        segmentations = [item for item in items if isinstance(item, SegmentationDrawer)]
-        obbs = [item for item in items if isinstance(item, OBBDrawer)]
-
-        if not rects and not segmentations and not obbs:
-            return
-
-        total_kpts = self.keypoint_list.rowCount()
-        for rect in rects:
-            drawer = getattr(rect, "keypoint_drawer", None)
-            if drawer and len(drawer.visibility_flags) < total_kpts:
-                return
-
-        self._saving_labels = True
-        try:
-            self.save_bounding_boxes(image_file, scene.width(), scene.height(), log_save=False)
-        except Exception as e:
-            logger.error(f"Failed auto-save for {image_file}: {e}")
-        finally:
-            self._saving_labels = False
-
     def save_bounding_boxes(
         self,
         image_file,
@@ -45049,8 +44883,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         # Navigate to the next frame
         self.navigate_frame('next')
 
-        # Restart scanning if auto_scan is checked and not at the end
-        if self.auto_scan_checkbox.isChecked():
+        # Continue while the button is physically held, or while Auto Scan is
+        # armed. Navigation advances one image per timer tick in either case.
+        if self.auto_scan_checkbox.isChecked() or self.next_button.isDown():
             self.start_next_timer()
 
     def previous_frame(self):
@@ -45064,9 +44899,16 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         # Navigate to the previous frame
         self.navigate_frame('previous')
 
-        # Restart scanning if auto_scan is checked and not at the beginning
-        if self.auto_scan_checkbox.isChecked():
+        if self.auto_scan_checkbox.isChecked() or self.previous_button.isDown():
             self.start_prev_timer()
+
+    def on_next_button_released(self):
+        if not self.auto_scan_checkbox.isChecked():
+            self.stop_next_timer()
+
+    def on_previous_button_released(self):
+        if not self.auto_scan_checkbox.isChecked():
+            self.stop_prev_timer()
 
     def update_timer_speed(self, value):
         # Update the timer interval based on the slider's value
@@ -45097,13 +44939,15 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
     def toggle_auto_scan(self, state):
         if state:
-            # Start scanning in the current direction
-            if self.scan_direction == 'next':
+            # Auto Scan is armed immediately, but waits for the user to choose
+            # a direction with Next or Previous when no direction exists yet.
+            direction = getattr(self, "scan_direction", None)
+            if direction == 'next':
                 self.start_next_timer()
-            elif self.scan_direction == 'previous':
+            elif direction == 'previous':
                 self.start_prev_timer()
         else:
-            # Stop any active scanning
+            # Turning Auto Scan off must stop movement immediately.
             self.stop_next_timer()
             self.stop_prev_timer()
 

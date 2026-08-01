@@ -2307,7 +2307,7 @@ QCheckBox::indicator:checked {
                           </size>
                          </property>
                          <property name="toolTip">
-                          <string>Enable repeated image deletion while holding the delete control.</string>
+                          <string>Hold right-click over annotations to remove them repeatedly. The image Delete button removes one image per click.</string>
                          </property>
                          <property name="autoFillBackground">
                           <bool>false</bool>
