@@ -1302,7 +1302,12 @@ def run_groundingdino(
     if class_names:
         class_names = [str(name).strip().lower() for name in class_names if str(name).strip()]
     else:
-        classes_file = Path(image_directory_path) / "classes.txt"
+        dataset_path = Path(image_directory_path)
+        classes_file = dataset_path / ".darkfusion" / "classes.txt"
+        if not classes_file.exists():
+            # Compatibility with datasets that have not been opened and
+            # migrated by DarkFusion yet.
+            classes_file = dataset_path / "classes.txt"
         if not classes_file.exists():
             logger.error("Missing classes file: %s", classes_file)
             _restore_runtime_overrides()

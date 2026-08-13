@@ -1,23 +1,24 @@
-# UltraDarkFusion v5.2 - Windows / NVIDIA CUDA 12.8 environment
+# DarkFusion clean reinstall requirements for the conda env named "fusion".
 #
-# Supported setup:
+# Recommended fresh install:
 #   conda create -n fusion python=3.12 -y
 #   conda activate fusion
 #   set PYTHONNOUSERSITE=1
 #   python -m pip install --upgrade pip setuptools wheel
 #   python -m pip install --no-user -r requirements.txt
 #
-# PyTorch CUDA wheels and NVIDIA TensorRT packages use these additional
-# indexes. PyPI remains the primary index for every other dependency.
+# Keep --no-user in the install command so packages land in the active fusion
+# env instead of C:\Users\jason\AppData\Roaming\Python.
+
 --extra-index-url https://download.pytorch.org/whl/cu128
 --extra-index-url https://pypi.ngc.nvidia.com
 
-# Installation/build helpers
+# Build helpers used by direct ML packages.
 setuptools==78.1.1
 wheel==0.45.1
 ninja==1.13.0
 
-# CUDA and core numerical stack
+# Core ML / vision stack.
 torch==2.7.0+cu128
 torchvision==0.22.0+cu128
 numpy==1.26.4
@@ -29,54 +30,58 @@ GPUtil==1.4.0
 nvidia-ml-py==13.610.43
 tqdm==4.66.1
 
-# OpenCV contrib contains the standard OpenCV modules too. Do not install
-# opencv-python or a headless build alongside it; competing cv2 wheels can
-# overwrite one another.
+# OpenCV for DarkFusion, Ultralytics, SAHI, GroundingDINO, and MediaPipe.
+# Keep these two pinned together. DarkFusion does not need opencv-python-headless.
+opencv-python==4.9.0.80
 opencv-contrib-python==4.9.0.80
 
-# YOLO, tracking, tuning, SAHI, SAM3, and GroundingDINO
-ultralytics==8.4.83
+# YOLO / SAHI / SAM / YOLO-World.
+ultralytics==8.4.113
 ray[tune]==2.52.1
 pydantic==2.7.1
 lap==0.5.12
 sahi==0.11.23
 clip @ git+https://github.com/ultralytics/CLIP.git@88ade288431a46233f1556d1e141901b3ef0a36b
+
+# Direct GroundingDINO path used by dinov5_2.py.
+# Keep local model weights separately, especially Sam/groundingdino_swint_ogc.pth.
 groundingdino-py==0.4.0
-transformers==4.57.1
-tokenizers==0.22.0
+transformers==4.52.4
+tokenizers==0.21.1
 safetensors==0.5.3
-huggingface-hub==0.36.2
+huggingface-hub==0.33.0
 supervision==0.6.0
 timm==1.0.15
 pycocotools==2.0.6
 addict==2.4.0
 yapf==0.43.0
 
-# Stable Diffusion inpainting
+# Stable Diffusion inpainting.
 diffusers==0.33.1
-accelerate==1.5.2
+accelerate>=0.31.0,<2.0.0
 
-# ONNX and TensorRT backends
+# ONNX / TensorRT model support.
 onnx==1.17.0
 onnxruntime-gpu==1.22.0
 tensorrt==10.15.1.29
 
-# Desktop UI and charts
+# Desktop UI.
 PyQt5==5.15.11
 qt-material==2.14
 pyqtgraph==0.13.7
+
+# DarkFusion runtime features.
 pandas==2.2.3
 matplotlib==3.6.3
 plotly==6.1.2
-
-# DarkFusion runtime features
 scikit-learn==1.7.0
 mediapipe==0.10.21
 mss==10.0.0
 PyAutoGUI==0.9.54
 SpeechRecognition==3.14.3
 python-dotenv==1.1.0
-requests==2.32.4
+requests==2.27.1
 yt-dlp==2026.3.17
+deep-translator==1.9.1
 shapely==2.1.1
 perlin-noise==1.14

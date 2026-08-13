@@ -331,7 +331,7 @@
            </size>
           </property>
           <property name="toolTip">
-           <string>Lists class names from classes.txt. Configure class hotkeys in Class / Pose List.</string>
+           <string>Lists class names from .darkfusion/classes.txt. Configure class hotkeys in Class / Pose List.</string>
           </property>
           <property name="styleSheet">
            <string notr="true">				QComboBox
@@ -842,7 +842,7 @@ QDoubleSpinBox::down-arrow, QSpinBox::down-arrow, QDateTimeEdit::down-arrow {
            </size>
           </property>
           <property name="toolTip">
-           <string>Lists class names from classes.txt. Configure class hotkeys in Class / Pose List.</string>
+           <string>Lists class names from .darkfusion/classes.txt. Configure class hotkeys in Class / Pose List.</string>
           </property>
           <property name="styleSheet">
            <string notr="true">				QComboBox
@@ -4255,7 +4255,7 @@ QSlider::handle:vertical:disabled {
                        </size>
                       </property>
                       <property name="toolTip">
-                       <string>Save the current keypoint list to points.json.</string>
+                       <string>Save the current keypoint list to .darkfusion/points.json.</string>
                       </property>
                       <property name="styleSheet">
                        <string notr="true">QPushButton {
@@ -4402,7 +4402,7 @@ QPushButton:checked {
                        </size>
                       </property>
                       <property name="toolTip">
-                       <string>Load a keypoint list from points.json.</string>
+                       <string>Load a keypoint list from .darkfusion/points.json.</string>
                       </property>
                       <property name="styleSheet">
                        <string notr="true">QPushButton {

@@ -38,7 +38,8 @@ UltraDarkFusion v5.2 repository.
 - `UltraDarkFusion/darkfusion_ultralytics_train.py`
 - `UltraDarkFusion/darkfusion_ultralytics_tune.py`
 - `UltraDarkFusion/darkfusion_validation_review.py`
-- `UltraDarkFusion/generate_ui_py.ps1`
+- `UltraDarkFusion/tools/ui/generate_ui_py.ps1`
+- `UltraDarkFusion/tools/model_inspection/inspect_model_skeleton.py`
 - `UltraDarkFusion/botsort.yaml`
 - `UltraDarkFusion/zlibwapi.dll` (legacy Darknet runtime support)
 
@@ -61,6 +62,8 @@ UltraDarkFusion v5.2 repository.
 - `.env`, `settings.json`, local databases, thresholds, and machine-specific
   configuration.
 - Recovery copies, backups, scratch scripts, and generated debug output.
+- Tool caches and generated inspection state such as `__pycache__` and
+  `skeleton_inspection_results.json`.
 
 The `.gitignore` enforces these exclusions. See `MODEL_SETUP.md` for the model
 files that users install separately after cloning.
