@@ -834,6 +834,122 @@ APP_SETTINGS_FILE = "settings.json"
 APP_SETTINGS_PATH = os.path.join(APP_DIR, APP_SETTINGS_FILE)
 PROJECT_SETTINGS_DIR = ".darkfusion"
 PROJECT_SETTINGS_FILE = "project.json"
+DATASET_METADATA_FILES = frozenset({"classes.txt", "points.json", "pose.json"})
+
+
+def dataset_metadata_directory(dataset_dir, create=False):
+    """Return the private DarkFusion metadata directory for a dataset."""
+    if not dataset_dir:
+        return ""
+    dataset_dir = os.path.normpath(os.fspath(dataset_dir))
+    if os.path.basename(dataset_dir).lower() == PROJECT_SETTINGS_DIR:
+        metadata_dir = dataset_dir
+    else:
+        metadata_dir = os.path.join(dataset_dir, PROJECT_SETTINGS_DIR)
+    if create:
+        os.makedirs(metadata_dir, exist_ok=True)
+    return metadata_dir
+
+
+def dataset_metadata_path(dataset_dir, file_name, create_parent=False):
+    """Build the canonical path for a DarkFusion-owned dataset metadata file."""
+    file_name = os.path.basename(os.fspath(file_name)).lower()
+    if file_name not in DATASET_METADATA_FILES and file_name != PROJECT_SETTINGS_FILE:
+        raise ValueError(f"Unsupported DarkFusion dataset metadata file: {file_name}")
+    metadata_dir = dataset_metadata_directory(dataset_dir, create=create_parent)
+    return os.path.join(metadata_dir, file_name) if metadata_dir else ""
+
+
+def _files_have_same_content(first_path, second_path):
+    try:
+        if os.path.getsize(first_path) != os.path.getsize(second_path):
+            return False
+        with open(first_path, "rb") as first, open(second_path, "rb") as second:
+            while True:
+                first_chunk = first.read(1024 * 1024)
+                second_chunk = second.read(1024 * 1024)
+                if first_chunk != second_chunk:
+                    return False
+                if not first_chunk:
+                    return True
+    except OSError:
+        return False
+
+
+def resolve_dataset_metadata_path(dataset_dir, file_name, for_write=False, migrate=True):
+    """Resolve DarkFusion metadata, migrating its legacy root copy when safe."""
+    if not dataset_dir:
+        return ""
+
+    dataset_dir = os.path.normpath(os.fspath(dataset_dir))
+    if os.path.basename(dataset_dir).lower() == PROJECT_SETTINGS_DIR:
+        dataset_dir = os.path.dirname(dataset_dir)
+    file_name = os.path.basename(os.fspath(file_name)).lower()
+    canonical_path = dataset_metadata_path(dataset_dir, file_name, create_parent=for_write)
+    legacy_path = os.path.join(dataset_dir, file_name)
+
+    if migrate and file_name in DATASET_METADATA_FILES and os.path.isfile(legacy_path):
+        try:
+            os.makedirs(os.path.dirname(canonical_path), exist_ok=True)
+            if not os.path.exists(canonical_path):
+                shutil.move(legacy_path, canonical_path)
+                logging.getLogger("UltraDarkFusionLogger").info(
+                    "Moved dataset metadata %s to %s", legacy_path, canonical_path
+                )
+            elif _files_have_same_content(legacy_path, canonical_path):
+                os.remove(legacy_path)
+                logging.getLogger("UltraDarkFusionLogger").info(
+                    "Removed duplicate legacy dataset metadata: %s", legacy_path
+                )
+            else:
+                logging.getLogger("UltraDarkFusionLogger").warning(
+                    "Kept conflicting legacy metadata %s; DarkFusion is using %s",
+                    legacy_path,
+                    canonical_path,
+                )
+        except OSError as error:
+            logging.getLogger("UltraDarkFusionLogger").warning(
+                "Could not migrate dataset metadata %s: %s", legacy_path, error
+            )
+
+    if os.path.isfile(canonical_path) or for_write:
+        return canonical_path
+    if os.path.isfile(legacy_path):
+        return legacy_path
+    return ""
+
+
+def resolve_dataset_classes_path(dataset_dir, for_write=False, migrate=True):
+    """Resolve the canonical class list, with read-only external-format fallbacks."""
+    classes_path = resolve_dataset_metadata_path(
+        dataset_dir, "classes.txt", for_write=for_write, migrate=migrate
+    )
+    if classes_path or for_write:
+        return classes_path
+    for fallback_name in ("obj.names", "names.txt"):
+        fallback_path = os.path.join(os.fspath(dataset_dir), fallback_name)
+        if os.path.isfile(fallback_path):
+            return fallback_path
+    return ""
+
+
+def migrate_darkfusion_dataset_metadata(dataset_dir):
+    """Migrate only files owned by DarkFusion; unknown JSON/TXT files are untouched."""
+    migrated_paths = {}
+    for file_name in sorted(DATASET_METADATA_FILES):
+        path = resolve_dataset_metadata_path(dataset_dir, file_name, migrate=True)
+        if path:
+            migrated_paths[file_name] = path
+    return migrated_paths
+
+
+def resolve_dataset_pose_schema_path(dataset_dir, migrate=True):
+    """Resolve the editable pose schema, accepting pose.json as a legacy alias."""
+    for file_name in ("points.json", "pose.json"):
+        path = resolve_dataset_metadata_path(dataset_dir, file_name, migrate=migrate)
+        if path:
+            return path
+    return ""
 
 PROJECT_SETTING_KEYS = {
     "lastImage",
@@ -861,6 +977,7 @@ PROJECT_SETTING_KEYS = {
     "ultralyticsDistillModelPath",
     "ultralyticsDistillWeight",
     "ultralyticsExtraTrainArgs",
+    "ultralyticsRunsDirectory",
     "trainingPreviewImgSize",
     "trainingEvaluatorWeightsPath",
     "trainingEvaluatorUseTrainingWeights",
@@ -7328,6 +7445,26 @@ class DatasetAnalysisWorker(QThread):
             self.failed.emit(str(e))
 
 
+class UltralyticsExportWorker(QThread):
+    """Export an Ultralytics checkpoint without blocking the Qt UI thread."""
+
+    completed = pyqtSignal(str, object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, model_path, export_params, parent=None):
+        super().__init__(parent)
+        self.model_path = str(model_path or "")
+        self.export_params = dict(export_params or {})
+
+    def run(self):
+        try:
+            model = YOLO(self.model_path)
+            output = model.export(**self.export_params)
+            self.completed.emit(str(output), model)
+        except Exception as error:
+            self.failed.emit(str(error))
+
+
 class ScanAnnotations(QObject):
     """
     Safe dataset health check.
@@ -7335,7 +7472,8 @@ class ScanAnnotations(QObject):
     This scanner only reads dataset files and writes a DarkFusion report under
     .darkfusion/scan_report.json. The scan itself does not rewrite labels,
     strip metadata, delete JSON files, or move bad files. The report dialog can
-    move a selected issue into review only after the user confirms it.
+    move a selected issue into review or delete files matched by its filters,
+    only after the user confirms the action.
     """
 
     PROTECTED_JSON_NAMES = {
@@ -7421,8 +7559,15 @@ class ScanAnnotations(QObject):
             if candidate and os.path.isdir(candidate):
                 return self._normalize_path(candidate)
 
-        selected = QFileDialog.getExistingDirectory(self.parent, "Select Dataset Folder", os.getcwd())
+        start_dir = (
+            self.parent.dialog_start_directory("dataset")
+            if hasattr(self.parent, "dialog_start_directory")
+            else os.getcwd()
+        )
+        selected = QFileDialog.getExistingDirectory(self.parent, "Select Dataset Folder", start_dir)
         if selected:
+            if hasattr(self.parent, "remember_dialog_selection"):
+                self.parent.remember_dialog_selection("dataset", selected)
             return self._normalize_path(selected)
         return ""
 
@@ -7483,16 +7628,12 @@ class ScanAnnotations(QObject):
         if self.override_classes_file and os.path.exists(self.override_classes_file):
             return self.override_classes_file
 
-        candidates = [
-            os.path.join(dataset_dir, "classes.txt"),
-            os.path.join(dataset_dir, "obj.names"),
-            os.path.join(dataset_dir, "names.txt"),
-        ]
+        candidates = [resolve_dataset_classes_path(dataset_dir, migrate=True)]
 
         output_path = getattr(self.parent, "output_path", "")
         if output_path:
             candidates.extend([
-                os.path.join(output_path, "classes.txt"),
+                resolve_dataset_classes_path(output_path, migrate=True),
                 os.path.join(output_path, "obj.names"),
                 os.path.join(output_path, "names.txt"),
             ])
@@ -7543,13 +7684,18 @@ class ScanAnnotations(QObject):
                 ))
 
         if not classes:
+            start_dir = dataset_dir
+            if hasattr(self.parent, "dialog_start_directory"):
+                start_dir = self.parent.dialog_start_directory("metadata", classes_file or dataset_dir)
             selected, _ = QFileDialog.getOpenFileName(
                 self.parent,
                 "Select Classes File",
-                dataset_dir,
+                start_dir,
                 "Class Files (classes.txt *.names *.txt);;All Files (*)"
             )
             if selected:
+                if hasattr(self.parent, "remember_dialog_selection"):
+                    self.parent.remember_dialog_selection("metadata", selected)
                 classes_file = selected
                 self.base_directory = self._normalize_path(os.path.dirname(selected))
                 try:
@@ -7567,10 +7713,8 @@ class ScanAnnotations(QObject):
 
     def _load_expected_keypoint_count(self, dataset_dir):
         candidates = [
-            os.path.join(dataset_dir, "points.json"),
-            os.path.join(dataset_dir, "pose.json"),
-            os.path.join(dataset_dir, PROJECT_SETTINGS_DIR, "points.json"),
-            os.path.join(dataset_dir, PROJECT_SETTINGS_DIR, "pose.json"),
+            resolve_dataset_metadata_path(dataset_dir, "points.json", migrate=True),
+            resolve_dataset_metadata_path(dataset_dir, "pose.json", migrate=True),
         ]
 
         for candidate in candidates:
@@ -8910,6 +9054,8 @@ class ScanAnnotations(QObject):
 
         max_display_rows = 1000
         visible_issues_for_navigation = []
+        filtered_issues_for_bulk_delete = []
+        delete_all_filtered_button_holder = [None]
 
         def issue_key(issue):
             return self._issue_review_key(issue)
@@ -8961,6 +9107,36 @@ class ScanAnnotations(QObject):
                 issue_filter.setCurrentIndex(index if index >= 0 else 0)
             issue_filter.blockSignals(False)
 
+        def deletable_files_for_issues(issue_rows):
+            protected_text_names = {
+                "classes.txt", "names.txt", "train.txt", "valid.txt",
+                "val.txt", "test.txt", "obj.names",
+            }
+            allowed_extensions = set(self.valid_image_extensions) | {".txt"}
+            file_paths = {}
+
+            def add_file(path):
+                path = self._normalize_path(path)
+                if not path or not os.path.isfile(path):
+                    return
+                extension = os.path.splitext(path)[1].lower()
+                if extension not in allowed_extensions:
+                    return
+                if os.path.basename(path).lower() in protected_text_names:
+                    return
+                file_paths[path.lower()] = path
+
+            for issue in issue_rows:
+                source_path = self._issue_source_path(issue, dataset_dir)
+                image_path = self._matching_image_for_issue(issue, dataset_dir)
+
+                add_file(source_path)
+                if image_path:
+                    add_file(image_path)
+                    add_file(os.path.splitext(image_path)[0] + ".txt")
+
+            return sorted(file_paths.values(), key=lambda path: path.lower())
+
         def populate_table():
             severity_value = severity_filter.currentData() or ""
             issue_value = issue_filter.currentData() or ""
@@ -8993,6 +9169,17 @@ class ScanAnnotations(QObject):
             matching_issues = [issue for issue in issues if matches_filters(issue)]
             visible_issues = matching_issues[:max_display_rows]
             visible_issues_for_navigation[:] = visible_issues
+            filtered_issues_for_bulk_delete[:] = matching_issues
+
+            delete_all_filtered_btn = delete_all_filtered_button_holder[0]
+            if delete_all_filtered_btn is not None:
+                files_to_delete = deletable_files_for_issues(matching_issues)
+                delete_all_filtered_btn.setEnabled(bool(files_to_delete))
+                delete_all_filtered_btn.setText(
+                    f"Delete All Filtered ({len(files_to_delete)} files)"
+                    if files_to_delete
+                    else "Delete All Filtered"
+                )
 
             table.setRowCount(len(visible_issues))
             for row, issue in enumerate(visible_issues):
@@ -9315,6 +9502,76 @@ class ScanAnnotations(QObject):
                 "Refresh Dataset Analysis when you want updated totals."
             )
 
+        def delete_all_filtered_issues():
+            matching_issues = list(filtered_issues_for_bulk_delete)
+            files_to_delete = deletable_files_for_issues(matching_issues)
+            if not files_to_delete:
+                QMessageBox.information(
+                    dialog,
+                    "Delete All Filtered",
+                    "The current filters do not match any existing image or label files.",
+                )
+                return
+
+            image_count = sum(
+                1 for path in files_to_delete
+                if os.path.splitext(path)[1].lower() in self.valid_image_extensions
+            )
+            label_count = sum(
+                1 for path in files_to_delete
+                if os.path.splitext(path)[1].lower() == ".txt"
+            )
+            reply = QMessageBox.warning(
+                dialog,
+                "Delete All Filtered Files",
+                (
+                    f"Permanently delete every image and label matched by the current filters?\n\n"
+                    f"Matching issues: {len(matching_issues):,}\n"
+                    f"Images: {image_count:,}\n"
+                    f"Labels: {label_count:,}\n"
+                    f"Unique files: {len(files_to_delete):,}\n\n"
+                    "This uses all filtered results, including rows beyond the first 1,000 shown. "
+                    "This action cannot be undone."
+                ),
+                QMessageBox.Yes | QMessageBox.Cancel,
+                QMessageBox.Cancel,
+            )
+            if reply != QMessageBox.Yes:
+                return
+
+            deleted_files = []
+            failed_files = []
+            # Remove labels before images so a partially failed cleanup is
+            # less likely to leave a label without its image.
+            ordered_files = sorted(
+                files_to_delete,
+                key=lambda path: (
+                    os.path.splitext(path)[1].lower() in self.valid_image_extensions,
+                    path.lower(),
+                ),
+            )
+            for file_path in ordered_files:
+                try:
+                    os.remove(file_path)
+                    deleted_files.append(file_path)
+                except OSError as e:
+                    failed_files.append((file_path, str(e)))
+
+            if deleted_files:
+                self._refresh_parent_file_lists_after_move(deleted_files)
+
+            message = f"Deleted {len(deleted_files):,} file(s)."
+            if failed_files:
+                message += (
+                    f"\n\nCould not delete {len(failed_files):,} file(s). "
+                    "They will remain in the refreshed report."
+                )
+                QMessageBox.warning(dialog, "Filtered Cleanup Finished", message)
+            else:
+                QMessageBox.information(dialog, "Filtered Cleanup Finished", message)
+
+            refresh_full_scan()
+
         severity_filter.currentIndexChanged.connect(lambda _index: populate_table())
         issue_filter.currentIndexChanged.connect(lambda _index: populate_table())
         search_filter.textChanged.connect(lambda _text: populate_table())
@@ -9330,7 +9587,6 @@ class ScanAnnotations(QObject):
         histogram_btn.clicked.connect(lambda _checked=False: open_plot("histogram"))
         bar_btn.clicked.connect(lambda _checked=False: open_plot("bar"))
         scatter_btn.clicked.connect(lambda _checked=False: open_plot("scatter"))
-        populate_table()
 
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
         previous_issue_btn = buttons.addButton("Previous Issue", QtWidgets.QDialogButtonBox.ActionRole)
@@ -9341,6 +9597,8 @@ class ScanAnnotations(QObject):
         mark_image_reviewed_btn = buttons.addButton("Mark Image Reviewed", QtWidgets.QDialogButtonBox.ActionRole)
         open_file_folder_btn = buttons.addButton("Open File Folder", QtWidgets.QDialogButtonBox.ActionRole)
         move_to_review_btn = buttons.addButton("Move to Review Folder", QtWidgets.QDialogButtonBox.ActionRole)
+        delete_all_filtered_btn = buttons.addButton("Delete All Filtered", QtWidgets.QDialogButtonBox.ActionRole)
+        delete_all_filtered_button_holder[0] = delete_all_filtered_btn
         open_folder_btn = buttons.addButton("Open Report Folder", QtWidgets.QDialogButtonBox.ActionRole)
         previous_issue_btn.clicked.connect(go_to_previous_issue)
         next_issue_btn.clicked.connect(go_to_next_issue)
@@ -9350,9 +9608,11 @@ class ScanAnnotations(QObject):
         mark_image_reviewed_btn.clicked.connect(mark_current_image_reviewed)
         open_file_folder_btn.clicked.connect(open_selected_issue_folder)
         move_to_review_btn.clicked.connect(move_selected_issue_to_review)
+        delete_all_filtered_btn.clicked.connect(delete_all_filtered_issues)
         open_folder_btn.clicked.connect(lambda: self._open_report_folder(report_path))
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
+        populate_table()
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
@@ -9378,16 +9638,35 @@ class ScanAnnotations(QObject):
         file_name, _ = QFileDialog.getOpenFileName(
             self.parent,
             "Select Classes File",
-            dataset_dir,
+            (
+                self.parent.dialog_start_directory("metadata", dataset_dir)
+                if hasattr(self.parent, "dialog_start_directory")
+                else dataset_dir
+            ),
             "Class Files (classes.txt *.names *.txt);;All Files (*)"
         )
         if not file_name:
             return
+        if hasattr(self.parent, "remember_dialog_selection"):
+            self.parent.remember_dialog_selection("metadata", file_name)
 
-        self.override_classes_file = self._normalize_path(file_name)
+        canonical_classes = resolve_dataset_classes_path(
+            dataset_dir, for_write=True, migrate=True
+        )
+        try:
+            if os.path.normcase(os.path.abspath(file_name)) != os.path.normcase(os.path.abspath(canonical_classes)):
+                shutil.copy2(file_name, canonical_classes)
+            self.override_classes_file = self._normalize_path(canonical_classes)
+        except OSError as e:
+            QMessageBox.warning(
+                self.parent,
+                "Classes Import Failed",
+                f"Could not copy the class list into .darkfusion:\n{e}",
+            )
+            return
         self.base_directory = dataset_dir
         self.valid_classes, _ = self._load_classes(dataset_dir)
-        QMessageBox.information(self.parent, "Classes Loaded", f"Using:\n{file_name}")
+        QMessageBox.information(self.parent, "Classes Loaded", f"Using:\n{canonical_classes}")
 
     def scan_annotations(self):
         active_worker = getattr(self, "_analysis_worker", None)
@@ -9419,7 +9698,7 @@ class ScanAnnotations(QObject):
             QMessageBox.warning(
                 self.parent,
                 "Dataset Analysis",
-                "No classes file was found. Add classes.txt to the dataset folder or select one when prompted."
+                "No class list was found. Open the dataset to create .darkfusion/classes.txt or select one when prompted."
             )
             return
 
@@ -12146,23 +12425,33 @@ class SahiSettingsDialog(QDialog):
         self.refreshClasses()
 
     def selectModelWeights(self):
+        start_path = self.weightsLineEdit.text()
+        if hasattr(self.main_window, "dialog_start_directory"):
+            start_path = self.main_window.dialog_start_directory("model", start_path)
         fileName, _ = QFileDialog.getOpenFileName(
             self,
             "Select Model Weights File",
-            self.weightsLineEdit.text() or os.getcwd(),
+            start_path or os.getcwd(),
             "Model Files (*.pt *.onnx *.engine);;All Files (*)",
         )
         if fileName:
+            if hasattr(self.main_window, "remember_dialog_selection"):
+                self.main_window.remember_dialog_selection("model", fileName)
             self.weightsLineEdit.setText(fileName)
             self.refreshClasses()
 
     def selectImageDirectory(self):
+        start_path = self.imageDirLineEdit.text()
+        if hasattr(self.main_window, "dialog_start_directory"):
+            start_path = self.main_window.dialog_start_directory("dataset", start_path)
         dirName = QFileDialog.getExistingDirectory(
             self,
             "Select Image Directory",
-            self.imageDirLineEdit.text() or os.getcwd(),
+            start_path or os.getcwd(),
         )
         if dirName:
+            if hasattr(self.main_window, "remember_dialog_selection"):
+                self.main_window.remember_dialog_selection("dataset", dirName)
             self.imageDirLineEdit.setText(dirName)
             self.refreshClasses()
 
@@ -12211,7 +12500,7 @@ class SahiSettingsDialog(QDialog):
 
         image_row = QtWidgets.QHBoxLayout()
         self.imageDirLineEdit = QLineEdit()
-        self.imageDirLineEdit.setPlaceholderText("Folder containing images and classes.txt")
+        self.imageDirLineEdit.setPlaceholderText("Dataset folder containing images")
         self.imageDirLineEdit.editingFinished.connect(self.refreshClasses)
         selectImageDirBtn = QPushButton("Browse")
         selectImageDirBtn.clicked.connect(self.selectImageDirectory)
@@ -12540,7 +12829,10 @@ class SahiSettingsDialog(QDialog):
 
     def refreshClasses(self, prefer_weights=False):
         image_directory = self.imageDirLineEdit.text().strip()
-        classes_txt_path = os.path.join(image_directory, "classes.txt") if image_directory else ""
+        classes_txt_path = (
+            resolve_dataset_classes_path(image_directory, migrate=True)
+            if image_directory else ""
+        )
         classes = []
         checked_names = None
         source_label = ""
@@ -12581,7 +12873,7 @@ class SahiSettingsDialog(QDialog):
         if classes:
             self.statusLabel.setText(f"Loaded {len(classes)} classes from {source_label}.")
         else:
-            self.statusLabel.setText("No classes loaded yet. Choose a dataset folder with classes.txt.")
+            self.statusLabel.setText("No classes loaded yet. Choose a dataset with .darkfusion/classes.txt.")
 
     def useCheckedClassesFromParent(self):
         if self.main_window is None or not hasattr(self.main_window, "get_active_class_names_from_ui"):
@@ -12699,9 +12991,9 @@ class SahiSettingsDialog(QDialog):
             QMessageBox.warning(self, "Error", "Please select an image directory.")
             return
 
-        classes_txt_path = os.path.join(image_directory, 'classes.txt')
+        classes_txt_path = resolve_dataset_classes_path(image_directory, migrate=True)
         if not os.path.exists(classes_txt_path) and not all_class_names:
-            QMessageBox.warning(self, "Error", f"classes.txt not found in the image directory: {image_directory}")
+            QMessageBox.warning(self, "Error", f"No DarkFusion class list was found for: {image_directory}")
             return
 
         if not selected_classes:
@@ -13307,33 +13599,45 @@ class AutoLabelDialog(QDialog):
         self.auto_settings.setValue("dino_overwrite", self.dino_overwrite_check.isChecked())
 
     def browse_world_model(self):
+        start_path = self.main_window.dialog_start_directory(
+            "model", self.world_model_edit.text().strip()
+        )
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Select YOLO-World Model",
-            self.world_model_edit.text().strip() or os.getcwd(),
+            start_path,
             "Model Files (*.pt *.engine *.onnx);;All Files (*)",
         )
         if path:
+            self.main_window.remember_dialog_selection("model", path)
             self.world_model_edit.setText(path)
 
     def browse_dino_weights(self):
+        start_path = self.main_window.dialog_start_directory(
+            "model", self.dino_weights_edit.text().strip()
+        )
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Select DINO Weights",
-            self.dino_weights_edit.text().strip() or os.getcwd(),
+            start_path,
             "DINO Weights (*.pth);;All Files (*)",
         )
         if path:
+            self.main_window.remember_dialog_selection("model", path)
             self.dino_weights_edit.setText(path)
 
     def browse_dino_config(self):
+        start_path = self.main_window.dialog_start_directory(
+            "model", self.dino_config_edit.text().strip()
+        )
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Select DINO Config",
-            self.dino_config_edit.text().strip() or os.getcwd(),
+            start_path,
             "Python Config (*.py);;All Files (*)",
         )
         if path:
+            self.main_window.remember_dialog_selection("model", path)
             self.dino_config_edit.setText(path)
 
     def apply_weight_settings(self):
@@ -13668,25 +13972,14 @@ class TileWorker(QThread):
         })
 
     def copy_dataset_metadata(self, target_directory):
-        for file_name in ("classes.txt", "points.json", "pose.json"):
-            source = os.path.join(self.directory, file_name)
+        for file_name in DATASET_METADATA_FILES:
+            source = resolve_dataset_metadata_path(self.directory, file_name, migrate=True)
             if os.path.isfile(source):
                 try:
-                    shutil.copy2(source, os.path.join(target_directory, file_name))
+                    target = dataset_metadata_path(target_directory, file_name, create_parent=True)
+                    shutil.copy2(source, target)
                 except Exception as e:
                     logger.warning(f"Failed copying tile metadata {source}: {e}")
-
-        settings_source = os.path.join(self.directory, PROJECT_SETTINGS_DIR)
-        if os.path.isdir(settings_source):
-            settings_target = os.path.join(target_directory, PROJECT_SETTINGS_DIR)
-            os.makedirs(settings_target, exist_ok=True)
-            for file_name in ("points.json", "pose.json"):
-                source = os.path.join(settings_source, file_name)
-                if os.path.isfile(source):
-                    try:
-                        shutil.copy2(source, os.path.join(settings_target, file_name))
-                    except Exception as e:
-                        logger.warning(f"Failed copying tile project metadata {source}: {e}")
 
     def tile_extension_for_image(self, image_path):
         if self.image_format == "source":
@@ -13811,10 +14104,8 @@ class TileWorker(QThread):
 
     def _load_expected_keypoint_count(self):
         candidates = [
-            os.path.join(self.directory, "points.json"),
-            os.path.join(self.directory, "pose.json"),
-            os.path.join(self.directory, PROJECT_SETTINGS_DIR, "points.json"),
-            os.path.join(self.directory, PROJECT_SETTINGS_DIR, "pose.json"),
+            resolve_dataset_metadata_path(self.directory, "points.json", migrate=True),
+            resolve_dataset_metadata_path(self.directory, "pose.json", migrate=True),
         ]
 
         for candidate in candidates:
@@ -15660,10 +15951,14 @@ class ClassPickerDialog(QDialog):
             or getattr(self.main_window, "output_path", None)
             or os.getcwd()
         )
-        return os.path.join(directory, "classes.txt")
+        return resolve_dataset_classes_path(directory, for_write=True, migrate=True)
 
     def label_files(self):
-        directory = os.path.dirname(self.class_file_path())
+        directory = (
+            getattr(self.main_window, "image_directory", None)
+            or getattr(self.main_window, "output_path", None)
+            or os.getcwd()
+        )
         skip_names = {"classes.txt", "obj.names", "names.txt", "model_classes.txt"}
         try:
             image_stems = {
@@ -16211,9 +16506,12 @@ class DatasetSplitDialog(QDialog):
         self.status_label.setStyleSheet(f"color: {color};")
 
     def browse_dataset(self):
-        start_dir = self.dataset_edit.text().strip() or self._initial_dataset_dir() or os.getcwd()
+        start_dir = self.main_window.dialog_start_directory(
+            "dataset", self.dataset_edit.text().strip() or self._initial_dataset_dir()
+        )
         selected = QFileDialog.getExistingDirectory(self, "Select Dataset Folder", start_dir)
         if selected:
+            self.main_window.remember_dialog_selection("dataset", selected)
             self.dataset_edit.setText(self.main_window.normalize_path(selected))
 
     def refresh_summary(self):
@@ -16229,18 +16527,20 @@ class DatasetSplitDialog(QDialog):
 
         image_files = self._image_files(dataset_path)
         label_count = sum(1 for image_file in image_files if image_file.with_suffix(".txt").exists())
-        classes_file = dataset_path / "classes.txt"
+        classes_path = resolve_dataset_classes_path(str(dataset_path), migrate=True)
+        classes_file = Path(classes_path) if classes_path else Path()
         split_folders = self._split_folders(dataset_path)
         chunk_size = max(1, int(self.chunk_spinbox.value()))
         output_count = math.ceil(len(image_files) / chunk_size) if image_files else 0
 
         self._set_metric("root_images", len(image_files), "#7cc7ff")
         self._set_metric("labels", label_count, "#9aa4af")
-        self._set_metric("classes", "Found" if classes_file.exists() else "Missing", "#7cc7ff" if classes_file.exists() else "#f85149")
+        classes_found = bool(classes_path and classes_file.is_file())
+        self._set_metric("classes", "Found" if classes_found else "Missing", "#7cc7ff" if classes_found else "#f85149")
         self._set_metric("existing_split", len(split_folders), "#f0b45f" if split_folders else "#9aa4af")
         self._set_metric("output_folders", output_count, "#7cc7ff")
 
-        if not classes_file.exists():
+        if not classes_found:
             self._set_status("classes.txt is required before splitting.", "#f0b45f")
         elif not image_files and split_folders:
             self._set_status("No root images found. This dataset may already be split.", "#9aa4af")
@@ -16277,9 +16577,10 @@ class DatasetSplitDialog(QDialog):
             QMessageBox.warning(self, "Split Dataset", "Select a valid dataset folder first.")
             return
 
-        classes_file = dataset_path / "classes.txt"
-        if not classes_file.exists():
-            QMessageBox.warning(self, "Split Dataset", "classes.txt was not found in the dataset folder.")
+        classes_path = resolve_dataset_classes_path(str(dataset_path), migrate=True)
+        classes_file = Path(classes_path) if classes_path else Path()
+        if not classes_path or not classes_file.is_file():
+            QMessageBox.warning(self, "Split Dataset", ".darkfusion/classes.txt was not found for this dataset.")
             return
 
         image_files = self._image_files(dataset_path)
@@ -16302,6 +16603,13 @@ class DatasetSplitDialog(QDialog):
         self._save_split_settings()
         chunk_size = max(1, int(self.chunk_spinbox.value()))
         prefix = self.folder_prefix()
+        metadata_paths = migrate_darkfusion_dataset_metadata(str(dataset_path))
+        if "classes.txt" not in metadata_paths:
+            canonical_classes = dataset_metadata_path(
+                str(dataset_path), "classes.txt", create_parent=True
+            )
+            shutil.copy2(str(classes_file), canonical_classes)
+            metadata_paths["classes.txt"] = canonical_classes
 
         progress = QtWidgets.QProgressDialog("Splitting dataset...", "", 0, len(image_files), self)
         progress.setWindowTitle("Split Dataset")
@@ -16314,7 +16622,11 @@ class DatasetSplitDialog(QDialog):
             for chunk_index, start in enumerate(range(0, len(image_files), chunk_size), start=1):
                 folder_path = dataset_path / f"{prefix}{chunk_index}"
                 folder_path.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(str(classes_file), str(folder_path / "classes.txt"))
+                for metadata_name, metadata_source in metadata_paths.items():
+                    metadata_target = dataset_metadata_path(
+                        str(folder_path), metadata_name, create_parent=True
+                    )
+                    shutil.copy2(metadata_source, metadata_target)
 
                 for image_file in image_files[start:start + chunk_size]:
                     destination_image = self._unique_image_destination(folder_path / image_file.name)
@@ -16354,6 +16666,24 @@ class DatasetSplitDialog(QDialog):
                 self._move_directory_contents(item, destination_dir / item.name)
                 if not any(item.iterdir()):
                     item.rmdir()
+
+    def _merge_split_metadata(self, source_dir, dataset_path):
+        destination_dir = Path(dataset_metadata_directory(str(dataset_path), create=True))
+        for item in sorted(source_dir.iterdir()):
+            destination = destination_dir / item.name
+            if item.is_file():
+                if not destination.exists():
+                    shutil.move(str(item), str(destination))
+                elif _files_have_same_content(str(item), str(destination)):
+                    item.unlink()
+                else:
+                    self._move_file_unique(item, destination)
+            elif item.is_dir():
+                self._move_directory_contents(item, destination)
+                if not any(item.iterdir()):
+                    item.rmdir()
+        if source_dir.exists() and not any(source_dir.iterdir()):
+            source_dir.rmdir()
 
     def revert_split(self):
         dataset_path = self.dataset_path()
@@ -16411,6 +16741,8 @@ class DatasetSplitDialog(QDialog):
                             shutil.move(str(item), str(destination_classes))
                     elif item.is_file():
                         self._move_file_unique(item, dataset_path / item.name)
+                    elif item.is_dir() and item.name.lower() == PROJECT_SETTINGS_DIR:
+                        self._merge_split_metadata(item, dataset_path)
                     elif item.is_dir():
                         self._move_directory_contents(item, dataset_path / item.name)
                         if not any(item.iterdir()):
@@ -17634,6 +17966,17 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         transport_row.setSpacing(6)
         for key in ("back", "prev_frame", "play", "next_frame", "forward"):
             transport_row.addWidget(controls[key], 1)
+        if not hasattr(self, "video_propagate_button"):
+            self.video_propagate_button = QtWidgets.QPushButton("Propagate", playback_group)
+            self.video_propagate_button.setObjectName("video_propagate_button")
+            self.video_propagate_button.setToolTip(
+                "Track the current video prediction into nearby frames and save editable labels."
+            )
+            self.video_propagate_button.setMinimumHeight(32)
+            self.video_propagate_button.clicked.connect(
+                lambda: self.open_label_propagation_dialog("video")
+            )
+        transport_row.addWidget(self.video_propagate_button, 1)
 
         options_row = QtWidgets.QHBoxLayout()
         options_row.setObjectName("video_playback_options_row")
@@ -20541,6 +20884,51 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         nav_layout.addWidget(total_images)
         nav_layout.addWidget(next_button)
         nav_layout.addWidget(delete_button)
+        if not hasattr(self, "clear_current_frame_labels_button"):
+            self.clear_current_frame_labels_button = QtWidgets.QPushButton(
+                "Clear Frame", layout.parentWidget()
+            )
+            self.clear_current_frame_labels_button.setObjectName(
+                "clear_current_frame_labels_button"
+            )
+            self.clear_current_frame_labels_button.setToolTip(
+                "Remove every box, segmentation, keypoint, and OBB from only "
+                "the currently open image. The image is kept."
+            )
+            self.clear_current_frame_labels_button.setMinimumSize(96, 28)
+            self.clear_current_frame_labels_button.clicked.connect(
+                self.clear_current_frame_labels
+            )
+        nav_layout.addWidget(self.clear_current_frame_labels_button)
+        if not hasattr(self, "propagate_labels_button"):
+            self.propagate_labels_button = QtWidgets.QPushButton("Propagate: Off", layout.parentWidget())
+            self.propagate_labels_button.setObjectName("propagate_labels_button")
+            self.propagate_labels_button.setCheckable(True)
+            self.propagate_labels_button.setToolTip(
+                "Turn on frame-by-frame propagation. Each Prev or Next move copies all "
+                "current annotations to that one adjacent image and corrects them with SAM3."
+            )
+            self.propagate_labels_button.setMinimumSize(118, 28)
+            self.propagate_labels_button.toggled.connect(
+                self.toggle_image_navigation_propagation
+            )
+        nav_layout.addWidget(self.propagate_labels_button)
+        if not hasattr(self, "undo_propagation_button"):
+            self.undo_propagation_button = QtWidgets.QPushButton(
+                "Undo Prop.", layout.parentWidget()
+            )
+            self.undo_propagation_button.setObjectName("undo_propagation_button")
+            self.undo_propagation_button.setToolTip(
+                "Undo the most recent propagation step without removing your source annotation."
+            )
+            self.undo_propagation_button.setMinimumSize(92, 28)
+            self.undo_propagation_button.setEnabled(
+                bool(getattr(self, "_last_propagation_manifest", None))
+            )
+            self.undo_propagation_button.clicked.connect(
+                lambda: self.undo_last_label_propagation()
+            )
+        nav_layout.addWidget(self.undo_propagation_button)
         nav_layout.addStretch(1)
 
         layout.addLayout(nav_layout, 4, 0, 1, 11)
@@ -20705,6 +21093,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         # --- Settings and persistent dataset state ---
         self.settingsButton.triggered.connect(self.openSettingsDialog)
         self.settings = self.loadSettings()
+        self._sam_model_load_lock = threading.RLock()
+        self._sam3_startup_warmup_active = False
+        self._sam3_startup_warmup_thread = None
         if hasattr(self.screen_view, "pan_overlay"):
             self.screen_view.pan_overlay.apply_saved_settings()
         self.initialize_floating_point_mode_from_settings()
@@ -21391,6 +21782,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.setup_persistent_settings_bindings()
         QTimer.singleShot(0, self._connect_ui_scale_screen_tracking)
         self.show()
+        # Let the main window finish drawing before model I/O and CUDA setup.
+        # Offscreen runs are smoke tests and should not allocate production models.
+        if os.environ.get("QT_QPA_PLATFORM", "").strip().lower() != "offscreen":
+            QTimer.singleShot(2500, self.start_sam3_startup_warmup)
 
     # -----------------------------
     # MAIN WINDOW SETUP HELPERS
@@ -22003,7 +22398,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             total = len(getattr(self, "filtered_image_files", []) or [])
             current = int(getattr(self, "current_img_index", 0)) + 1
             step_text = f"Jump {direction_sign * int(amount):+d}" if int(amount) > 1 else "Next image" if direction_sign > 0 else "Previous image"
-            self.statusBar().showMessage(f"{step_text} | {current}/{max(1, total)}", 1200)
+            propagation_message = getattr(
+                self, "_last_navigation_propagation_message", ""
+            )
+            message = f"{step_text} | {current}/{max(1, total)}"
+            if propagation_message:
+                message = f"{message} | {propagation_message}"
+            self.statusBar().showMessage(message, 5000 if propagation_message else 1200)
         return bool(moved)
 
     def handle_navigation_key_press(self, setting_key, event):
@@ -22095,6 +22496,90 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
     def app_settings_path(self):
         return APP_SETTINGS_PATH
 
+    def dialog_history_key(self, category):
+        return {
+            "model": "dialogModelDirectory",
+            "dataset": "dialogDatasetDirectory",
+            "video": "dialogVideoDirectory",
+            "export": "dialogExportDirectory",
+            "training": "dialogTrainingDirectory",
+            "metadata": "dialogMetadataDirectory",
+        }.get(str(category or "").strip().lower(), "dialogGenericDirectory")
+
+    def dialog_start_directory(self, category, explicit_path=None):
+        """Return an existing, workflow-specific native file-dialog directory."""
+        category = str(category or "generic").strip().lower()
+        settings = getattr(self, "settings", {}) or {}
+        candidates = [settings.get(self.dialog_history_key(category), "")]
+
+        if explicit_path:
+            if category == "dataset" and os.path.isdir(str(explicit_path)):
+                candidates.append(os.path.dirname(os.path.abspath(str(explicit_path))))
+            else:
+                candidates.append(explicit_path)
+
+        if category == "model":
+            candidates.extend((
+                getattr(self, "weights_file_path", ""),
+                settings.get("lastModelPath", ""),
+                settings.get("lastWeightsPath", ""),
+                os.path.join(APP_DIR, "weights"),
+                os.path.join(APP_DIR, "runs"),
+            ))
+        elif category == "dataset":
+            dataset_dir = (
+                getattr(self, "image_directory", "")
+                or settings.get("last_dir", "")
+            )
+            # Opening inside a dataset with 100k+ files forces the shell picker
+            # to enumerate it. Start at its parent so sibling datasets appear fast.
+            if dataset_dir:
+                candidates.append(os.path.dirname(self.normalize_path(dataset_dir)))
+            candidates.append(os.path.expanduser("~"))
+        elif category == "video":
+            candidates.extend((
+                getattr(self, "current_playback_original_source", ""),
+                settings.get("videoOutputPath", ""),
+                os.path.join(os.path.expanduser("~"), "Videos"),
+            ))
+        elif category == "export":
+            candidates.extend((
+                getattr(self, "export_model_path", ""),
+                settings.get("exportModelPath", ""),
+                os.path.join(APP_DIR, "weights"),
+            ))
+        elif category == "training":
+            candidates.extend((
+                getattr(self, "runs_directory", ""),
+                settings.get("ultralyticsRunsDirectory", ""),
+                os.path.join(APP_DIR, "runs"),
+            ))
+
+        candidates.extend((APP_DIR, os.path.expanduser("~")))
+        for candidate in candidates:
+            candidate = str(candidate or "").strip()
+            if not candidate:
+                continue
+            candidate = os.path.abspath(os.path.expanduser(candidate))
+            if os.path.isfile(candidate):
+                candidate = os.path.dirname(candidate)
+            if os.path.isdir(candidate):
+                return candidate
+        return APP_DIR
+
+    def remember_dialog_selection(self, category, selected_path):
+        """Persist only the containing directory for one dialog workflow."""
+        selected_path = str(selected_path or "").strip()
+        if not selected_path:
+            return
+        directory = selected_path if os.path.isdir(selected_path) else os.path.dirname(selected_path)
+        if str(category or "").strip().lower() == "dataset" and os.path.isdir(selected_path):
+            directory = os.path.dirname(os.path.abspath(selected_path))
+        if not directory or not os.path.isdir(directory):
+            return
+        self.settings[self.dialog_history_key(category)] = self.normalize_path(directory)
+        self.queue_settings_save(delay_ms=250)
+
     def project_settings_path(self, directory=None):
         directory = directory or getattr(self, "image_directory", None)
         if not directory and hasattr(self, "settings"):
@@ -22127,6 +22612,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
     def loadSettings(self, project_directory=None):
         settings = self.defaultSettings()
         app_settings = read_json_file(self.app_settings_path(), {})
+        # Runs belong to the active dataset. Ignore the legacy global value so
+        # an old dataset cannot receive a new dataset's training output.
+        app_settings.pop("ultralyticsRunsDirectory", None)
         if "languageCode" not in app_settings and app_settings.get("language"):
             app_settings["languageCode"] = app_settings.get("language")
         settings.update(app_settings)
@@ -22164,6 +22652,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             'lastPTWeightsPath': '',
             'lastModelPath': '',
             'last_dir': '',
+            'dialogModelDirectory': '',
+            'dialogDatasetDirectory': '',
+            'dialogVideoDirectory': '',
+            'dialogExportDirectory': '',
+            'dialogTrainingDirectory': '',
+            'dialogMetadataDirectory': '',
+            'dialogGenericDirectory': '',
             'lastImage': '',
             'lastImageIndex': 0,
             'activeAnnotationMode': 'Boxes',
@@ -22228,6 +22723,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             'networkHeight': None,
             'inferenceBatchSize': None,
             'fpMode': 1 if torch.cuda.is_available() else 0,
+            'sam3StartupWarmup': True,
             'showXYLines': False,
             'crosshairColor': [255, 255, 0],
             'augmentationPercent': 100,
@@ -24083,6 +24579,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
     def cleanup_runtime_resources(self):
         self.metrics_thread_active = False
         self.voice_thread_active = False
+        self._propagation_stop_requested = True
 
         augmentation_job = getattr(self, "_augmentation_job", None)
         if augmentation_job is not None:
@@ -24115,6 +24612,16 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self._release_capture()
         self._close_mss_resources()
         self.stop_existing_workers()
+
+        export_worker = getattr(self, "training_export_worker", None)
+        if export_worker is not None:
+            try:
+                if export_worker.isRunning():
+                    logger.info("Waiting for the active Ultralytics export before shutdown...")
+                    export_worker.wait()
+            except RuntimeError:
+                pass
+            self.training_export_worker = None
 
         if hasattr(self, "threadpool") and self.threadpool is not None:
             self.threadpool.clear()
@@ -24170,7 +24677,23 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         default_keypoints = list(DEFAULT_POSE_KEYPOINT_LABELS)
 
-        default_json_path = os.path.join(self.image_directory, "points.json")
+        default_json_path = resolve_dataset_metadata_path(
+            self.image_directory, "points.json", for_write=True, migrate=True
+        )
+
+        if not os.path.exists(default_json_path):
+            pose_alias_path = resolve_dataset_metadata_path(
+                self.image_directory, "pose.json", migrate=True
+            )
+            if pose_alias_path and os.path.isfile(pose_alias_path):
+                try:
+                    shutil.copy2(pose_alias_path, default_json_path)
+                    logger.info(
+                        "Initialized .darkfusion/points.json from pose schema: %s",
+                        pose_alias_path,
+                    )
+                except OSError as e:
+                    logger.warning(f"Could not initialize points.json from pose.json: {e}")
 
         if not os.path.exists(default_json_path):
             keypoints = []
@@ -24290,12 +24813,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             file_path, _ = QFileDialog.getOpenFileName(
                 self,
                 "Load Keypoint List",
-                os.getcwd(),
+                self.dialog_start_directory("metadata", getattr(self, "current_keypoint_json_path", "")),
                 "JSON Files (*.json);;All Files (*)"
             )
             if not file_path:
                 logger.info("User canceled keypoint list load.")
                 return  # User cancelled manually
+            self.remember_dialog_selection("metadata", file_path)
 
         try:
             with open(file_path, "r", encoding="utf-8") as f:
@@ -24701,15 +25225,23 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
     def get_points_json_path(self):
         if getattr(self, "image_directory", None):
-            return os.path.join(self.image_directory, "points.json")
+            return resolve_dataset_metadata_path(
+                self.image_directory, "points.json", for_write=True, migrate=True
+            )
 
         if getattr(self, "current_file", None):
-            return os.path.join(os.path.dirname(self.current_file), "points.json")
+            return resolve_dataset_metadata_path(
+                os.path.dirname(self.current_file), "points.json", for_write=True, migrate=True
+            )
 
         if getattr(self, "output_path", None):
-            return os.path.join(self.output_path, "points.json")
+            return resolve_dataset_metadata_path(
+                self.output_path, "points.json", for_write=True, migrate=True
+            )
 
-        return os.path.join(os.getcwd(), "points.json")
+        return resolve_dataset_metadata_path(
+            os.getcwd(), "points.json", for_write=True, migrate=True
+        )
 
     def remove_keypoint_index_from_points_json(self, remove_index):
         points_json_path = self.get_points_json_path()
@@ -25005,7 +25537,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                     label_files.append(label_file)
 
         if not label_files:
-            start_dir = os.path.dirname(self.current_file) if getattr(self, "current_file", None) else os.getcwd()
+            start_dir = self.dialog_start_directory(
+                "dataset", os.path.dirname(self.current_file) if getattr(self, "current_file", None) else ""
+            )
 
             selected_dir = QFileDialog.getExistingDirectory(
                 self,
@@ -25015,6 +25549,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
             if not selected_dir:
                 return []
+            self.remember_dialog_selection("dataset", selected_dir)
 
             skip_names = {
                 "classes.txt",
@@ -25142,8 +25677,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             logger.error(f"Failed to auto-save keypoint list: {e}")
 
     def save_keypoint_list(self):
-        settings = QSettings()
-        last_dir = settings.value("last_save_dir", os.getcwd())
+        last_dir = self.dialog_start_directory("metadata", getattr(self, "current_keypoint_json_path", ""))
 
         file_path, _ = QFileDialog.getSaveFileName(
             self,
@@ -25155,7 +25689,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if not file_path:
             return  # User canceled
 
-        settings.setValue("last_save_dir", os.path.dirname(file_path))
+        self.remember_dialog_selection("metadata", file_path)
 
         existing_data = {}
         if os.path.exists(file_path):
@@ -26220,7 +26754,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             return True
 
         os.makedirs(normalized_dir, exist_ok=True)
-        points_path = os.path.join(normalized_dir, "points.json")
+        points_path = resolve_dataset_metadata_path(
+            normalized_dir, "points.json", for_write=True, migrate=True
+        )
 
         try:
             self.save_keypoint_list_to_path(points_path, show_message=False)
@@ -27508,82 +28044,201 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         Load the SAM3 model once and reuse it.
         Expected model path: Sam/sam3.pt
         """
-        if getattr(self, "sam_model", None) is not None:
-            return True
+        lock = getattr(self, "_sam_model_load_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._sam_model_load_lock = lock
 
-        try:
-            sam_path = self._sam_model_path()
-            if not os.path.isabs(sam_path):
-                sam_path = os.path.join(os.getcwd(), sam_path)
+        with lock:
+            if getattr(self, "sam_model", None) is not None:
+                return True
 
-            if not os.path.exists(sam_path):
-                logger.warning(f"SAM3 model not found: {sam_path}")
+            try:
+                sam_path = self._sam_model_path()
+                if not os.path.isabs(sam_path):
+                    sam_path = os.path.join(os.getcwd(), sam_path)
+
+                if not os.path.exists(sam_path):
+                    logger.warning(f"SAM3 model not found: {sam_path}")
+                    self.sam_model = None
+                    return False
+
+                self.sam_model = SAM(sam_path)
+                logger.info(
+                    "Loaded SAM3 model: %s (imgsz=%s, fp16=%s)",
+                    sam_path,
+                    self._sam_imgsz(),
+                    self._sam_half_enabled(),
+                )
+                return True
+
+            except Exception as e:
+                logger.error(f"Failed loading SAM3 model: {e}")
                 self.sam_model = None
                 return False
 
-            self.sam_model = SAM(sam_path)
-            logger.info(
-                "Loaded SAM3 model: %s (imgsz=%s, fp16=%s)",
-                sam_path,
-                self._sam_imgsz(),
-                self._sam_half_enabled(),
-            )
-            return True
-
-        except Exception as e:
-            logger.error(f"Failed loading SAM3 model: {e}")
-            self.sam_model = None
-            return False
-
     def ensure_sam_semantic_predictor_loaded(self, imgsz=None):
         """Lazily create the SAM3 text-prompt predictor used by polygon Snap only."""
+        lock = getattr(self, "_sam_model_load_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._sam_model_load_lock = lock
+
+        with lock:
+            sam_path = self._sam_model_path()
+            if not os.path.isabs(sam_path):
+                sam_path = os.path.join(os.getcwd(), sam_path)
+            sam_path = os.path.abspath(sam_path)
+
+            predictor = getattr(self, "sam_semantic_snap_predictor", None)
+            if (
+                predictor is not None
+                and getattr(self, "_sam_semantic_snap_model_path", None) == sam_path
+            ):
+                return predictor
+
+            if not os.path.exists(sam_path):
+                logger.warning("SAM3 semantic Snap model not found: %s", sam_path)
+                return None
+
+            try:
+                from ultralytics.models.sam import SAM3SemanticPredictor
+
+                semantic_imgsz = int(math.ceil(self._sam_imgsz(imgsz) / 14.0) * 14)
+                overrides = {
+                    "conf": 0.15,
+                    "iou": 0.70,
+                    "task": "segment",
+                    "mode": "predict",
+                    "model": sam_path,
+                    "imgsz": semantic_imgsz,
+                    "device": self._sam_device(),
+                    "save": False,
+                    "verbose": False,
+                }
+                if self._sam_half_enabled() and str(overrides["device"]).startswith("cuda"):
+                    overrides["quantize"] = 16
+
+                predictor = SAM3SemanticPredictor(overrides=overrides)
+                # Ultralytics 8.4.113's SAM3SemanticPredictor thresholds mask
+                # logits with model.mask_threshold, but SAM3SemanticModel does not
+                # define that otherwise-standard SAM attribute.  Initialize the
+                # model here and supply the normal SAM logit threshold without
+                # patching the installed package.
+                predictor.setup_model()
+                if not hasattr(predictor.model, "mask_threshold"):
+                    predictor.model.mask_threshold = 0.0
+                    logger.info(
+                        "Applied SAM3 semantic mask-threshold compatibility fix."
+                    )
+                self.sam_semantic_snap_predictor = predictor
+                self._sam_semantic_snap_model_path = sam_path
+                logger.info(
+                    "Initialized SAM3 semantic predictor for polygon Snap (imgsz=%s).",
+                    overrides["imgsz"],
+                )
+                return predictor
+            except Exception as e:
+                logger.warning("Could not initialize semantic polygon Snap: %s", e)
+                self.sam_semantic_snap_predictor = None
+                self._sam_semantic_snap_model_path = None
+                return None
+
+    def start_sam3_startup_warmup(self):
+        """Preload and prime the reusable SAM3 runtimes without blocking the UI."""
+        if not bool(getattr(self, "settings", {}).get("sam3StartupWarmup", True)):
+            logger.info("SAM3 startup warm-up is disabled.")
+            return False
+        if getattr(self, "_sam3_startup_warmup_active", False):
+            return False
+        worker = getattr(self, "_sam3_startup_warmup_thread", None)
+        if worker is not None and worker.is_alive():
+            return False
+
         sam_path = self._sam_model_path()
         if not os.path.isabs(sam_path):
             sam_path = os.path.join(os.getcwd(), sam_path)
-        sam_path = os.path.abspath(sam_path)
+        if not os.path.isfile(sam_path):
+            logger.warning("Skipping SAM3 startup warm-up; model not found: %s", sam_path)
+            return False
 
-        predictor = getattr(self, "sam_semantic_snap_predictor", None)
-        if (
-            predictor is not None
-            and getattr(self, "_sam_semantic_snap_model_path", None) == sam_path
-        ):
-            return predictor
-
-        if not os.path.exists(sam_path):
-            logger.warning("SAM3 semantic Snap model not found: %s", sam_path)
-            return None
-
-        try:
-            from ultralytics.models.sam import SAM3SemanticPredictor
-
-            semantic_imgsz = int(math.ceil(self._sam_imgsz(imgsz) / 14.0) * 14)
-            overrides = {
-                "conf": 0.15,
-                "iou": 0.70,
-                "task": "segment",
-                "mode": "predict",
-                "model": sam_path,
-                "imgsz": semantic_imgsz,
-                "device": self._sam_device(),
-                "save": False,
-                "verbose": False,
-            }
-            if self._sam_half_enabled() and str(overrides["device"]).startswith("cuda"):
-                overrides["quantize"] = 16
-
-            predictor = SAM3SemanticPredictor(overrides=overrides)
-            self.sam_semantic_snap_predictor = predictor
-            self._sam_semantic_snap_model_path = sam_path
+        prompt_allowed, semantic_allowed, capacity_note = self._sam3_startup_warmup_capacity()
+        if not prompt_allowed:
+            logger.warning("Skipping SAM3 startup warm-up: %s", capacity_note)
+            return False
+        self._sam3_startup_warm_semantic = semantic_allowed
+        if not semantic_allowed:
             logger.info(
-                "Initialized SAM3 semantic predictor for polygon Snap (imgsz=%s).",
-                overrides["imgsz"],
+                "Startup will warm prompt SAM3 only; semantic Snap remains lazy (%s).",
+                capacity_note,
             )
-            return predictor
+
+        self._sam3_startup_warmup_active = True
+        self._sam3_startup_warmup_thread = Thread(
+            target=self._run_sam3_startup_warmup,
+            name="SAM3StartupWarmup",
+            daemon=True,
+        )
+        self._sam3_startup_warmup_thread.start()
+        logger.info("SAM3 startup warm-up started in the background.")
+        return True
+
+    def _sam3_startup_warmup_capacity(self):
+        """Avoid eagerly allocating both 3.45 GB SAM3 runtimes on small systems."""
+        gib = float(1024 ** 3)
+        try:
+            if torch.cuda.is_available():
+                free_bytes, total_bytes = torch.cuda.mem_get_info()
+                free_gib, total_gib = free_bytes / gib, total_bytes / gib
+                prompt_allowed = free_gib >= 5.0
+                semantic_allowed = total_gib >= 12.0 and free_gib >= 11.0
+                return (
+                    prompt_allowed,
+                    semantic_allowed,
+                    f"GPU memory {free_gib:.1f} GB free / {total_gib:.1f} GB total",
+                )
+
+            available_gib = psutil.virtual_memory().available / gib
+            return (
+                available_gib >= 9.0,
+                available_gib >= 18.0,
+                f"system memory {available_gib:.1f} GB available",
+            )
         except Exception as e:
-            logger.warning("Could not initialize semantic polygon Snap: %s", e)
-            self.sam_semantic_snap_predictor = None
-            self._sam_semantic_snap_model_path = None
-            return None
+            logger.debug("Could not measure SAM3 warm-up capacity: %s", e)
+            return True, False, "memory capacity could not be measured"
+
+    def _run_sam3_startup_warmup(self):
+        prompt_ready = False
+        prompt_primed = False
+        semantic_ready = False
+        try:
+            prompt_ready = self.ensure_sam_model_loaded()
+            if prompt_ready:
+                # Prime model setup and CUDA kernels with a small synthetic image.
+                # Real images still require their own encoder pass when opened.
+                dummy = np.zeros((96, 96, 3), dtype=np.uint8)
+                cv2.rectangle(dummy, (24, 24), (72, 72), (255, 255, 255), -1)
+                prompt_primed = self.get_sam_mask(
+                    dummy, [20, 20, 76, 76], imgsz=SAM3_MIN_IMGSZ
+                ) is not None
+
+            # Normal polygon Snap uses a separate text-prompt predictor. Loading
+            # it now removes its one-time weight/setup delay; image encoding still
+            # happens for the actual frame when Snap is used.
+            if getattr(self, "_sam3_startup_warm_semantic", True):
+                semantic_ready = self.ensure_sam_semantic_predictor_loaded() is not None
+            logger.info(
+                "SAM3 startup warm-up finished (prompt_loaded=%s, prompt_primed=%s, semantic_loaded=%s).",
+                prompt_ready,
+                prompt_primed,
+                semantic_ready,
+            )
+        except Exception as e:
+            logger.warning("SAM3 startup warm-up did not complete: %s", e, exc_info=True)
+            self._safe_empty_cache()
+        finally:
+            self._sam3_startup_warmup_active = False
 
     def get_current_class_name_safe(self, class_id=None):
         try:
@@ -27943,6 +28598,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
             with torch.inference_mode():
                 predictor.set_image(image_for_sam)
+                # Retain the guard in case a future predictor resets/replaces
+                # its model while changing source images.
+                if not hasattr(predictor.model, "mask_threshold"):
+                    predictor.model.mask_threshold = 0.0
                 results = predictor(
                     text=[prompt],
                     bboxes=[[x1, y1, x2, y2]],
@@ -28749,6 +29408,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if contour is None:
             return None
         seg_points = contour.reshape(-1, 2)
+        # Four polygon points serialize to the same token count as a YOLO OBB.
+        # Add one harmless collinear midpoint so the saved segmentation remains
+        # unambiguous even when it is later opened outside Segmentation mode.
+        if len(seg_points) == 4:
+            midpoint = np.rint(
+                (seg_points[0].astype(np.float32) + seg_points[1].astype(np.float32)) / 2.0
+            ).astype(seg_points.dtype)
+            seg_points = np.insert(seg_points, 1, midpoint, axis=0)
         return f"{class_id} " + " ".join(
             f"{x / img_width:.6f} {y / img_height:.6f}" for x, y in seg_points
         )
@@ -30199,10 +30866,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
     # -----------------------------
 
     def copy_classes_txt(self, target_directory):
-        classes_txt_path = os.path.join(self.image_directory, "classes.txt")
+        classes_txt_path = resolve_dataset_classes_path(self.image_directory, migrate=True)
         if os.path.exists(classes_txt_path):
-            os.makedirs(target_directory, exist_ok=True)
-            new_path = os.path.join(target_directory, "classes.txt")
+            new_path = resolve_dataset_classes_path(
+                target_directory, for_write=True, migrate=True
+            )
             try:
                 shutil.copy2(classes_txt_path, new_path)
                 logging.info("Copied classes.txt to %s", new_path)
@@ -30212,7 +30880,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             logging.warning("classes.txt file not found. Skipping copy operation.")
 
     def load_num_classes(self):
-        path = os.path.join(self.image_directory, "classes.txt")
+        path = resolve_dataset_classes_path(self.image_directory, migrate=True)
         if os.path.exists(path):
             with open(path, "r", encoding="utf-8") as f:
                 self.num_classes = len([line.strip() for line in f if line.strip()])
@@ -30632,17 +31300,19 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         return candidate
 
     def copy_dataset_conversion_metadata(self, dataset_dir, output_dir):
-        metadata_names = (
-            "classes.txt",
-            "points.json",
-            "pose.json",
-            "data.yaml",
-            "dataset.yaml",
-            "obj.names",
-        )
-
         copied = 0
-        for name in metadata_names:
+        for name in DATASET_METADATA_FILES:
+            source = resolve_dataset_metadata_path(dataset_dir, name, migrate=True)
+            if not os.path.isfile(source):
+                continue
+            try:
+                target = dataset_metadata_path(output_dir, name, create_parent=True)
+                shutil.copy2(source, target)
+                copied += 1
+            except Exception as e:
+                logger.warning(f"Failed copying dataset metadata {source}: {e}")
+
+        for name in ("data.yaml", "dataset.yaml", "obj.names"):
             source = os.path.join(dataset_dir, name)
             if not os.path.isfile(source):
                 continue
@@ -30968,9 +31638,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
     def download_videos(self):
         logger.debug("download_videos is called")
 
-        directory = QtWidgets.QFileDialog.getExistingDirectory(self, 'Select download directory')
+        directory = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            'Select download directory',
+            self.dialog_start_directory("video", getattr(self, "output_path", "")),
+        )
         if not directory:
             return  # Ensure a directory is selected
+        self.remember_dialog_selection("video", directory)
 
         started_download = False
         table = getattr(self, "video_table", None)
@@ -32510,8 +33185,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             self.set_extraction_ui_state("idle", "Extraction stopped.")
 
     def set_output_directory(self):
-        directory = QFileDialog.getExistingDirectory(self, "Select Output Directory")
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "Select Output Directory",
+            self.dialog_start_directory("video", getattr(self, "output_path", "")),
+        )
         if directory:
+            self.remember_dialog_selection("video", directory)
             self.output_path = directory  # Update output path
             self.set_extraction_ui_state("idle", "Output folder set. Click Extract to start.")
             self.queue_settings_save()
@@ -35383,13 +36063,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         video_path, _ = QFileDialog.getOpenFileName(
             self,
             "Select Video",
-            "",
+            self.dialog_start_directory("video"),
             f"Videos ({VIDEO_EXTENSIONS})"
         )
 
         if not video_path:
             return  # User cancelled
 
+        self.remember_dialog_selection("video", video_path)
         self.add_video_to_table(video_path)
 
     def add_video_to_table(self, video_path):
@@ -37238,10 +37919,15 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         options = QFileDialog.Options()
         options |= QFileDialog.ReadOnly
         file_name, _ = QFileDialog.getOpenFileName(
-            self, "Open Weights/Model", "", "Model Files (*.pt *.engine *.onnx *.weights)", options=options
+            self,
+            "Open Weights/Model",
+            self.dialog_start_directory("model"),
+            "Model Files (*.pt *.engine *.onnx *.weights)",
+            options=options,
         )
 
         if file_name:
+            self.remember_dialog_selection("model", file_name)
             self.weights_file_path = file_name
             self.model_directory = os.path.dirname(file_name)
             self.model_type = self.determine_model_type(file_name)
@@ -37378,6 +38064,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             logger.info("Darknet CFG selection skipped after loading weights.")
             return False
 
+        self.remember_dialog_selection("model", cfg_name)
         self.cfg_file_path = cfg_name
         self.settings["lastCfgPath"] = self.normalize_path(cfg_name)
         self.saveSettings()
@@ -37390,11 +38077,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         start_path = (
             self.suggested_cfg_path_for_weights(self.weights_file_path)
             if getattr(self, "weights_file_path", None)
-            else os.getcwd()
+            else self.dialog_start_directory("model")
         )
         file_name, _ = QFileDialog.getOpenFileName(
             self, "Open CFG", start_path, "Config Files (*.cfg)", options=options)
         if file_name:
+            self.remember_dialog_selection("model", file_name)
             self.cfg_file_path = file_name  # Store the cfg file path
             self.settings["lastCfgPath"] = self.normalize_path(file_name)
             self.saveSettings()
@@ -37789,7 +38477,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         num_expected_keypoints = self.keypoint_list.rowCount()
 
-        points_file = os.path.join(self.image_directory, "points.json")
+        points_file = resolve_dataset_pose_schema_path(self.image_directory, migrate=True)
         if os.path.exists(points_file):
             try:
                 with open(points_file, "r", encoding="utf-8") as f:
@@ -37977,28 +38665,25 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 continue
 
             for file_name in ("points.json", "pose.json"):
-                for path in (
-                    os.path.join(directory, file_name),
-                    os.path.join(directory, PROJECT_SETTINGS_DIR, file_name),
-                ):
-                    if not os.path.exists(path):
-                        continue
+                path = resolve_dataset_metadata_path(directory, file_name, migrate=True)
+                if not os.path.exists(path):
+                    continue
 
-                    data = read_json_file(path, {})
-                    if not isinstance(data, dict):
-                        continue
+                data = read_json_file(path, {})
+                if not isinstance(data, dict):
+                    continue
 
-                    keypoints = data.get("keypoints")
-                    if isinstance(keypoints, list) and keypoints:
-                        return True
+                keypoints = data.get("keypoints")
+                if isinstance(keypoints, list) and keypoints:
+                    return True
 
-                    kpt_shape = data.get("kpt_shape")
-                    if isinstance(kpt_shape, list) and kpt_shape:
-                        try:
-                            if int(kpt_shape[0]) > 0:
-                                return True
-                        except Exception:
-                            pass
+                kpt_shape = data.get("kpt_shape")
+                if isinstance(kpt_shape, list) and kpt_shape:
+                    try:
+                        if int(kpt_shape[0]) > 0:
+                            return True
+                    except Exception:
+                        pass
 
         try:
             self.sync_class_labels_from_dropdown()
@@ -38063,19 +38748,25 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
             try:
                 if image_file:
-                    candidate_files.append(os.path.join(os.path.dirname(image_file), "points.json"))
+                    candidate_files.append(resolve_dataset_pose_schema_path(
+                        os.path.dirname(image_file), migrate=True
+                    ))
             except Exception:
                 pass
 
             try:
                 if getattr(self, "image_directory", None):
-                    candidate_files.append(os.path.join(self.image_directory, "points.json"))
+                    candidate_files.append(resolve_dataset_pose_schema_path(
+                        self.image_directory, migrate=True
+                    ))
             except Exception:
                 pass
 
             try:
                 if getattr(self, "output_path", None):
-                    candidate_files.append(os.path.join(self.output_path, "points.json"))
+                    candidate_files.append(resolve_dataset_pose_schema_path(
+                        self.output_path, migrate=True
+                    ))
             except Exception:
                 pass
 
@@ -38550,7 +39241,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.restore_classes_dropdown_checks(saved_check_state)
 
         if write_classes_file and data_directory:
-            classes_file = os.path.join(data_directory, "classes.txt")
+            classes_file = resolve_dataset_classes_path(
+                data_directory, for_write=True, migrate=True
+            )
             try:
                 with open(classes_file, "w", encoding="utf-8") as f:
                     for name in class_names:
@@ -40703,6 +41396,71 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         # Implementation of the method
         pass
 
+    def clear_current_frame_labels(self):
+        """Clear annotations from only the currently displayed image."""
+        current_file = getattr(self, "current_file", None)
+        if not current_file or self.is_placeholder_file(current_file):
+            QMessageBox.information(
+                self, "Clear Frame Labels", "Open an image before clearing its labels."
+            )
+            return False
+
+        label_file = self.get_label_file(current_file)
+        existing_lines = (
+            self.load_label_lines(label_file)
+            if label_file and os.path.exists(label_file)
+            else []
+        )
+        if not existing_lines:
+            QMessageBox.information(
+                self,
+                "Clear Frame Labels",
+                "The current image does not have any labels to clear.",
+            )
+            return False
+
+        answer = QMessageBox.question(
+            self,
+            "Clear Current Frame Labels",
+            (
+                f"Remove all {len(existing_lines)} annotation(s) from only this frame?\n\n"
+                f"{os.path.basename(current_file)}\n\n"
+                "The image will be kept. Other frames will not be changed."
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return False
+
+        # Keep an empty label file so this remains an intentional negative frame
+        # rather than becoming an unlabeled/missing-label image.
+        if not self._write_label_lines(label_file, []):
+            QMessageBox.warning(
+                self,
+                "Clear Frame Labels",
+                f"Could not clear {os.path.basename(label_file)}.",
+            )
+            return False
+
+        self.selected_bbox = None
+        if hasattr(self, "screen_view"):
+            self.screen_view.selected_bbox = None
+        self.display_image(current_file, rebuild_preview=False)
+        self.refresh_annotation_preview_after_save(current_file)
+        self.update_dataset_progress()
+        if hasattr(self, "statusBar"):
+            self.statusBar().showMessage(
+                f"Cleared {len(existing_lines)} label(s) from the current frame only.",
+                4000,
+            )
+        logger.info(
+            "Cleared %s annotation(s) from current frame only: %s",
+            len(existing_lines),
+            current_file,
+        )
+        return True
+
     def clear_class_boxes(self):
         """
         Clears bounding boxes for the selected class.
@@ -41228,11 +41986,15 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         options |= QFileDialog.ReadOnly
 
         last_used_directory = os.getenv("ULTRADARKFUSION_LAST_DIR", None)
-        start_directory = last_used_directory if last_used_directory and os.path.exists(last_used_directory) else os.getcwd()
+        start_directory = self.dialog_start_directory(
+            "dataset",
+            last_used_directory if last_used_directory and os.path.exists(last_used_directory) else None,
+        )
 
-        dir_name = QFileDialog.getExistingDirectory(None, "Open Image Directory", start_directory, options=options)
+        dir_name = QFileDialog.getExistingDirectory(self, "Open Image Directory", start_directory, options=options)
         if not dir_name:
             return
+        self.remember_dialog_selection("dataset", dir_name)
 
         self.set_main_progress(0, 100)
         self.clear_annotations()
@@ -41864,10 +42626,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             if not directory:
                 continue
             candidates.extend([
-                os.path.join(directory, "points.json"),
-                os.path.join(directory, "pose.json"),
-                os.path.join(directory, PROJECT_SETTINGS_DIR, "points.json"),
-                os.path.join(directory, PROJECT_SETTINGS_DIR, "pose.json"),
+                resolve_dataset_metadata_path(directory, "points.json", migrate=True),
+                resolve_dataset_metadata_path(directory, "pose.json", migrate=True),
             ])
 
         seen = set()
@@ -43451,7 +44211,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         #  Determine correct directory (image or video mode)
         directory = self.image_directory if self.image_directory else self.output_path or os.getcwd()
-        classes_file_path = os.path.join(directory, "classes.txt")
+        classes_file_path = resolve_dataset_classes_path(
+            directory, for_write=True, migrate=True
+        )
 
         #  Load existing classes
         existing_classes = self.load_classes(data_directory=directory)
@@ -44601,7 +45363,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
     def load_classes(self, data_directory=None, default_classes=None, create_if_missing=True):
         """
-        Load class names from 'classes.txt'. If missing, create with default classes.
+        Load class names from '.darkfusion/classes.txt'. Legacy root files migrate automatically.
         """
         active_directory = data_directory or self.image_directory or os.getcwd()
 
@@ -44609,7 +45371,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             logger.error(f"Directory does not exist: {active_directory}")
             return []
 
-        classes_file = os.path.join(active_directory, 'classes.txt')
+        migrate_darkfusion_dataset_metadata(active_directory)
+        classes_file = resolve_dataset_classes_path(active_directory, migrate=True)
+        if not classes_file and create_if_missing:
+            classes_file = resolve_dataset_classes_path(
+                active_directory, for_write=True, migrate=True
+            )
 
         # Try to load existing classes.txt
         if os.path.exists(classes_file):
@@ -44622,6 +45389,16 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                         .replace('\ufeff', '')    # Byte Order Mark (BOM)
                         for line in f if line.strip()
                     ]
+
+                canonical_classes = dataset_metadata_path(
+                    active_directory, "classes.txt", create_parent=True
+                )
+                if os.path.normcase(os.path.abspath(classes_file)) != os.path.normcase(os.path.abspath(canonical_classes)):
+                    try:
+                        with open(canonical_classes, "w", encoding="utf-8") as canonical_file:
+                            canonical_file.write("\n".join(class_names) + ("\n" if class_names else ""))
+                    except OSError as e:
+                        logger.warning(f"Could not create canonical DarkFusion class list: {e}")
 
                 if hasattr(self, "class_names") and self.class_names == class_names:
                     logger.debug("No changes detected in classes.txt. Skipping unnecessary updates.")
@@ -44639,7 +45416,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             except Exception as e:
                 logger.error(f"Failed reading {classes_file}: {e}")
 
-        if create_if_missing and not os.path.exists(classes_file):
+        if create_if_missing and classes_file and not os.path.exists(classes_file):
             default_classes = default_classes or ['person']
             try:
                 with open(classes_file, 'w', encoding='utf-8') as f:
@@ -44768,6 +45545,928 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         """Reset the set of logged label files when switching datasets."""
         self.logged_label_files.clear()
 
+    # ------------------------------------------------------------------
+    # Assisted label propagation (image sequences and video frames)
+    # ------------------------------------------------------------------
+
+    def toggle_image_navigation_propagation(self, enabled):
+        """Enable one-frame-at-a-time propagation through normal image navigation."""
+        button = getattr(self, "propagate_labels_button", None)
+        enabled = bool(enabled)
+
+        if enabled:
+            current_file = getattr(self, "current_file", None)
+            scene = self.screen_view.scene() if hasattr(self, "screen_view") else None
+            if current_file and scene is not None and not self.is_placeholder_file(current_file):
+                self.save_bounding_boxes(
+                    current_file, scene.width(), scene.height(), scene=scene
+                )
+            label_file = self.get_label_file(current_file) if current_file else None
+            seed_lines = (
+                self.load_label_lines(label_file)
+                if label_file and os.path.exists(label_file)
+                else []
+            )
+            if not seed_lines:
+                if button is not None:
+                    button.blockSignals(True)
+                    button.setChecked(False)
+                    button.blockSignals(False)
+                QMessageBox.information(
+                    self,
+                    "Propagate Labels",
+                    "Draw and finish at least one annotation on the current image first.",
+                )
+                enabled = False
+            elif not self._propagation_pose_ready(seed_lines):
+                if button is not None:
+                    button.blockSignals(True)
+                    button.setChecked(False)
+                    button.blockSignals(False)
+                enabled = False
+
+        self._image_navigation_propagation_enabled = enabled
+        if enabled and getattr(self, "auto_scan_checkbox", None) is not None:
+            self.auto_scan_checkbox.setChecked(False)
+            self.stop_next_timer()
+            self.stop_prev_timer()
+
+        if button is not None:
+            button.setText("Propagate: On" if enabled else "Propagate: Off")
+            button.setToolTip(
+                "Propagation is ON. Prev or Next will propagate all current annotations "
+                "to exactly one adjacent image. Correct them there before moving again."
+                if enabled
+                else "Turn on frame-by-frame propagation. Each Prev or Next move copies all "
+                "current annotations to that one adjacent image and corrects them with SAM3."
+            )
+            button.setStyleSheet(
+                "QPushButton { border: 1px solid #39b86b; color: #b8f5cc; }"
+                if enabled
+                else ""
+            )
+
+        if hasattr(self, "statusBar"):
+            self.statusBar().showMessage(
+                "Frame-by-frame propagation enabled. Use Prev or Next to move one image."
+                if enabled
+                else "Frame-by-frame propagation disabled.",
+                4000,
+            )
+
+    def _propagate_labels_to_adjacent_image(self, source_file, target_file):
+        """Propagate all saved source annotations to one adjacent target image."""
+        source_file = self.normalize_path(source_file)
+        target_file = self.normalize_path(target_file)
+        source_label = self.get_label_file(source_file)
+        seed_lines = (
+            self.load_label_lines(source_label)
+            if source_label and os.path.exists(source_label)
+            else []
+        )
+        if not seed_lines:
+            return False, "Propagation skipped: the current image has no finished annotations."
+        if not self._propagation_pose_ready(seed_lines):
+            return False, "Propagation skipped: compatible pose weights are not loaded."
+
+        source_image = self._read_image_cv(source_file)
+        target_image = self._read_image_cv(target_file)
+        if source_image is None or target_image is None:
+            return False, "Propagation skipped: an adjacent image could not be read."
+
+        new_lines = self._propagate_lines_to_frame(
+            source_image, target_image, seed_lines, 0.70
+        )
+        if not new_lines:
+            return False, "Propagation could not confidently follow the annotations on this frame."
+
+        target_label = self.get_label_file(target_file)
+        existing_lines = (
+            self.load_label_lines(target_label)
+            if target_label and os.path.exists(target_label)
+            else []
+        )
+        height, width = target_image.shape[:2]
+        merged_lines, changed, _review_needed = self._merge_propagated_lines(
+            existing_lines, new_lines, "skip", (width, height)
+        )
+        if not changed:
+            return False, "Target labels were kept because matching annotations already exist."
+
+        manifest = self._begin_propagation_batch(
+            os.path.dirname(source_file), "image_navigation"
+        )
+        self._backup_propagation_label(manifest, target_label)
+        target_parent = os.path.dirname(target_label)
+        if target_parent:
+            os.makedirs(target_parent, exist_ok=True)
+        if not self._write_label_lines(target_label, merged_lines):
+            return False, f"Propagation could not save {os.path.basename(target_label)}."
+        self._finish_propagation_batch(manifest)
+        return True, f"Propagated {len(new_lines)} annotation(s) to {os.path.basename(target_file)}."
+
+    def open_label_propagation_dialog(self, source_kind="images"):
+        source_kind = "video" if source_kind == "video" else "images"
+        if source_kind == "images":
+            button = getattr(self, "propagate_labels_button", None)
+            if button is not None:
+                button.toggle()
+            return
+        if source_kind == "images" and not getattr(self, "current_file", None):
+            QMessageBox.information(self, "Propagate Labels", "Open an image dataset first.")
+            return
+        if source_kind == "video" and getattr(self, "_last_video_frame_bgr", None) is None:
+            QMessageBox.information(self, "Propagate Labels", "Open and pause a video on the starting frame first.")
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Propagate Labels")
+        dialog.setModal(False)
+        dialog.resize(500, 360)
+        layout = QVBoxLayout(dialog)
+
+        intro = QLabel(
+            "Start from the selected annotation and let SAM3 adjust it across "
+            + ("video frames." if source_kind == "video" else "the ordered image sequence.")
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        form = QtWidgets.QFormLayout()
+        object_combo = QComboBox(dialog)
+        object_combo.addItem("Selected object", "selected")
+        object_combo.addItem("All objects", "all")
+        if source_kind == "video":
+            object_combo.setItemText(0, "First visible tracked object")
+            object_combo.setItemText(1, "All visible tracked objects")
+
+        direction_combo = QComboBox(dialog)
+        direction_combo.addItem("Forward", "forward")
+        direction_combo.addItem("Backward", "backward")
+        direction_combo.addItem("Both directions", "both")
+
+        range_combo = QComboBox(dialog)
+        for text, value in (("Next frame", 1), ("10 frames", 10), ("50 frames", 50), ("Until uncertain", 0)):
+            range_combo.addItem(text, value)
+
+        existing_combo = QComboBox(dialog)
+        existing_combo.addItem("Skip existing labels", "skip")
+        existing_combo.addItem("Pause for review", "review")
+        existing_combo.addItem("Replace matching class", "replace")
+
+        confidence_spin = QDoubleSpinBox(dialog)
+        confidence_spin.setRange(0.10, 0.95)
+        confidence_spin.setSingleStep(0.05)
+        confidence_spin.setValue(0.70)
+        confidence_spin.setToolTip("Minimum pose-model confidence; SAM3 masks also pass geometry checks.")
+
+        scene_cut_check = QCheckBox("Stop on likely scene change", dialog)
+        scene_cut_check.setChecked(True)
+        open_results_check = QCheckBox("Open propagated frames in Label when finished", dialog)
+        open_results_check.setChecked(source_kind == "video")
+        open_results_check.setVisible(source_kind == "video")
+
+        form.addRow("Objects", object_combo)
+        form.addRow("Direction", direction_combo)
+        form.addRow("Range", range_combo)
+        form.addRow("Existing labels", existing_combo)
+        form.addRow("Confidence", confidence_spin)
+        form.addRow("", scene_cut_check)
+        form.addRow("", open_results_check)
+        layout.addLayout(form)
+
+        status = QLabel("Ready. Existing labels are protected by default.", dialog)
+        status.setWordWrap(True)
+        status.setStyleSheet("color: #9aa4af;")
+        layout.addWidget(status)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Close, parent=dialog
+        )
+        run_button = buttons.addButton(
+            "Propagate", QtWidgets.QDialogButtonBox.ActionRole
+        )
+        stop_button = buttons.addButton(
+            "Stop", QtWidgets.QDialogButtonBox.ActionRole
+        )
+        undo_button = buttons.addButton(
+            "Undo Last Batch", QtWidgets.QDialogButtonBox.ActionRole
+        )
+        stop_button.setEnabled(False)
+        undo_button.setEnabled(bool(getattr(self, "_last_propagation_manifest", None)))
+        buttons.rejected.connect(dialog.close)
+        stop_button.clicked.connect(self.stop_label_propagation)
+        undo_button.clicked.connect(lambda: self.undo_last_label_propagation(status))
+
+        def run():
+            run_button.setEnabled(False)
+            stop_button.setEnabled(True)
+            self._propagation_stop_requested = False
+            options = {
+                "objects": object_combo.currentData(),
+                "direction": direction_combo.currentData(),
+                "limit": int(range_combo.currentData()),
+                "existing": existing_combo.currentData(),
+                "confidence": float(confidence_spin.value()),
+                "stop_scene_cut": scene_cut_check.isChecked(),
+                "open_results": open_results_check.isChecked(),
+            }
+            try:
+                if source_kind == "video":
+                    result = self.propagate_video_labels(options, status)
+                else:
+                    result = self.propagate_image_sequence_labels(options, status)
+                if result:
+                    undo_button.setEnabled(True)
+            finally:
+                run_button.setEnabled(True)
+                stop_button.setEnabled(False)
+
+        run_button.clicked.connect(run)
+        layout.addWidget(buttons)
+        self._propagation_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def stop_label_propagation(self):
+        self._propagation_stop_requested = True
+
+    def _propagation_seed_lines_from_image(self, object_mode):
+        scene = self.screen_view.scene()
+        if scene is not None and self.current_file:
+            self.save_bounding_boxes(self.current_file, scene.width(), scene.height(), scene=scene)
+        label_file = self.get_label_file(self.current_file)
+        lines = self.load_label_lines(label_file) if label_file and os.path.exists(label_file) else []
+        if object_mode == "all":
+            return lines
+
+        selected = getattr(self.screen_view, "selected_bbox", None) or getattr(self, "selected_bbox", None)
+        if selected is None and scene is not None:
+            selected_items = [
+                item for item in scene.selectedItems()
+                if isinstance(item, (BoundingBoxDrawer, SegmentationDrawer, OBBDrawer))
+            ]
+            selected = selected_items[0] if selected_items else None
+        line_index = getattr(selected, "true_line_index", None) if selected is not None else None
+        if isinstance(line_index, int) and 0 <= line_index < len(lines):
+            return [lines[line_index]]
+        QMessageBox.information(
+            self,
+            "Select an Annotation",
+            "Select an annotation first, or choose All objects in Propagate Labels.",
+        )
+        return []
+
+    def _propagation_seed_lines_from_video(self, object_mode):
+        overlay = getattr(self, "latest_video_overlay", None) or {}
+        frame = getattr(self, "_last_video_frame_bgr", None)
+        if frame is None:
+            return []
+        frame_h, frame_w = frame.shape[:2]
+        overlay_h, overlay_w = overlay.get("frame_shape") or (frame_h, frame_w)
+        scale_x, scale_y = frame_w / max(1, overlay_w), frame_h / max(1, overlay_h)
+        lines = []
+        boxes = overlay.get("boxes") or []
+        used_box_indexes = set()
+        for keypoint_index, keypoint_item in enumerate(overlay.get("keypoints") or []):
+            if not isinstance(keypoint_item, dict):
+                continue
+            points = keypoint_item.get("points")
+            if points is None or len(points) == 0:
+                continue
+            class_id = int(keypoint_item.get("class_id", 0))
+            visibility = keypoint_item.get("visibility")
+            confidences = keypoint_item.get("confidence")
+            visibility = [] if visibility is None else visibility
+            confidences = [] if confidences is None else confidences
+            box = boxes[keypoint_index] if keypoint_index < len(boxes) else None
+            xyxy = box.get("xyxy") if isinstance(box, dict) else None
+            if xyxy and len(xyxy) >= 4:
+                used_box_indexes.add(keypoint_index)
+                x1, y1, x2, y2 = [float(v) for v in xyxy[:4]]
+                x1, x2, y1, y2 = x1 * scale_x, x2 * scale_x, y1 * scale_y, y2 * scale_y
+            else:
+                visible_points = [
+                    (float(point[0]) * scale_x, float(point[1]) * scale_y)
+                    for point in points if len(point) >= 2 and (float(point[0]) > 0 or float(point[1]) > 0)
+                ]
+                if not visible_points:
+                    continue
+                xs, ys = zip(*visible_points)
+                x1, y1, x2, y2 = min(xs), min(ys), max(xs), max(ys)
+            xc, yc, bw, bh = self._xyxy_to_yolo_xywh((x1, y1, x2, y2), frame_w, frame_h)
+            values = []
+            for index, point in enumerate(points):
+                px, py = float(point[0]) * scale_x, float(point[1]) * scale_y
+                try:
+                    point_visible = int(float(visibility[index])) > 0
+                except Exception:
+                    try:
+                        point_visible = float(confidences[index]) > 0.01
+                    except Exception:
+                        point_visible = px > 0 or py > 0
+                values.extend((px / frame_w if point_visible else 0.0, py / frame_h if point_visible else 0.0, 2 if point_visible else 0))
+            lines.append(
+                f"{class_id} {xc:.6f} {yc:.6f} {bw:.6f} {bh:.6f} "
+                + " ".join(f"{value:.6f}" if not isinstance(value, int) else str(value) for value in values)
+            )
+        for polygon in overlay.get("polygons") or []:
+            points = polygon.get("points") or []
+            if len(points) < 3:
+                continue
+            values = []
+            for x, y in points:
+                values.extend((float(x) * scale_x / frame_w, float(y) * scale_y / frame_h))
+            lines.append(f"{int(polygon.get('class_id', 0))} " + " ".join(f"{v:.6f}" for v in values))
+        for box_index, box in enumerate(boxes):
+            if box_index in used_box_indexes:
+                continue
+            xyxy = box.get("xyxy") or []
+            if len(xyxy) < 4:
+                continue
+            x1, y1, x2, y2 = [float(v) for v in xyxy[:4]]
+            x1, x2 = x1 * scale_x, x2 * scale_x
+            y1, y2 = y1 * scale_y, y2 * scale_y
+            xc, yc, bw, bh = self._xyxy_to_yolo_xywh((x1, y1, x2, y2), frame_w, frame_h)
+            lines.append(f"{int(box.get('class_id', 0))} {xc:.6f} {yc:.6f} {bw:.6f} {bh:.6f}")
+        return lines[:1] if object_mode == "selected" else lines
+
+    def _propagation_pose_ready(self, lines):
+        requires_pose = False
+        for line in lines:
+            try:
+                obj = BoundingBox.from_str(line, preferred_polygon_type=self._polygon_label_parse_preference())
+                requires_pose = requires_pose or bool(obj and getattr(obj, "keypoints", None))
+            except Exception:
+                pass
+        if not requires_pose:
+            return True
+        task, mode = self.detect_loaded_model_task(getattr(self, "weights_file_path", None))
+        ready = getattr(self, "model", None) is not None and (mode == "Keypoints" or str(task).lower() == "pose")
+        if not ready:
+            QMessageBox.warning(
+                self,
+                "Pose Weights Required",
+                "Load compatible pose weights before propagating keypoint annotations.",
+            )
+        return ready
+
+    @staticmethod
+    def _propagation_iou(first, second):
+        ax1, ay1, ax2, ay2 = first
+        bx1, by1, bx2, by2 = second
+        ix1, iy1, ix2, iy2 = max(ax1, bx1), max(ay1, by1), min(ax2, bx2), min(ay2, by2)
+        intersection = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+        union = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1) + max(0.0, bx2 - bx1) * max(0.0, by2 - by1) - intersection
+        return intersection / union if union > 0 else 0.0
+
+    def _propagation_shift_bbox(self, previous_image, next_image, bbox):
+        try:
+            previous_gray = cv2.cvtColor(previous_image, cv2.COLOR_BGR2GRAY)
+            next_gray = cv2.cvtColor(next_image, cv2.COLOR_BGR2GRAY)
+            previous_h, previous_w = previous_gray.shape[:2]
+            next_h, next_w = next_gray.shape[:2]
+            scale_x = next_w / max(1, previous_w)
+            scale_y = next_h / max(1, previous_h)
+            x1, y1, x2, y2 = (
+                int(round(float(bbox[0]) * scale_x)),
+                int(round(float(bbox[1]) * scale_y)),
+                int(round(float(bbox[2]) * scale_x)),
+                int(round(float(bbox[3]) * scale_y)),
+            )
+            if (previous_w, previous_h) != (next_w, next_h):
+                previous_gray = cv2.resize(
+                    previous_gray, (next_w, next_h), interpolation=cv2.INTER_LINEAR
+                )
+            mask = np.zeros_like(previous_gray)
+            mask[max(0, y1):max(y1 + 1, y2), max(0, x1):max(x1 + 1, x2)] = 255
+            points = cv2.goodFeaturesToTrack(previous_gray, 80, 0.01, 5, mask=mask)
+            if points is None or len(points) < 3:
+                return x1, y1, x2, y2
+            moved, status, _error = cv2.calcOpticalFlowPyrLK(previous_gray, next_gray, points, None)
+            valid = status.reshape(-1) > 0
+            if valid.sum() < 3:
+                return x1, y1, x2, y2
+            delta = np.median(moved[valid] - points[valid], axis=0).reshape(-1)
+            dx, dy = float(delta[0]), float(delta[1])
+            return x1 + dx, y1 + dy, x2 + dx, y2 + dy
+        except Exception:
+            return bbox
+
+    def _propagation_shifted_segmentation_guide(
+        self,
+        box,
+        previous_width,
+        previous_height,
+        target_width,
+        target_height,
+        source_bbox,
+        shifted_bbox,
+    ):
+        """Move the previous polygon mask into the target frame as a Snap guide."""
+        segmentation = getattr(box, "segmentation", None)
+        if not segmentation:
+            return None
+        source_mask = self.polygon_to_mask(
+            segmentation, previous_width, previous_height
+        )
+        if source_mask is None or not np.any(source_mask):
+            return None
+
+        guide = source_mask.astype(np.uint8)
+        if (previous_width, previous_height) != (target_width, target_height):
+            guide = cv2.resize(
+                guide,
+                (target_width, target_height),
+                interpolation=cv2.INTER_NEAREST,
+            )
+
+        scaled_source_x = float(source_bbox[0]) * target_width / max(1, previous_width)
+        scaled_source_y = float(source_bbox[1]) * target_height / max(1, previous_height)
+        dx = float(shifted_bbox[0]) - scaled_source_x
+        dy = float(shifted_bbox[1]) - scaled_source_y
+        transform = np.float32([[1.0, 0.0, dx], [0.0, 1.0, dy]])
+        guide = cv2.warpAffine(
+            guide,
+            transform,
+            (target_width, target_height),
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+        return guide if np.count_nonzero(guide) >= 3 else None
+
+    def _propagation_pose_line(self, image, prompt_bbox, class_id, confidence):
+        model = getattr(self, "model", None)
+        if model is None:
+            return None
+        task, mode = self.detect_loaded_model_task(getattr(self, "weights_file_path", None))
+        if mode != "Keypoints" and str(task).lower() != "pose":
+            return None
+        try:
+            results = model.predict(source=image, conf=confidence, verbose=False, device=str(DEVICE))
+            best = None
+            best_iou = 0.0
+            for result in results or []:
+                boxes = getattr(getattr(result, "boxes", None), "xyxy", None)
+                keypoints = getattr(result, "keypoints", None)
+                if boxes is None or keypoints is None:
+                    continue
+                boxes_np = boxes.detach().cpu().numpy()
+                xy_np = keypoints.xy.detach().cpu().numpy()
+                conf_tensor = getattr(keypoints, "conf", None)
+                conf_np = conf_tensor.detach().cpu().numpy() if conf_tensor is not None else None
+                for index, xyxy in enumerate(boxes_np):
+                    score = self._propagation_iou(prompt_bbox, xyxy[:4])
+                    if score > best_iou:
+                        best_iou = score
+                        best = (xyxy[:4], xy_np[index], conf_np[index] if conf_np is not None else None)
+            if best is None or best_iou < 0.05:
+                return None
+            h, w = image.shape[:2]
+            x1, y1, x2, y2 = best[0]
+            xc, yc, bw, bh = self._xyxy_to_yolo_xywh((x1, y1, x2, y2), w, h)
+            values = []
+            for index, (x, y) in enumerate(best[1]):
+                point_conf = float(best[2][index]) if best[2] is not None else 1.0
+                visibility = 2 if point_conf >= confidence else 0
+                values.extend((float(x) / w if visibility else 0.0, float(y) / h if visibility else 0.0, visibility))
+            return f"{class_id} {xc:.6f} {yc:.6f} {bw:.6f} {bh:.6f} " + " ".join(
+                f"{value:.6f}" if not isinstance(value, int) else str(value) for value in values
+            )
+        except Exception as e:
+            logger.warning(f"Pose propagation failed: {e}")
+            return None
+
+    def _propagate_lines_to_frame(self, previous_image, target_image, previous_lines, confidence):
+        target_h, target_w = target_image.shape[:2]
+        previous_h, previous_w = previous_image.shape[:2]
+        output_lines = []
+        for line in previous_lines:
+            try:
+                box = BoundingBox.from_str(line, preferred_polygon_type=self._polygon_label_parse_preference())
+                if box is None:
+                    continue
+                source_bbox = self._label_seed_bbox(box, previous_w, previous_h)
+                if source_bbox is None:
+                    continue
+                shifted_bbox = self._propagation_shift_bbox(
+                    previous_image, target_image, source_bbox
+                )
+                label_type = self._label_type(box)
+                if label_type == "segmentation":
+                    # Match manual polygon Snap exactly: the shifted polygon's
+                    # bounds get only the same small 2% prompt padding.
+                    prompt_bbox = self.pad_bbox_xyxy(
+                        shifted_bbox,
+                        target_w,
+                        target_h,
+                        pad_ratio=0.02,
+                    )
+                else:
+                    prompt_bbox = shifted_bbox
+                    pad_x = max(4.0, (prompt_bbox[2] - prompt_bbox[0]) * 0.15)
+                    pad_y = max(4.0, (prompt_bbox[3] - prompt_bbox[1]) * 0.15)
+                    prompt_bbox = (
+                        max(0.0, prompt_bbox[0] - pad_x), max(0.0, prompt_bbox[1] - pad_y),
+                        min(target_w - 1.0, prompt_bbox[2] + pad_x), min(target_h - 1.0, prompt_bbox[3] + pad_y),
+                    )
+                if label_type == "keypoints":
+                    new_line = self._propagation_pose_line(target_image, prompt_bbox, box.class_id, confidence)
+                    if new_line:
+                        output_lines.append(new_line)
+                    continue
+
+                mask = None
+                if label_type == "segmentation":
+                    guide_mask = self._propagation_shifted_segmentation_guide(
+                        box,
+                        previous_w,
+                        previous_h,
+                        target_w,
+                        target_h,
+                        source_bbox,
+                        shifted_bbox,
+                    )
+                    class_name = self.get_current_class_name_safe(box.class_id)
+                    if guide_mask is not None and class_name:
+                        # Use the same class-guided, polygon-constrained SAM3
+                        # Snap path as manual Segmentation finalize. Optical flow
+                        # only supplies the rough target-frame guide.
+                        mask = self.sam_snap_class_polygon_to_mask(
+                            target_image,
+                            prompt_bbox,
+                            class_name,
+                            guide_mask,
+                            imgsz=self._sam_imgsz(),
+                        )
+                        if mask is not None:
+                            logger.debug(
+                                "Propagation used normal semantic Snap for class '%s'.",
+                                class_name,
+                            )
+
+                if label_type == "segmentation" and mask is None and guide_mask is not None:
+                    # This is the same custom/unknown-class fallback used by
+                    # manual polygon Snap: bbox SAM must still overlap the shifted
+                    # polygon guide, so it cannot freely jump to a nearby object.
+                    mask = self.sam_snap_bbox_to_mask(
+                        target_image,
+                        prompt_bbox,
+                        imgsz=self._sam_imgsz(),
+                    )
+                    mask = self.select_sam_mask_for_polygon(mask, guide_mask)
+                elif mask is None:
+                    mask = self.get_sam_mask(target_image, list(prompt_bbox))
+                if mask is None or int(np.count_nonzero(mask)) < 20:
+                    continue
+
+                if label_type == "segmentation" and not self.validate_sam_mask_for_bbox(
+                    mask,
+                    shifted_bbox,
+                    class_name=class_name,
+                ):
+                    logger.debug(
+                        "Propagation rejected a drifting segmentation mask for class '%s'.",
+                        class_name,
+                    )
+                    continue
+                mask_bbox_rect = self.mask_to_bbox_rect(mask)
+                if mask_bbox_rect is None:
+                    continue
+                mask_x, mask_y, mask_w, mask_h = mask_bbox_rect
+                mask_bbox = (mask_x, mask_y, mask_x + mask_w, mask_y + mask_h)
+                source_area = max(
+                    1.0,
+                    (shifted_bbox[2] - shifted_bbox[0])
+                    * (shifted_bbox[3] - shifted_bbox[1]),
+                )
+                target_area = max(1.0, (mask_bbox[2] - mask_bbox[0]) * (mask_bbox[3] - mask_bbox[1]))
+                if not 0.25 <= target_area / source_area <= 4.0:
+                    continue
+                if label_type == "segmentation":
+                    new_line = self._seg_line_from_mask(box.class_id, mask, target_w, target_h)
+                elif label_type == "obb":
+                    new_line = self._obb_line_from_mask(box.class_id, mask, target_w, target_h)
+                else:
+                    xc, yc, bw, bh = self._xyxy_to_yolo_xywh(mask_bbox, target_w, target_h)
+                    new_line = f"{box.class_id} {xc:.6f} {yc:.6f} {bw:.6f} {bh:.6f}"
+                if new_line:
+                    output_lines.append(new_line)
+            except Exception as e:
+                logger.warning(f"Could not propagate label '{line}': {e}")
+        return output_lines
+
+    def _begin_propagation_batch(self, dataset_dir, source_kind):
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        backup_dir = os.path.join(dataset_dir, PROJECT_SETTINGS_DIR, "propagation", stamp)
+        os.makedirs(backup_dir, exist_ok=True)
+        return {
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "source": source_kind,
+            "backup_dir": backup_dir,
+            "files": [],
+        }
+
+    def _backup_propagation_label(self, manifest, label_path):
+        if any(item.get("target") == label_path for item in manifest["files"]):
+            return
+        record = {"target": label_path, "existed": os.path.exists(label_path), "backup": ""}
+        if record["existed"]:
+            backup_name = f"{len(manifest['files']):06d}_{os.path.basename(label_path)}"
+            backup_path = os.path.join(manifest["backup_dir"], backup_name)
+            shutil.copy2(label_path, backup_path)
+            record["backup"] = backup_path
+        manifest["files"].append(record)
+
+    def _finish_propagation_batch(self, manifest):
+        if not manifest.get("files"):
+            return False
+        manifest_path = os.path.join(manifest["backup_dir"], "manifest.json")
+        write_json_file_atomic(manifest_path, manifest)
+        manifest["manifest_path"] = manifest_path
+        self._last_propagation_manifest = manifest
+        undo_button = getattr(self, "undo_propagation_button", None)
+        if undo_button is not None:
+            undo_button.setEnabled(True)
+        return True
+
+    def _merge_propagated_lines(self, existing_lines, new_lines, mode, image_size):
+        if not new_lines:
+            return list(existing_lines), False, False
+        width, height = image_size
+        existing_objects = []
+        for line in existing_lines:
+            try:
+                obj = BoundingBox.from_str(line, preferred_polygon_type=self._polygon_label_parse_preference())
+                if obj is not None:
+                    old_bbox = self._label_seed_bbox(obj, width, height)
+                    if old_bbox is not None:
+                        existing_objects.append((line, obj, old_bbox))
+            except Exception:
+                pass
+
+        merged = list(existing_lines)
+        changed = False
+        review_needed = False
+        for new_line in new_lines:
+            new_obj = BoundingBox.from_str(new_line, preferred_polygon_type=self._polygon_label_parse_preference())
+            if new_obj is None:
+                continue
+            new_bbox = self._label_seed_bbox(new_obj, width, height)
+            if new_bbox is None:
+                continue
+            conflicts = [
+                old_line for old_line, old_obj, old_bbox in existing_objects
+                if old_obj.class_id == new_obj.class_id and self._propagation_iou(old_bbox, new_bbox) >= 0.15
+            ]
+            if conflicts and mode in {"skip", "review"}:
+                review_needed = review_needed or mode == "review"
+                continue
+            if conflicts and mode == "replace":
+                merged = [line for line in merged if line not in conflicts]
+            merged.append(new_line)
+            changed = True
+        return merged, changed, review_needed
+
+    def _propagation_scene_changed(self, previous_image, target_image):
+        try:
+            prev = cv2.resize(cv2.cvtColor(previous_image, cv2.COLOR_BGR2GRAY), (160, 90))
+            curr = cv2.resize(cv2.cvtColor(target_image, cv2.COLOR_BGR2GRAY), (160, 90))
+            return float(np.mean(cv2.absdiff(prev, curr))) >= 58.0
+        except Exception:
+            return False
+
+    def _run_propagation_frames(self, frame_records, seed_image, seed_lines, options, manifest, status_label):
+        previous_image = seed_image
+        previous_lines = list(seed_lines)
+        changed_count = 0
+        progress = QtWidgets.QProgressDialog("Propagating labels...", "Stop", 0, len(frame_records), self)
+        progress.setWindowTitle("Propagate Labels")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+
+        for index, record in enumerate(frame_records, start=1):
+            QApplication.processEvents()
+            if progress.wasCanceled():
+                self._propagation_stop_requested = True
+            if getattr(self, "_propagation_stop_requested", False):
+                break
+            target_image = record["read"]()
+            if target_image is None or target_image.size == 0:
+                status_label.setText(f"Stopped: could not read frame {record['name']}.")
+                break
+            if options.get("stop_scene_cut") and self._propagation_scene_changed(previous_image, target_image):
+                status_label.setText(f"Paused at {record['name']}: likely scene change.")
+                break
+
+            new_lines = self._propagate_lines_to_frame(
+                previous_image, target_image, previous_lines, options["confidence"]
+            )
+            if not new_lines:
+                status_label.setText(f"Paused at {record['name']}: SAM3 or pose confidence was insufficient.")
+                break
+
+            label_path = record["label_path"]
+            existing = self.load_label_lines(label_path) if os.path.exists(label_path) else []
+            h, w = target_image.shape[:2]
+            merged, changed, review_needed = self._merge_propagated_lines(
+                existing, new_lines, options["existing"], (w, h)
+            )
+            if review_needed:
+                status_label.setText(f"Paused at {record['name']}: an existing label needs review.")
+                break
+            if changed:
+                self._backup_propagation_label(manifest, label_path)
+                os.makedirs(os.path.dirname(label_path), exist_ok=True)
+                if not self._write_label_lines(label_path, merged):
+                    status_label.setText(f"Stopped: could not save {label_path}.")
+                    break
+                if record.get("save_image"):
+                    image_path = record.get("image_path")
+                    if image_path:
+                        self._backup_propagation_label(manifest, image_path)
+                    record["save_image"](target_image)
+                changed_count += 1
+
+            previous_image = target_image
+            previous_lines = new_lines
+            progress.setValue(index)
+            status_label.setText(f"Propagated {changed_count} frame(s); processing {record['name']}...")
+
+        progress.close()
+        return changed_count
+
+    def propagate_image_sequence_labels(self, options, status_label):
+        self._propagation_stop_requested = False
+        seed_lines = self._propagation_seed_lines_from_image(options["objects"])
+        if not seed_lines or not self._propagation_pose_ready(seed_lines):
+            return False
+        files = [self.normalize_path(path) for path in (self.filtered_image_files or self.image_files) if path]
+        current = self.normalize_path(self.current_file)
+        try:
+            start_index = files.index(current)
+        except ValueError:
+            QMessageBox.warning(self, "Propagate Labels", "The current image is not in the active image list.")
+            return False
+        seed_image = self._read_image_cv(current)
+        if seed_image is None:
+            return False
+
+        limit = options["limit"] or len(files)
+        directions = [1, -1] if options["direction"] == "both" else [1 if options["direction"] == "forward" else -1]
+        manifest = self._begin_propagation_batch(os.path.dirname(current), "images")
+        total_changed = 0
+        for direction in directions:
+            indexes = list(range(start_index + direction, len(files) if direction > 0 else -1, direction))[:limit]
+            records = [
+                {
+                    "name": os.path.basename(files[index]),
+                    "label_path": self.get_label_file(files[index]),
+                    "read": lambda path=files[index]: self._read_image_cv(path),
+                }
+                for index in indexes
+            ]
+            total_changed += self._run_propagation_frames(
+                records, seed_image, seed_lines, options, manifest, status_label
+            )
+            if getattr(self, "_propagation_stop_requested", False):
+                break
+
+        completed = self._finish_propagation_batch(manifest)
+        if self.current_file:
+            self.display_image(self.current_file, rebuild_preview=True)
+        status_label.setText(
+            f"Propagation finished: {total_changed} image(s) updated."
+            + (" Undo is available." if completed else "")
+        )
+        return completed
+
+    def propagate_video_labels(self, options, status_label):
+        self._propagation_stop_requested = False
+        seed_lines = self._propagation_seed_lines_from_video(options["objects"])
+        if not seed_lines:
+            QMessageBox.information(
+                self, "Propagate Labels",
+                "No visible video prediction is available. Enable inference, pause on an object, then try again.",
+            )
+            return False
+        if not self._propagation_pose_ready(seed_lines):
+            return False
+        source = str(
+            getattr(self, "current_playback_original_source", "")
+            or getattr(self, "current_playback_source", "")
+        )
+        if not source or not os.path.isfile(source):
+            QMessageBox.warning(self, "Propagate Labels", "Video propagation currently requires a local video file.")
+            return False
+        start_frame = self.current_video_frame_index()
+        seed_image = getattr(self, "_last_video_frame_bgr", None)
+        if seed_image is None:
+            return False
+
+        source_path = Path(source)
+        output_root = Path(getattr(self, "output_path", "") or source_path.parent)
+        output_dir = output_root / f"{source_path.stem}_propagated"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        capture = cv2.VideoCapture(source)
+        if not capture.isOpened():
+            return False
+        total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        limit = options["limit"] or max(0, total_frames - 1)
+        directions = [1, -1] if options["direction"] == "both" else [1 if options["direction"] == "forward" else -1]
+        manifest = self._begin_propagation_batch(str(output_dir), "video")
+        total_changed = 0
+        try:
+            for direction in directions:
+                frame_numbers = list(range(start_frame + direction, total_frames if direction > 0 else -1, direction))[:limit]
+                records = []
+                for frame_number in frame_numbers:
+                    image_path = output_dir / f"{source_path.stem}_{frame_number:08d}.jpg"
+                    label_path = image_path.with_suffix(".txt")
+
+                    def read_frame(number=frame_number):
+                        capture.set(cv2.CAP_PROP_POS_FRAMES, number)
+                        ok, frame = capture.read()
+                        return frame if ok else None
+
+                    records.append({
+                        "name": f"frame {frame_number}",
+                        "label_path": str(label_path),
+                        "image_path": str(image_path),
+                        "read": read_frame,
+                        "save_image": lambda frame, path=str(image_path): cv2.imwrite(path, frame),
+                    })
+                total_changed += self._run_propagation_frames(
+                    records, seed_image, seed_lines, options, manifest, status_label
+                )
+                if getattr(self, "_propagation_stop_requested", False):
+                    break
+        finally:
+            capture.release()
+
+        completed = self._finish_propagation_batch(manifest)
+        status_label.setText(
+            f"Video propagation finished: {total_changed} frame(s) saved to {output_dir}."
+            + (" Undo is available." if completed else "")
+        )
+        if total_changed and options.get("open_results"):
+            output_images = sorted(
+                str(path) for path in output_dir.iterdir()
+                if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES
+            )
+            if output_images:
+                self.stop_live_collect_runtime(reset_input=True)
+                self.set_image_directory(str(output_dir))
+                self.image_files = output_images
+                self.filtered_image_files = list(output_images)
+                self.current_img_index = 0
+                self.current_image_index = 0
+                self.current_file = output_images[0]
+                self.update_list_view(output_images)
+                self.display_image(self.current_file, rebuild_preview=True)
+        return completed
+
+    def undo_last_label_propagation(self, status_label=None):
+        manifest = getattr(self, "_last_propagation_manifest", None)
+        if not manifest:
+            QMessageBox.information(self, "Undo Propagation", "No propagation batch is available to undo.")
+            return False
+        restored = 0
+        for record in reversed(manifest.get("files", [])):
+            target = record.get("target", "")
+            try:
+                if record.get("existed") and os.path.isfile(record.get("backup", "")):
+                    shutil.copy2(record["backup"], target)
+                elif target and os.path.exists(target):
+                    os.remove(target)
+                restored += 1
+            except OSError as e:
+                logger.warning(f"Could not undo propagated label {target}: {e}")
+        self._last_propagation_manifest = None
+        undo_button = getattr(self, "undo_propagation_button", None)
+        if undo_button is not None:
+            undo_button.setEnabled(False)
+        self.image_files = [path for path in (self.image_files or []) if os.path.exists(path)]
+        self.filtered_image_files = [path for path in (self.filtered_image_files or []) if os.path.exists(path)]
+        if self.current_file and os.path.exists(self.current_file):
+            self.display_image(self.current_file, rebuild_preview=True)
+        elif self.filtered_image_files:
+            self.current_img_index = 0
+            self.current_image_index = 0
+            self.current_file = self.filtered_image_files[0]
+            self.update_list_view(self.filtered_image_files)
+            self.display_image(self.current_file, rebuild_preview=True)
+        else:
+            self.current_file = None
+            if hasattr(self, "display_placeholder"):
+                self.display_placeholder()
+        message = f"Undid the last propagation batch ({restored} label file(s))."
+        if status_label is not None:
+            status_label.setText(message)
+        return True
+
     def navigate_frame(self, direction):
         """Navigate one image forward or backward."""
         offset = 1 if direction == "next" else -1 if direction == "previous" else 0
@@ -44777,6 +46476,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         """Jump directly by an image offset while loading only the destination."""
         if getattr(self, "navigation_busy", False):
             return False
+
+        self._last_navigation_propagation_message = ""
 
         try:
             offset = int(offset)
@@ -44828,8 +46529,20 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                     self.save_bounding_boxes(
                         current_file,
                         scene.width(),
-                        scene.height()
+                        scene.height(),
+                        scene=scene,
                     )
+
+            if getattr(self, "_image_navigation_propagation_enabled", False):
+                if abs(offset) == 1:
+                    _changed, propagation_message = self._propagate_labels_to_adjacent_image(
+                        current_file, new_file
+                    )
+                else:
+                    propagation_message = (
+                        "Propagation skipped for a multi-image jump; use Prev or Next one frame at a time."
+                    )
+                self._last_navigation_propagation_message = propagation_message
 
             self.current_file = self.normalize_path(new_file)
             self.current_img_index = new_index
@@ -44865,6 +46578,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 self.update_roi(2, preserve_polygon=True)
 
             self.update_dataset_progress()
+            propagation_message = getattr(
+                self, "_last_navigation_propagation_message", ""
+            )
+            if propagation_message and hasattr(self, "statusBar"):
+                self.statusBar().showMessage(propagation_message, 5000)
             return True
 
         finally:
@@ -46159,7 +47877,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         Writes classes.txt to `out_dir` using current class list if available,
         otherwise tries to copy from the active augmentation/dataset folder.
         """
-        classes_path = os.path.join(out_dir, "classes.txt")
+        classes_path = resolve_dataset_classes_path(out_dir, for_write=True, migrate=True)
         if os.path.exists(classes_path):
             return  # already there
 
@@ -46180,7 +47898,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             ]:
                 if not probe_dir:
                     continue
-                candidate = os.path.join(probe_dir, "classes.txt")
+                candidate = resolve_dataset_classes_path(probe_dir, migrate=True)
                 if os.path.isfile(candidate):
                     try:
                         with open(candidate, "r", encoding="utf-8") as f:
@@ -46229,19 +47947,16 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             seen.add(directory)
 
             for file_name in ("points.json", "pose.json"):
-                for path in (
-                    os.path.join(directory, file_name),
-                    os.path.join(directory, PROJECT_SETTINGS_DIR, file_name),
-                ):
-                    if not os.path.isfile(path):
-                        continue
-                    try:
-                        with open(path, "r", encoding="utf-8") as f:
-                            data = json.load(f)
-                        if isinstance(data, dict):
-                            return data
-                    except Exception as e:
-                        logger.warning(f"Failed to read augmentation pose data from {path}: {e}")
+                path = resolve_dataset_metadata_path(directory, file_name, migrate=True)
+                if not os.path.isfile(path):
+                    continue
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    if isinstance(data, dict):
+                        return data
+                except Exception as e:
+                    logger.warning(f"Failed to read augmentation pose data from {path}: {e}")
 
         return {}
 
@@ -47160,59 +48875,120 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             self.settings["ultralyticsDataYamlPath"] = yaml_path
         return yaml_path
 
-    def _training_eval_find_obj_yaml(self, dataset_dir=""):
-        candidates = []
-        dataset_dir = self.normalize_path(dataset_dir or "")
-
-        def add(path):
-            path = self.normalize_path(path or "")
-            if path and path not in candidates:
-                candidates.append(path)
-
-        if dataset_dir and os.path.isdir(dataset_dir):
-            add(os.path.join(dataset_dir, "obj.yaml"))
-            add(os.path.join(dataset_dir, "data.yaml"))
-
-        for path in (
-            getattr(self, "data_yaml_path", ""),
-            self.settings.get("ultralyticsDataYamlPath", "") if isinstance(getattr(self, "settings", None), dict) else "",
-        ):
-            add(path)
-
-        for directory in (
-            getattr(self, "train_valid_output_directory", ""),
-            self.settings.get("trainValidOutputDirectory", "") if isinstance(getattr(self, "settings", None), dict) else "",
-            getattr(self, "image_directory", ""),
-            getattr(self, "output_path", ""),
-            self.settings.get("last_dir", "") if isinstance(getattr(self, "settings", None), dict) else "",
-        ):
-            directory = self.normalize_path(directory or "")
-            if directory and os.path.isdir(directory):
-                add(os.path.join(directory, "obj.yaml"))
-                add(os.path.join(directory, "data.yaml"))
-
-        for path in candidates:
-            if path and os.path.exists(path) and path.lower().endswith((".yaml", ".yml")):
-                return self.normalize_path(path)
-        return ""
-
-    def autoload_training_data_yaml_for_dataset(self, dataset_dir=""):
-        yaml_path = self._training_eval_find_obj_yaml(dataset_dir or self._training_eval_dataset_dir())
-        if yaml_path:
-            self._set_training_data_yaml_path(yaml_path)
-            self.queue_settings_save()
-        return yaml_path
-
-    def _set_training_data_yaml_path(self, yaml_path):
-        yaml_path = self.normalize_path(yaml_path or "")
-        if not yaml_path:
-            return ""
-        self.data_yaml_path = yaml_path
+    def _clear_training_data_yaml_path(self):
+        self.data_yaml_path = None
         if getattr(self, "yaml_label", None) is not None:
-            self.yaml_label.setText(f"Data YAML: {yaml_path}")
+            self.yaml_label.setText("Data YAML: Not selected")
         if isinstance(getattr(self, "settings", None), dict):
-            self.settings["ultralyticsDataYamlPath"] = yaml_path
-        return yaml_path
+            self.settings["ultralyticsDataYamlPath"] = ""
+
+    @staticmethod
+    def _training_eval_paths_overlap(first_path, second_path):
+        """Return True when either dataset path contains the other."""
+        try:
+            first_value = str(first_path or "").strip()
+            second_value = str(second_path or "").strip()
+            if not first_value or not second_value:
+                return False
+            first = os.path.normcase(os.path.abspath(first_value))
+            second = os.path.normcase(os.path.abspath(second_value))
+            common = os.path.commonpath((first, second))
+            return common == first or common == second
+        except (OSError, ValueError, TypeError):
+            return False
+
+    def _training_eval_yaml_dataset_roots(self, data_yaml_path, yaml_data=None, yaml_dir=""):
+        """Resolve paths owned by a YAML without consulting the currently open dataset."""
+        data_yaml_path = self.normalize_path(data_yaml_path or "")
+        yaml_data = yaml_data if isinstance(yaml_data, dict) else None
+        if yaml_data is None:
+            yaml_data, parsed_dir = self._training_health_parse_data_yaml(data_yaml_path)
+            yaml_dir = yaml_dir or parsed_dir
+        yaml_dir = self.normalize_path(yaml_dir or (os.path.dirname(data_yaml_path) if data_yaml_path else ""))
+        yaml_data = yaml_data if isinstance(yaml_data, dict) else {}
+        roots = []
+
+        def add(path):
+            path = self.normalize_path(path or "")
+            if path and path not in roots:
+                roots.append(path)
+
+        configured_root = str(yaml_data.get("path") or "").strip()
+        if configured_root:
+            if not os.path.isabs(configured_root) and yaml_dir:
+                configured_root = os.path.join(yaml_dir, configured_root)
+            configured_root = self.normalize_path(configured_root)
+            add(configured_root)
+        base_dir = configured_root or yaml_dir
+
+        def add_dataset_entry(entry):
+            if isinstance(entry, (list, tuple)):
+                for item in entry:
+                    add_dataset_entry(item)
+                return
+            if not isinstance(entry, str) or not entry.strip():
+                return
+            entry_path = entry.strip()
+            if not os.path.isabs(entry_path) and base_dir:
+                entry_path = os.path.join(base_dir, entry_path)
+            entry_path = self.normalize_path(entry_path)
+            if entry_path.lower().endswith(".txt"):
+                if os.path.isfile(entry_path):
+                    try:
+                        with open(entry_path, "r", encoding="utf-8", errors="ignore") as file:
+                            for index, line in enumerate(file):
+                                if index >= 100:
+                                    break
+                                image_path = line.strip()
+                                if not image_path:
+                                    continue
+                                if not os.path.isabs(image_path):
+                                    image_path = os.path.join(os.path.dirname(entry_path), image_path)
+                                add(os.path.dirname(image_path))
+                    except OSError:
+                        pass
+                return
+            if os.path.splitext(entry_path)[1].lower() in {
+                ".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"
+            }:
+                add(os.path.dirname(entry_path))
+            else:
+                add(entry_path)
+
+        for split_name in ("train", "val", "valid", "test"):
+            add_dataset_entry(yaml_data.get(split_name))
+        if not roots and yaml_dir:
+            add(yaml_dir)
+        return roots
+
+    def _training_eval_yaml_matches_dataset(self, data_yaml_path, dataset_dir):
+        data_yaml_path = self.normalize_path(data_yaml_path or "")
+        dataset_dir = self.normalize_path(dataset_dir or "")
+        if not data_yaml_path or not dataset_dir or not os.path.exists(data_yaml_path):
+            return False
+        yaml_data, yaml_dir = self._training_health_parse_data_yaml(data_yaml_path)
+        return any(
+            self._training_eval_paths_overlap(root, dataset_dir)
+            for root in self._training_eval_yaml_dataset_roots(data_yaml_path, yaml_data, yaml_dir)
+        )
+
+    def _training_eval_managed_output_dir(self, dataset_dir, create=False):
+        dataset_dir = self.normalize_path(dataset_dir or "")
+        if not dataset_dir:
+            return ""
+        output_dir = self.normalize_path(dataset_metadata_directory(dataset_dir, create=create))
+        if create:
+            os.makedirs(output_dir, exist_ok=True)
+        return output_dir
+
+    def _training_eval_is_managed_yaml(self, data_yaml_path, dataset_dir):
+        data_yaml_path = self.normalize_path(data_yaml_path or "")
+        managed_dir = self._training_eval_managed_output_dir(dataset_dir, create=False)
+        if not data_yaml_path or not managed_dir:
+            return False
+        yaml_dir = os.path.normcase(os.path.dirname(data_yaml_path))
+        legacy_dir = os.path.normcase(os.path.join(managed_dir, "training"))
+        return yaml_dir in {os.path.normcase(managed_dir), legacy_dir}
 
     def _training_eval_find_obj_yaml(self, dataset_dir=""):
         candidates = []
@@ -47226,6 +49002,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if dataset_dir and os.path.isdir(dataset_dir):
             add(os.path.join(dataset_dir, "obj.yaml"))
             add(os.path.join(dataset_dir, "data.yaml"))
+            managed_dir = os.path.join(dataset_dir, PROJECT_SETTINGS_DIR)
+            add(os.path.join(managed_dir, "obj.yaml"))
+            add(os.path.join(managed_dir, "data.yaml"))
+            managed_training_dir = os.path.join(managed_dir, "training")
+            add(os.path.join(managed_training_dir, "obj.yaml"))
+            add(os.path.join(managed_training_dir, "data.yaml"))
 
         for path in (
             getattr(self, "data_yaml_path", ""),
@@ -47247,14 +49029,23 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         for path in candidates:
             if path and os.path.exists(path) and path.lower().endswith((".yaml", ".yml")):
+                if dataset_dir and not self._training_eval_yaml_matches_dataset(path, dataset_dir):
+                    continue
                 return self.normalize_path(path)
         return ""
 
     def autoload_training_data_yaml_for_dataset(self, dataset_dir=""):
-        yaml_path = self._training_eval_find_obj_yaml(dataset_dir or self._training_eval_dataset_dir())
+        dataset_dir = self.normalize_path(dataset_dir or self._training_eval_dataset_dir())
+        yaml_path = self._training_eval_find_obj_yaml(dataset_dir)
         if yaml_path:
             self._set_training_data_yaml_path(yaml_path)
             self.queue_settings_save()
+        else:
+            current_yaml = self.normalize_path(getattr(self, "data_yaml_path", "") or "")
+            if current_yaml and dataset_dir and not self._training_eval_yaml_matches_dataset(current_yaml, dataset_dir):
+                logger.info("Cleared stale training YAML after dataset switch: %s", current_yaml)
+                self._clear_training_data_yaml_path()
+                self.queue_settings_save()
         return yaml_path
 
     def _training_eval_valid_percent(self):
@@ -47285,29 +49076,31 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         return str(candidates[0])
 
     def _training_eval_image_class_ids(self, image_path):
-        label_path = self._label_path_for_image(image_path)
-        class_ids = set()
-        if not label_path or not os.path.exists(label_path):
-            return class_ids
-        try:
-            with open(label_path, "r", encoding="utf-8", errors="ignore") as f:
-                for line in f:
-                    parts = line.strip().split()
-                    if not parts:
-                        continue
-                    try:
-                        class_ids.add(int(float(parts[0])))
-                    except Exception:
-                        continue
-        except Exception:
-            return set()
-        return class_ids
+        return set(self._training_eval_image_class_counts(image_path))
+
+    def _training_eval_prepare_cache_context(self, dataset_dir):
+        """Keep evaluator caches bounded to the dataset currently being analyzed."""
+        dataset_dir = self.normalize_path(dataset_dir or "")
+        context = os.path.normcase(os.path.abspath(dataset_dir)) if dataset_dir else ""
+        if getattr(self, "_training_eval_cache_context", "") != context:
+            self._training_eval_cache_context = context
+            self._training_eval_label_class_cache = {}
+            self._training_eval_image_scan_cache = {}
 
     def _training_eval_image_class_counts(self, image_path):
         label_path = self._label_path_for_image(image_path)
         counts = Counter()
         if not label_path or not os.path.exists(label_path):
             return counts
+        try:
+            signature = (os.path.getsize(label_path), os.stat(label_path).st_mtime_ns)
+        except OSError:
+            return counts
+        cache = getattr(self, "_training_eval_label_class_cache", {}) or {}
+        cache_key = os.path.normcase(os.path.abspath(label_path))
+        cached = cache.get(cache_key)
+        if isinstance(cached, dict) and tuple(cached.get("signature", ())) == signature:
+            return Counter(cached.get("counts") or {})
         try:
             with open(label_path, "r", encoding="utf-8", errors="ignore") as f:
                 for line in f:
@@ -47320,7 +49113,113 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                         continue
         except Exception:
             return Counter()
+        cache[cache_key] = {"signature": signature, "counts": dict(counts)}
+        self._training_eval_label_class_cache = cache
         return counts
+
+    def _training_eval_cached_image_scan(self, image_path, label_path, polygon_preference, expected_keypoints):
+        """Read an image/label pair once and reuse it until either file changes."""
+        image_path = self.normalize_path(image_path or "")
+        label_path = self.normalize_path(label_path or "")
+
+        def signature(path):
+            try:
+                stat = os.stat(path)
+                return (int(stat.st_size), int(stat.st_mtime_ns))
+            except OSError:
+                return None
+
+        image_signature = signature(image_path)
+        label_signature = signature(label_path)
+        parser_key = (repr(polygon_preference), int(expected_keypoints or 0))
+        cache_key = os.path.normcase(os.path.abspath(image_path))
+        normalized_label_path = os.path.normcase(os.path.abspath(label_path)) if label_path else ""
+        cache = getattr(self, "_training_eval_image_scan_cache", {}) or {}
+        cached = cache.get(cache_key)
+        if (
+            isinstance(cached, dict)
+            and cached.get("label_path", "") == normalized_label_path
+            and tuple(cached.get("image_signature") or ()) == tuple(image_signature or ())
+            and tuple(cached.get("label_signature") or ()) == tuple(label_signature or ())
+            and tuple(cached.get("parser_key") or ()) == parser_key
+        ):
+            return cached.get("record") or {}
+
+        record = {
+            "width": 0,
+            "height": 0,
+            "image_error": False,
+            "missing_label": label_signature is None,
+            "empty_label": False,
+            "label_read_error": False,
+            "annotations": [],
+        }
+        try:
+            with Image.open(image_path) as img:
+                record["width"], record["height"] = (int(img.size[0]), int(img.size[1]))
+        except Exception:
+            record["image_error"] = True
+            cache[cache_key] = {
+                "label_path": normalized_label_path,
+                "image_signature": image_signature,
+                "label_signature": label_signature,
+                "parser_key": parser_key,
+                "record": record,
+            }
+            self._training_eval_image_scan_cache = cache
+            return record
+
+        if label_signature is not None:
+            try:
+                with open(label_path, "r", encoding="utf-8") as f:
+                    lines = [line.strip() for line in f if line.strip()]
+            except UnicodeDecodeError:
+                with open(label_path, "r", encoding="latin-1", errors="ignore") as f:
+                    lines = [line.strip() for line in f if line.strip()]
+            except Exception:
+                lines = []
+                record["label_read_error"] = True
+            record["empty_label"] = not bool(lines) and not record["label_read_error"]
+            for line in lines:
+                bbox = self._parse_training_eval_bbox(line, polygon_preference, expected_keypoints or None)
+                if bbox is None:
+                    continue
+                extent = self._train_eval_label_extent(bbox)
+                if extent is None:
+                    continue
+                _xc, _yc, norm_width, norm_height = extent
+                visible_pose_points = [
+                    (float(x), float(y))
+                    for x, y, visibility in (bbox.keypoints or [])
+                    if int(visibility) > 0
+                ]
+                pose_span_x = 0.0
+                pose_span_y = 0.0
+                if visible_pose_points:
+                    xs = [point[0] for point in visible_pose_points]
+                    ys = [point[1] for point in visible_pose_points]
+                    pose_span_x = max(xs) - min(xs)
+                    pose_span_y = max(ys) - min(ys)
+                annotation_kind = "pose" if bbox.keypoints else "seg" if bbox.segmentation else "obb" if bbox.obb else "bbox"
+                record["annotations"].append((
+                    int(bbox.class_id),
+                    float(norm_width),
+                    float(norm_height),
+                    annotation_kind,
+                    len(visible_pose_points),
+                    float(pose_span_x),
+                    float(pose_span_y),
+                ))
+
+        cache[cache_key] = {
+            "label_path": normalized_label_path,
+            "image_signature": image_signature,
+            "label_signature": label_signature,
+            "parser_key": parser_key,
+            "record": record,
+        }
+        self._training_eval_image_scan_cache = cache
+        return record
 
     def _training_eval_split_class_report(self, train_files, valid_files, class_names=None):
         train_files = [self.normalize_path(path) for path in train_files or [] if path]
@@ -47632,9 +49531,30 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
     def _training_eval_write_image_list(self, path, image_files):
         path = self.normalize_path(path or "")
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            for image_file in image_files or []:
-                f.write(os.path.abspath(image_file).replace("\\", "/") + "\n")
+        content = "".join(
+            os.path.abspath(image_file).replace("\\", "/") + "\n"
+            for image_file in image_files or []
+        )
+        self._training_eval_write_text_atomic(path, content)
+
+    def _training_eval_write_text_atomic(self, path, content):
+        path = self.normalize_path(path or "")
+        if not path:
+            raise ValueError("Training metadata output path is empty.")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        temporary_path = f"{path}.{os.getpid()}.tmp"
+        try:
+            with open(temporary_path, "w", encoding="utf-8") as file:
+                file.write(str(content))
+                file.flush()
+                os.fsync(file.fileno())
+            os.replace(temporary_path, path)
+        finally:
+            if os.path.exists(temporary_path):
+                try:
+                    os.remove(temporary_path)
+                except OSError:
+                    pass
 
     def _training_eval_prepare_validation_files(
         self,
@@ -47666,7 +49586,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         source_train_files = []
         source_valid_files = []
         image_files = []
-        if source_yaml_path and os.path.exists(source_yaml_path):
+        source_is_managed = self._training_eval_is_managed_yaml(source_yaml_path, dataset_dir)
+        if source_yaml_path and os.path.exists(source_yaml_path) and not source_is_managed:
             source_train_files = self._training_eval_yaml_image_files(source_yaml_path, source_yaml_data, "train")
             source_valid_files = self._training_eval_yaml_image_files(source_yaml_path, source_yaml_data, "val")
             image_files = list(source_train_files)
@@ -47760,7 +49681,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if not valid_files:
             valid_files = list(train_files)
 
-        class_names = self._training_eval_yaml_names(source_yaml_data)
+        class_names = [] if source_is_managed else self._training_eval_yaml_names(source_yaml_data)
         if not class_names:
             try:
                 class_names = list(self.load_classes(data_directory=dataset_dir) or [])
@@ -47806,7 +49727,23 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         validation_source_percent=None,
     ):
         self._training_eval_last_validation_prep = {}
+        loaded_dataset_dir = self._training_eval_dataset_dir()
         existing_yaml = self.normalize_path(getattr(self, "data_yaml_path", "") or "")
+        if existing_yaml and loaded_dataset_dir and (
+            not os.path.isfile(existing_yaml)
+            or not self._training_eval_yaml_matches_dataset(existing_yaml, loaded_dataset_dir)
+        ):
+            if os.path.isfile(existing_yaml):
+                logger.warning(
+                    "Ignoring training YAML from a different dataset: %s (loaded dataset: %s)",
+                    existing_yaml,
+                    loaded_dataset_dir,
+                )
+            else:
+                logger.warning("Ignoring missing training YAML: %s", existing_yaml)
+            existing_yaml = ""
+            self._clear_training_data_yaml_path()
+            self.queue_settings_save()
         existing_yaml_data, existing_yaml_dir = (
             self._training_health_parse_data_yaml(existing_yaml)
             if existing_yaml and os.path.exists(existing_yaml)
@@ -47818,13 +49755,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 return refreshed_yaml
             return existing_yaml
 
-        dataset_dir = ""
-        if existing_yaml and os.path.exists(existing_yaml):
+        dataset_dir = loaded_dataset_dir
+        if not dataset_dir and existing_yaml and os.path.exists(existing_yaml):
             dataset_dir = self._training_health_dataset_dir(existing_yaml, existing_yaml_data, existing_yaml_dir)
         if not dataset_dir:
-            dataset_dir = self._training_eval_dataset_dir()
-        if not dataset_dir:
             raise ValueError("Open or select a dataset folder before preparing training YAML.")
+        self._training_eval_prepare_cache_context(dataset_dir)
 
         obj_yaml = self._training_eval_find_obj_yaml(dataset_dir)
         if obj_yaml and not prepare_validation:
@@ -47839,7 +49775,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         scanner = ScanAnnotations(self)
         scanner.base_directory = dataset_dir
         image_files = []
-        if source_yaml_path and os.path.exists(source_yaml_path):
+        if (
+            source_yaml_path
+            and os.path.exists(source_yaml_path)
+            and not self._training_eval_is_managed_yaml(source_yaml_path, dataset_dir)
+        ):
             source_yaml_data, _source_yaml_dir = self._training_health_parse_data_yaml(source_yaml_path)
             image_files = self._training_eval_yaml_image_files(source_yaml_path, source_yaml_data, "train")
         if not image_files:
@@ -47853,19 +49793,26 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if not output_dir and isinstance(getattr(self, "settings", None), dict):
             output_dir = self.settings.get("trainValidOutputDirectory", "")
         output_dir = self.normalize_path(output_dir)
+        if output_dir and not self._training_eval_paths_overlap(output_dir, dataset_dir):
+            logger.info(
+                "Ignoring training output folder from a different dataset: %s",
+                output_dir,
+            )
+            output_dir = ""
+        if output_dir and not os.path.isdir(output_dir):
+            logger.info("Ignoring missing training output folder: %s", output_dir)
+            output_dir = ""
         if not output_dir and source_yaml_path:
             output_dir = os.path.dirname(source_yaml_path)
         if not output_dir:
-            output_dir = dataset_dir
+            output_dir = self._training_eval_managed_output_dir(dataset_dir, create=True)
         output_dir = self.normalize_path(output_dir)
         os.makedirs(output_dir, exist_ok=True)
 
         train_txt_path = os.path.join(output_dir, "train.txt").replace("\\", "/")
         valid_txt_path = os.path.join(output_dir, "valid.txt").replace("\\", "/")
         if not os.path.exists(train_txt_path) or force:
-            with open(train_txt_path, "w", encoding="utf-8") as f:
-                for image_file in image_files:
-                    f.write(os.path.abspath(image_file).replace("\\", "/") + "\n")
+            self._training_eval_write_image_list(train_txt_path, image_files)
 
         self.image_directory = dataset_dir
         self.images = image_files
@@ -48218,12 +50165,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         }
         output_path = os.path.join(output_dir, "train_recommendations.yaml").replace("\\", "/")
         try:
-            with open(output_path, "w", encoding="utf-8") as f:
-                yaml.safe_dump(payload, f, sort_keys=False)
+            self._training_eval_write_text_atomic(
+                output_path,
+                yaml.safe_dump(payload, sort_keys=False, allow_unicode=True),
+            )
             return output_path
         except Exception as e:
             logger.warning(f"Could not write training recommendation YAML: {e}")
-            return ""
+            raise ValueError(f"Could not write training recommendation YAML:\n{e}") from e
 
     def _training_eval_format_arg_value(self, value):
         if isinstance(value, bool):
@@ -48836,10 +50785,21 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             data_yaml_error = "Selected training YAML does not exist."
 
         report_progress("Resolving dataset paths and classes...")
+        loaded_dataset_dir = self._training_eval_dataset_dir()
+        if (
+            data_yaml_path
+            and loaded_dataset_dir
+            and not self._training_eval_yaml_matches_dataset(data_yaml_path, loaded_dataset_dir)
+        ):
+            raise ValueError(
+                "The selected Data YAML belongs to a different dataset. "
+                "Run Generate Files + Parameters again with Auto YAML enabled for the currently loaded dataset."
+            )
         yaml_data, yaml_dir = self._training_health_parse_data_yaml(data_yaml_path)
-        dataset_dir = self._training_health_dataset_dir(data_yaml_path, yaml_data, yaml_dir) or self._training_eval_dataset_dir()
+        dataset_dir = loaded_dataset_dir or self._training_health_dataset_dir(data_yaml_path, yaml_data, yaml_dir)
         if not dataset_dir:
             raise ValueError("Select obj.yaml or open a dataset folder before evaluating training setup.")
+        self._training_eval_prepare_cache_context(dataset_dir)
 
         current_size = self._parse_training_imgsz_value(getattr(self, "imgsz_input", None).text() if getattr(self, "imgsz_input", None) is not None else "640")
         candidate_sizes = self._training_eval_candidate_sizes(candidate_sizes, current_size)
@@ -48890,8 +50850,26 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if not scanner.valid_classes:
             raise ValueError("No classes were found. Add classes.txt or select a classes file first.")
 
-        report_progress("Building the dataset image list...")
-        image_files = self._training_eval_yaml_image_files(data_yaml_path, yaml_data, "train") if data_yaml_path else []
+        report_progress("Building the complete train and validation image list...")
+        image_files = []
+        if data_yaml_path:
+            for split_name in ("train", "val"):
+                image_files.extend(
+                    self._training_eval_yaml_image_files(data_yaml_path, yaml_data, split_name)
+                )
+
+            # A YAML can point both splits at overlapping lists. Scan every
+            # physical image once so dataset statistics are not inflated.
+            unique_images = []
+            seen_images = set()
+            for image_path in image_files:
+                normalized = self.normalize_path(image_path)
+                key = os.path.normcase(os.path.abspath(normalized))
+                if key in seen_images:
+                    continue
+                seen_images.add(key)
+                unique_images.append(normalized)
+            image_files = unique_images
         if not image_files:
             image_files = scanner._iter_image_files(dataset_dir)
         label_files = []
@@ -48946,11 +50924,17 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 report_progress(
                     f"Scanning dataset image {image_index:,} / {total_images_to_scan:,}..."
                 )
-            try:
-                with Image.open(image_path) as img:
-                    img_width, img_height = img.size
-            except Exception:
+            label_path = label_map.get(os.path.splitext(os.path.basename(image_path))[0].lower()) or ""
+            scan_record = self._training_eval_cached_image_scan(
+                image_path,
+                label_path,
+                polygon_preference,
+                expected_keypoints,
+            )
+            if scan_record.get("image_error"):
                 continue
+            img_width = int(scan_record.get("width", 0) or 0)
+            img_height = int(scan_record.get("height", 0) or 0)
 
             for size in candidate_sizes:
                 scale, _left, _top, new_width, new_height = self._letterbox_preview_params(
@@ -48963,54 +50947,23 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 full_area = max(1.0, float(size * size))
                 stats_by_size[size]["padding_waste"].append(max(0.0, 1.0 - usable_area / full_area))
 
-            label_path = label_map.get(os.path.splitext(os.path.basename(image_path))[0].lower())
-            if not label_path:
+            if scan_record.get("missing_label"):
                 missing_labels += 1
                 continue
-
-            try:
-                with open(label_path, "r", encoding="utf-8") as f:
-                    lines = [line.strip() for line in f if line.strip()]
-            except UnicodeDecodeError:
-                with open(label_path, "r", encoding="latin-1", errors="ignore") as f:
-                    lines = [line.strip() for line in f if line.strip()]
-            except Exception:
+            if scan_record.get("label_read_error"):
                 continue
-
-            if not lines:
+            if scan_record.get("empty_label"):
                 empty_labels += 1
                 continue
 
-            for line in lines:
-                bbox = self._parse_training_eval_bbox(line, polygon_preference, expected_keypoints)
-                if bbox is None:
-                    continue
-
-                extent = self._train_eval_label_extent(bbox)
-                if extent is None:
-                    continue
-
-                class_counts[int(bbox.class_id)] += 1
+            for annotation in scan_record.get("annotations", []):
+                class_id, norm_width, norm_height, annotation_kind, visible_count, pose_span_x, pose_span_y = annotation
+                class_counts[int(class_id)] += 1
                 total_labels += 1
-                if bbox.keypoints:
-                    annotation_counts["pose"] += 1
+                annotation_counts[annotation_kind] += 1
+                if annotation_kind == "pose":
                     pose_labels += 1
-                elif bbox.segmentation:
-                    annotation_counts["seg"] += 1
-                elif bbox.obb:
-                    annotation_counts["obb"] += 1
-                else:
-                    annotation_counts["bbox"] += 1
-
-                _xc, _yc, norm_width, norm_height = extent
-                visible_pose_points = []
-                if bbox.keypoints:
-                    visible_pose_points = [
-                        (float(x), float(y))
-                        for x, y, v in bbox.keypoints
-                        if int(v) > 0
-                    ]
-                    visible_keypoints += len(visible_pose_points)
+                    visible_keypoints += int(visible_count)
 
                 for size in candidate_sizes:
                     scale, _left, _top, _new_width, _new_height = self._letterbox_preview_params(
@@ -49032,7 +50985,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                     if min_side < min_stride * 2:
                         stats["under_2stride"] += 1
 
-                    class_stats = class_stats_by_size[size][int(bbox.class_id)]
+                    class_stats = class_stats_by_size[size][int(class_id)]
                     class_stats["labels"] += 1
                     class_stats["min_sides"].append(min_side)
                     if min_side < 4:
@@ -49042,14 +50995,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                     if min_side < min_stride * 2:
                         class_stats["under_2stride"] += 1
 
-                    if visible_pose_points:
-                        scaled_points = [
-                            (x * img_width * scale, y * img_height * scale)
-                            for x, y in visible_pose_points
-                        ]
-                        xs = [point[0] for point in scaled_points]
-                        ys = [point[1] for point in scaled_points]
-                        if min(max(xs) - min(xs), max(ys) - min(ys)) < min_stride:
+                    if visible_count:
+                        scaled_pose_width = pose_span_x * img_width * scale
+                        scaled_pose_height = pose_span_y * img_height * scale
+                        if min(scaled_pose_width, scaled_pose_height) < min_stride:
                             stats["pose_spread_under_stride"] += 1
 
         class_names = {}
@@ -49643,7 +51592,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             dataset_dir = ""
         if dataset_dir:
             add_root(os.path.join(dataset_dir, "runs"))
-            add_root(os.path.join(dataset_dir, PROJECT_SETTINGS_DIR, "training", "runs"))
 
         try:
             add_root(self._training_eval_project_dir())
@@ -50753,6 +52701,26 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         def add(severity, text):
             issues.append({"severity": severity, "text": text})
 
+        watchdog_path = self.normalize_path(
+            os.path.join(self.normalize_path(run_dir), ".darkfusion_training_health.json")
+        ) if run_dir else ""
+        watchdog_record = {}
+        if watchdog_path and os.path.isfile(watchdog_path):
+            try:
+                with open(watchdog_path, "r", encoding="utf-8", errors="ignore") as handle:
+                    watchdog_record = json.load(handle) or {}
+            except Exception:
+                watchdog_record = {}
+        watchdog_state = str(watchdog_record.get("state", "") or "").strip().lower()
+        watchdog_detail = str(watchdog_record.get("detail", "") or "").strip()
+        if watchdog_state in {"stopped_abnormal", "stopped_collapse", "abnormal"}:
+            add("error", f"Training watchdog: {watchdog_detail or watchdog_state}")
+            healthy_checkpoint = self.normalize_path(
+                os.path.join(self.normalize_path(run_dir), "weights", "darkfusion_healthy.pt")
+            )
+            if os.path.isfile(healthy_checkpoint):
+                advice.append(f"Use the preserved healthy checkpoint: {healthy_checkpoint}")
+
         train_args = self._training_eval_run_args_for_compare(run_dir) if run_dir else {}
         if train_args and not train_args.get("split_fingerprint") and train_args.get("data"):
             train_args["split_fingerprint"] = self._training_eval_data_split_fingerprint(train_args.get("data", ""))
@@ -51262,21 +53230,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         return f"[{icon}] {label}" + (f": {detail}" if detail else "")
 
     def _training_health_writable_dir(self, directory):
+        """Report likely write access without creating or deleting probe files."""
         directory = self.normalize_path(directory or "")
         if not directory or not os.path.isdir(directory):
             return False, "folder not found"
-        probe_path = os.path.join(directory, ".darkfusion_health_write_test.tmp")
         try:
-            with open(probe_path, "w", encoding="utf-8") as f:
-                f.write("ok")
-            os.remove(probe_path)
-            return True, directory
+            writable = bool(os.access(directory, os.W_OK))
+            return writable, directory if writable else "folder is not writable"
         except Exception as e:
-            try:
-                if os.path.exists(probe_path):
-                    os.remove(probe_path)
-            except Exception:
-                pass
             return False, str(e)
 
     def _training_health_parse_data_yaml(self, data_yaml_path):
@@ -51328,7 +53289,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         ):
             directory = self.normalize_path(directory or "")
             if directory:
-                candidates.append(os.path.join(directory, "classes.txt"))
+                candidates.append(resolve_dataset_classes_path(directory, migrate=False))
 
         for path in candidates:
             if path and os.path.exists(path):
@@ -51347,10 +53308,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         ):
             directory = self.normalize_path(directory or "")
             if directory:
-                candidates.extend([
-                    os.path.join(directory, "points.json"),
-                    os.path.join(directory, PROJECT_SETTINGS_DIR, "points.json"),
-                ])
+                candidates.append(resolve_dataset_pose_schema_path(directory, migrate=False))
 
         seen = set()
         for path in candidates:
@@ -52071,7 +54029,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         pretrained_edit = QtWidgets.QLineEdit(current_pretrained_path)
         pretrained_edit.setPlaceholderText("Optional pretrained .pt for model YAML")
-        pretrained_edit.setToolTip("Used only when the model field is a model .yaml.")
+        pretrained_edit.setToolTip(
+            "Used automatically when the model field is a model YAML. "
+            "Leave this empty to build the student model from the YAML without transfer weights."
+        )
         browse_pretrained_btn = QtWidgets.QPushButton("Pretrained")
         browse_pretrained_btn.setToolTip("Choose pretrained weights for transfer learning from a model YAML.")
         clear_pretrained_btn = QtWidgets.QPushButton("Clear")
@@ -52257,7 +54218,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         setup_layout.addLayout(data_row, 0, 1, 1, 3)
         setup_layout.addWidget(QtWidgets.QLabel("Model"), 1, 0)
         setup_layout.addLayout(model_row, 1, 1, 1, 3)
-        setup_layout.addWidget(QtWidgets.QLabel("Transfer"), 2, 0)
+        setup_layout.addWidget(QtWidgets.QLabel("Student Init"), 2, 0)
         setup_layout.addLayout(pretrained_row, 2, 1, 1, 3)
         setup_layout.addWidget(QtWidgets.QLabel("Runs"), 3, 0)
         setup_layout.addLayout(runs_row, 3, 1, 1, 3)
@@ -52416,7 +54377,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         results_text = QtWidgets.QTextEdit()
         results_text.setReadOnly(True)
         results_text.setLineWrapMode(QtWidgets.QTextEdit.NoWrap)
-        results_text.setText("Choose weights/size, then click Evaluate Dataset.")
+        results_text.setText("Choose the setup, then click Generate Files + Parameters.")
         evaluator_tabs.addTab(results_text, "Summary")
 
         metrics_tab = QtWidgets.QWidget()
@@ -52724,6 +54685,28 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         export_form.setHorizontalSpacing(8)
         export_form.setVerticalSpacing(8)
 
+        def latest_run_export_checkpoint():
+            record = self._training_eval_latest_saved_run()
+            run_dirs = [
+                self.normalize_path((record or {}).get("run_dir", "")),
+                restored_run_dir,
+                self.normalize_path(self.settings.get("trainingEvaluatorLastTrainingRunDir", "")),
+            ]
+            seen_run_dirs = set()
+            for run_dir in run_dirs:
+                key = os.path.normcase(run_dir)
+                if not run_dir or key in seen_run_dirs:
+                    continue
+                seen_run_dirs.add(key)
+                for name in ("best.pt", "last.pt"):
+                    candidate = self.normalize_path(os.path.join(run_dir, "weights", name))
+                    if not candidate or not os.path.isfile(candidate):
+                        continue
+                    info = self.inspect_training_eval_weights(candidate)
+                    if info.get("loaded"):
+                        return candidate
+            return ""
+
         def usable_export_checkpoint(*candidates):
             for raw_path in candidates:
                 candidate = self.normalize_path(raw_path)
@@ -52732,15 +54715,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 info = self.inspect_training_eval_weights(candidate)
                 if info.get("loaded"):
                     return candidate
-            record = self._training_eval_latest_saved_run()
-            run_dir = self.normalize_path((record or {}).get("run_dir", ""))
-            for name in ("best.pt", "last.pt"):
-                candidate = self.normalize_path(os.path.join(run_dir, "weights", name))
-                if candidate and os.path.isfile(candidate):
-                    info = self.inspect_training_eval_weights(candidate)
-                    if info.get("loaded"):
-                        return candidate
-            return ""
+            return latest_run_export_checkpoint()
 
         export_checkpoint_edit = QtWidgets.QLineEdit(
             usable_export_checkpoint(
@@ -52912,7 +54887,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         export_layout.addStretch(1)
         evaluator_tabs.addTab(export_tab, "Export")
 
-        export_state = {"output": ""}
+        export_state = {"output": "", "running": False}
 
         def refresh_export_controls():
             export_format = export_format_combo.currentText().strip().lower()
@@ -52952,7 +54927,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             )
             int8_selected = str(export_precision_combo.currentData() or "fp32") == "int8"
             export_ready = checkpoint_ready and (not int8_selected or calibration_ready)
-            export_button.setEnabled(export_ready)
+            export_button.setEnabled(export_ready and not export_state.get("running", False))
 
             if not checkpoint_ready:
                 message = "● Select any existing Ultralytics .pt weights to enable export."
@@ -52988,18 +54963,17 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             file_name, _selected_filter = QFileDialog.getOpenFileName(
                 dialog,
                 "Select Trained Ultralytics Checkpoint",
-                os.path.dirname(export_checkpoint_edit.text().strip()) or self._training_eval_project_dir(),
+                self.dialog_start_directory(
+                    "export", export_checkpoint_edit.text().strip()
+                ),
                 "Ultralytics Checkpoints (*.pt);;All Files (*)",
             )
             if file_name:
+                self.remember_dialog_selection("export", file_name)
                 export_checkpoint_edit.setText(self.normalize_path(file_name))
 
         def use_latest_export_checkpoint():
-            checkpoint = usable_export_checkpoint(
-                train_model_edit.text(),
-                eval_weights_edit.text(),
-                restored_checkpoint,
-            )
+            checkpoint = latest_run_export_checkpoint()
             if checkpoint:
                 export_checkpoint_edit.setText(checkpoint)
                 export_status.setText(f"Using trained checkpoint: {checkpoint}")
@@ -53010,10 +54984,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             file_name, _selected_filter = QFileDialog.getOpenFileName(
                 dialog,
                 "Select Calibration Dataset YAML",
-                os.path.dirname(export_data_edit.text().strip()) or self._training_eval_dataset_dir(),
+                self.dialog_start_directory(
+                    "training", export_data_edit.text().strip()
+                ),
                 "Dataset YAML (*.yaml *.yml);;All Files (*)",
             )
             if file_name:
+                self.remember_dialog_selection("training", file_name)
                 export_data_edit.setText(self.normalize_path(file_name))
 
         def use_training_export_data():
@@ -53090,6 +55067,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         def perform_trainer_export():
             try:
+                current_worker = getattr(self, "training_export_worker", None)
+                if current_worker is not None and current_worker.isRunning():
+                    QMessageBox.information(dialog, "Export", "A model export is already running.")
+                    return
+
                 sync_legacy_export_state()
                 params = self.build_ultralytics_export_params(
                     export_format_combo.currentText(),
@@ -53107,23 +55089,53 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                     batch=export_batch_spin.value(),
                     data_yaml=export_data_edit.text().strip(),
                 )
-                export_button.setEnabled(False)
+                checkpoint_path = self.normalize_path(export_checkpoint_edit.text().strip())
+                export_state["running"] = True
+                refresh_export_controls()
                 export_status.setText(
-                    f"Exporting {os.path.basename(export_checkpoint_edit.text().strip())} "
-                    f"to {export_format_combo.currentText()}..."
+                    f"Exporting {os.path.basename(checkpoint_path)} "
+                    f"to {export_format_combo.currentText()} in the background..."
                 )
-                QApplication.setOverrideCursor(Qt.WaitCursor)
-                QApplication.processEvents()
-                output = self.run_ultralytics_export(export_checkpoint_edit.text().strip(), params)
-                export_state["output"] = output
-                export_open_output.setEnabled(bool(output and os.path.exists(output)))
-                export_status.setText(f"Export complete:\n{output}")
-                QMessageBox.information(dialog, "Export Complete", f"Exported model:\n{output}")
+
+                worker = UltralyticsExportWorker(checkpoint_path, params, self)
+                self.training_export_worker = worker
+
+                def export_completed(output, model):
+                    output = self.normalize_path(output)
+                    self.model = model
+                    self.export_model_path = checkpoint_path
+                    self.settings["exportModelPath"] = checkpoint_path
+                    self.queue_settings_save()
+                    export_state["output"] = output
+                    export_state["running"] = False
+                    if sip.isdeleted(dialog):
+                        return
+                    export_open_output.setEnabled(bool(output and os.path.exists(output)))
+                    export_status.setText(f"Export complete:\n{output}")
+                    refresh_export_controls()
+                    QMessageBox.information(dialog, "Export Complete", f"Exported model:\n{output}")
+
+                def export_failed(message):
+                    export_state["running"] = False
+                    if sip.isdeleted(dialog):
+                        return
+                    export_status.setText(f"Export failed: {message}")
+                    refresh_export_controls()
+                    QMessageBox.critical(dialog, "Export Failed", message)
+
+                def export_finished():
+                    if getattr(self, "training_export_worker", None) is worker:
+                        self.training_export_worker = None
+                    worker.deleteLater()
+
+                worker.completed.connect(export_completed)
+                worker.failed.connect(export_failed)
+                worker.finished.connect(export_finished)
+                worker.start()
             except Exception as e:
+                export_state["running"] = False
                 export_status.setText(f"Export failed: {e}")
                 QMessageBox.critical(dialog, "Export Failed", str(e))
-            finally:
-                QApplication.restoreOverrideCursor()
                 refresh_export_controls()
 
         def open_export_output_folder():
@@ -53407,10 +55419,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             return True
 
         def browse_review_report():
-            start_dir = os.path.dirname(
+            suggested_dir = os.path.dirname(
                 review_state.get("report_path")
                 or review_report_path_for(active_review_checkpoint(), review_split_combo.currentData())
             )
+            start_dir = self.dialog_start_directory("training", suggested_dir)
             file_name, _selected_filter = QFileDialog.getOpenFileName(
                 dialog,
                 "Open Validation Review Report",
@@ -53418,6 +55431,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 "Validation Reports (*.json);;All Files (*)",
             )
             if file_name:
+                self.remember_dialog_selection("training", file_name)
                 load_review_report(file_name, preserve_selection=False)
 
         def compare_review_report():
@@ -53425,7 +55439,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             if not current:
                 QMessageBox.information(dialog, "Compare Validation Reports", "Open or generate the first report.")
                 return
-            start_dir = os.path.dirname(review_state.get("report_path", "") or self._training_eval_project_dir())
+            start_dir = self.dialog_start_directory(
+                "training", os.path.dirname(review_state.get("report_path", "") or self._training_eval_project_dir())
+            )
             file_name, _selected_filter = QFileDialog.getOpenFileName(
                 dialog,
                 "Select Validation Report to Compare",
@@ -53434,6 +55450,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             )
             if not file_name:
                 return
+            self.remember_dialog_selection("training", file_name)
             try:
                 with open(file_name, "r", encoding="utf-8", errors="replace") as handle:
                     other = json.load(handle)
@@ -53478,6 +55495,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             )
             if not file_name:
                 return
+            self.remember_dialog_selection("export", file_name)
             fields = [
                 "id", "review_status", "type", "task", "class_id", "class_name",
                 "confidence", "iou", "severity", "image_path", "label_path", "detail",
@@ -53941,7 +55959,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             sync_training_setup_to_state(update_result=False)
             status_label.setText(
                 f"Task set to {task} from {os.path.basename(weights_path)} ({source}). "
-                "Run Evaluate Dataset for fresh recommendations."
+                "Run Generate Files + Parameters to rebuild files and recommendations."
             )
             logger.info(
                 "Training Evaluator task set to %s from %s using %s.",
@@ -53966,18 +55984,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             train_model_edit.setText(file_name)
             if file_name.lower().endswith(".pt"):
                 pretrained_edit.clear()
-            elif file_name.lower().endswith((".yaml", ".yml")):
-                reply = QMessageBox.question(
-                    dialog,
-                    "Transfer Learning",
-                    "Use a pretrained .pt file with this model YAML?",
-                    QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.No,
-                )
-                if reply == QMessageBox.Yes:
-                    pretrained_model_file = self.open_file_dialog("Select Pretrained Model", "Model Files (*.pt);;All Files (*)")
-                    if pretrained_model_file:
-                        pretrained_edit.setText(self.normalize_path(pretrained_model_file))
             sync_task_from_loaded_weights(file_name, label="training model")
             sync_settings()
 
@@ -53998,11 +56004,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         def browse_setup_runs_dir():
             sync_training_setup_to_state(update_result=False)
-            start_dir = self.normalize_path(runs_dir_edit.text().strip() or self._training_eval_project_dir())
+            start_dir = self.dialog_start_directory(
+                "training", runs_dir_edit.text().strip() or self._training_eval_project_dir()
+            )
             directory = QFileDialog.getExistingDirectory(dialog, "Select Training Runs Folder", start_dir)
             directory = self.normalize_path(directory or "")
             if not directory:
                 return
+            self.remember_dialog_selection("training", directory)
             os.makedirs(directory, exist_ok=True)
             runs_dir_edit.setText(directory)
             sync_settings()
@@ -54014,10 +56023,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         def browse_validation_source():
             mode = self._training_eval_validation_mode(validation_mode_combo.currentData())
             if mode == "folder":
-                start_dir = self.normalize_path(validation_source_edit.text().strip() or self._training_eval_dataset_dir())
+                start_dir = self.dialog_start_directory(
+                    "dataset", validation_source_edit.text().strip() or self._training_eval_dataset_dir()
+                )
                 directory = QFileDialog.getExistingDirectory(dialog, "Select Validation Image Folder", start_dir)
                 directory = self.normalize_path(directory or "")
                 if directory:
+                    self.remember_dialog_selection("dataset", directory)
                     validation_source_edit.setText(directory)
                     sync_settings()
             elif mode == "txt":
@@ -54057,7 +56069,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         QTimer.singleShot(0, refresh_latest_run_from_disk)
 
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
-        evaluate_btn = buttons.addButton("Evaluate Dataset", QtWidgets.QDialogButtonBox.ActionRole)
+        evaluate_btn = buttons.addButton("Generate Files + Parameters", QtWidgets.QDialogButtonBox.ActionRole)
+        evaluate_btn.setToolTip(
+            "Rescan the loaded dataset, overwrite train/valid metadata files, rebuild obj.yaml, "
+            "and calculate current training parameters."
+        )
         health_check_btn = buttons.addButton("Health Check", QtWidgets.QDialogButtonBox.ActionRole)
         preview_cmd_btn = buttons.addButton("Commands", QtWidgets.QDialogButtonBox.ActionRole)
         validate_btn = buttons.addButton("Validate Weights", QtWidgets.QDialogButtonBox.ActionRole)
@@ -54153,8 +56169,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         def run_evaluation():
             sync_settings()
             QApplication.setOverrideCursor(Qt.WaitCursor)
-            self._training_eval_set_activity_indicator(run_widgets, "running", "Working", "Evaluating dataset")
-            status_label.setText("Evaluating dataset and preparing training recommendations...")
+            self._training_eval_set_activity_indicator(run_widgets, "running", "Working", "Generating files and parameters")
+            status_label.setText("Rescanning dataset, overwriting training files, and calculating parameters...")
             QApplication.processEvents()
 
             def show_evaluation_progress(message):
@@ -54186,11 +56202,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                     f"Recommended imgsz={rec.get('imgsz')} batch={rec.get('batch')} "
                     f"epochs={rec.get('epochs')} patience={rec.get('patience')}."
                 )
-                self._training_eval_set_activity_indicator(run_widgets, "success", "Ready", "Evaluation complete")
+                self._training_eval_set_activity_indicator(run_widgets, "success", "Ready", "Files and parameters generated")
             except Exception as e:
                 QMessageBox.warning(dialog, "Training Evaluator", str(e))
-                status_label.setText(f"Evaluation failed: {e}")
-                self._training_eval_set_activity_indicator(run_widgets, "error", "Error", "Evaluation failed")
+                status_label.setText(f"File/parameter generation failed: {e}")
+                self._training_eval_set_activity_indicator(run_widgets, "error", "Error", "Generation failed")
             finally:
                 QApplication.restoreOverrideCursor()
 
@@ -55246,42 +57262,53 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.queue_settings_save()
 
     def browse_pt_clicked(self):
-        file_name = self.open_file_dialog("Select Model File", "Model Files (*.pt *.yaml);;All Files (*)")
-        if file_name.endswith('.pt'):
+        file_name = self.open_file_dialog("Select Model File", "Model Files (*.pt *.yaml *.yml);;All Files (*)")
+        if not file_name:
+            return
+        file_name = self.normalize_path(file_name)
+        if file_name.lower().endswith('.pt'):
             self.pt_path = file_name
             self.pt_label.setText(f"Model: {file_name}")
             self.model_config_path = None  # Reset .yaml config path if a .pt is chosen
-        elif file_name.endswith('.yaml'):
+            self.pretrained_model_path = None
+        elif file_name.lower().endswith(('.yaml', '.yml')):
             self.model_config_path = file_name
-            self.pt_label.setText(f"Model Config: {file_name}")
-            transfer_learning_reply = QMessageBox.question(self, 'Transfer Learning',
-                                                        'Do you want to perform transfer learning from a .pt file?',
-                                                        QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-            if transfer_learning_reply == QMessageBox.Yes:
-                pretrained_model_file = self.open_file_dialog("Select Pre-trained Model File", "Model Files (*.pt);;All Files (*)")
-                if pretrained_model_file:
-                    self.pretrained_model_path = pretrained_model_file
-                    self.pt_label.setText(f"Model Config: {self.model_config_path}; Pretrained: {pretrained_model_file}")
-                else:
-                    self.pretrained_model_path = None
+            self.pt_path = None
+            if getattr(self, "pretrained_model_path", None):
+                self.pt_label.setText(
+                    f"Model Config: {file_name}; Pretrained: {self.pretrained_model_path}"
+                )
             else:
-                self.pretrained_model_path = None
+                self.pt_label.setText(f"Model Config: {file_name}")
         else:
             self.model_config_path = None
             self.pretrained_model_path = None
             self.pt_label.setText("No Model selected")
         self.queue_settings_save()
 
-    def open_file_dialog(self, caption, file_filter, multiple=False):
+    def open_file_dialog(self, caption, file_filter, multiple=False, category=None, start_path=None):
+        if category is None:
+            combined = f"{caption} {file_filter}".lower()
+            if any(token in combined for token in ("model", "weight", "checkpoint", ".pt", ".engine", ".onnx")):
+                category = "model"
+            elif any(token in combined for token in ("yaml", "validation", "dataset", ".txt")):
+                category = "training"
+            else:
+                category = "generic"
+        start_directory = self.dialog_start_directory(category, start_path)
         options = QFileDialog.Options()
         options |= QFileDialog.ReadOnly
         if multiple:
             file_names, _ = QFileDialog.getOpenFileNames(
-                self, caption, "", file_filter, options=options)
+                self, caption, start_directory, file_filter, options=options)
+            if file_names:
+                self.remember_dialog_selection(category, file_names[0])
             return file_names
         else:
             file_name, _ = QFileDialog.getOpenFileName(
-                self, caption, "", file_filter, options=options)
+                self, caption, start_directory, file_filter, options=options)
+            if file_name:
+                self.remember_dialog_selection(category, file_name)
             return file_name
 
     def on_save_dir_clicked(self):
@@ -55311,6 +57338,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             norm_yaml_dir = os.path.normcase(yaml_dir.replace("\\", os.sep).replace("/", os.sep))
             if norm_yaml_dir.endswith(marker):
                 return os.path.join(os.path.dirname(os.path.dirname(yaml_dir)), "runs").replace("\\", "/")
+            if os.path.basename(norm_yaml_dir) == os.path.normcase(PROJECT_SETTINGS_DIR):
+                return os.path.join(os.path.dirname(yaml_dir), "runs").replace("\\", "/")
             return os.path.join(yaml_dir, "runs").replace("\\", "/")
 
         dataset_dir = self._training_eval_dataset_dir()
@@ -55431,10 +57460,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             getattr(self, "keep_duplicate_labels_checkbox", None)
             and self.keep_duplicate_labels_checkbox.isChecked()
         )
-        if keep_duplicate_labels:
-            wrapper_path = os.path.join(APP_DIR, "darkfusion_ultralytics_train.py")
-            if os.path.isfile(wrapper_path):
-                return [sys.executable, wrapper_path]
+        wrapper_path = os.path.join(APP_DIR, "darkfusion_ultralytics_train.py")
+        if os.path.isfile(wrapper_path):
+            prefix = [sys.executable, wrapper_path]
+            if keep_duplicate_labels:
+                prefix.append("--darkfusion-keep-duplicates")
+            return prefix
         return self._ultralytics_cli_command_prefix()
 
     @staticmethod
@@ -55568,18 +57599,76 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             )
         return args
 
+    def _training_eval_resolve_command_data_yaml(self, result=None):
+        """Return a usable YAML for the loaded dataset, rebuilding managed files when needed."""
+        result = result if isinstance(result, dict) else {}
+        rec = result.get("recommendations", {}) if isinstance(result.get("recommendations", {}), dict) else {}
+        data_yaml = self.normalize_path(
+            rec.get("data_yaml_path", "")
+            or result.get("data_yaml_path", "")
+            or getattr(self, "data_yaml_path", "")
+            or ""
+        )
+        dataset_dir = self._training_eval_dataset_dir()
+        if (
+            data_yaml
+            and os.path.isfile(data_yaml)
+            and (not dataset_dir or self._training_eval_yaml_matches_dataset(data_yaml, dataset_dir))
+        ):
+            return data_yaml
+
+        if not dataset_dir:
+            raise ValueError("Training YAML is missing and no dataset is currently loaded.")
+
+        logger.warning(
+            "Training YAML is unavailable (%s); rebuilding it for loaded dataset %s.",
+            data_yaml or "not selected",
+            dataset_dir,
+        )
+        settings = getattr(self, "settings", {}) if isinstance(getattr(self, "settings", None), dict) else {}
+        try:
+            data_yaml = self.ensure_training_evaluator_data_yaml(
+                force=True,
+                prepare_validation=True,
+                validation_mode=settings.get("trainingEvaluatorValidationMode", "auto"),
+                validation_source=settings.get("trainingEvaluatorValidationSource", ""),
+                validation_percent=settings.get(
+                    "trainingEvaluatorValidationPercent",
+                    settings.get("datasetValidPercent", "20%"),
+                ),
+                validation_source_percent=settings.get("trainingEvaluatorValidationSourcePercent", "100%"),
+            )
+        except Exception as error:
+            raise ValueError(
+                "Training YAML was missing and DarkFusion could not rebuild it for the loaded dataset:\n"
+                f"{error}"
+            ) from error
+
+        data_yaml = self.normalize_path(data_yaml)
+        if not data_yaml or not os.path.isfile(data_yaml):
+            raise ValueError("DarkFusion rebuilt the dataset split but obj.yaml was not created.")
+        result["data_yaml_path"] = data_yaml
+        rec["data_yaml_path"] = data_yaml
+        result["recommendations"] = rec
+        logger.info("Rebuilt training YAML for the loaded dataset: %s", data_yaml)
+        return data_yaml
+
     def build_training_evaluator_command(self, result, mode="train", probe_epochs=None, apply_optimized_args=True, run_name=None):
         if not result:
-            raise ValueError("Run Evaluate Dataset first.")
+            raise ValueError("Run Generate Files + Parameters first.")
 
         rec = result.get("recommendations", {})
         task = str(rec.get("task") or (getattr(self, "task_combobox", None).currentText() if getattr(self, "task_combobox", None) is not None else "detect")).strip().lower()
         if task not in {"detect", "segment", "classify", "pose", "obb"}:
             raise ValueError(f"Invalid Ultralytics task: {task}")
 
-        data_yaml = self.normalize_path(rec.get("data_yaml_path", "") or result.get("data_yaml_path", "") or getattr(self, "data_yaml_path", ""))
-        if not data_yaml or not os.path.exists(data_yaml):
-            raise ValueError("Training YAML is missing. Select obj.yaml or enable Auto YAML.")
+        data_yaml = self._training_eval_resolve_command_data_yaml(result)
+        loaded_dataset_dir = self._training_eval_dataset_dir()
+        if loaded_dataset_dir and not self._training_eval_yaml_matches_dataset(data_yaml, loaded_dataset_dir):
+            raise ValueError(
+                "This evaluation result belongs to a different dataset than the one currently loaded. "
+                "Run Generate Files + Parameters again before validation or training."
+            )
 
         model_args = self._training_eval_model_command_args(result, mode=mode)
         if not model_args:
@@ -55651,16 +57740,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         include_distillation=False,
     ):
         if not result:
-            raise ValueError("Run Evaluate Dataset first.")
+            raise ValueError("Run Generate Files + Parameters first.")
 
         rec = result.get("recommendations", {})
         task = str(rec.get("task") or (getattr(self, "task_combobox", None).currentText() if getattr(self, "task_combobox", None) is not None else "detect")).strip().lower()
         if task not in {"detect", "segment", "classify", "pose", "obb"}:
             raise ValueError(f"Invalid Ultralytics task: {task}")
 
-        data_yaml = self.normalize_path(rec.get("data_yaml_path", "") or result.get("data_yaml_path", "") or getattr(self, "data_yaml_path", ""))
-        if not data_yaml or not os.path.exists(data_yaml):
-            raise ValueError("Training YAML is missing. Select obj.yaml or enable Auto YAML before tuning.")
+        data_yaml = self._training_eval_resolve_command_data_yaml(result)
 
         model_args = self._training_eval_model_command_args(result, mode="train")
         model_path = ""
@@ -55721,12 +57808,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
     def build_training_evaluator_batch_command(self, result, fraction=0.60):
         if not result:
-            raise ValueError("Run Evaluate Dataset first.")
+            raise ValueError("Run Generate Files + Parameters first.")
 
         rec = result.get("recommendations", {})
-        data_yaml = self.normalize_path(rec.get("data_yaml_path", "") or result.get("data_yaml_path", "") or getattr(self, "data_yaml_path", ""))
-        if not data_yaml or not os.path.exists(data_yaml):
-            raise ValueError("Training YAML is missing. Select obj.yaml or enable Auto YAML before batch calibration.")
+        data_yaml = self._training_eval_resolve_command_data_yaml(result)
 
         model_args = self._training_eval_model_command_args(result, mode="train")
         model_path = ""
@@ -56227,10 +58312,15 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         return self.normalize_path(str(output))
 
     def load_model(self):
-        home_directory = os.path.expanduser('~')
-        fname, _ = QtWidgets.QFileDialog.getOpenFileName(self, 'Open file', home_directory, "Model files (*.pt *.onnx)")
+        fname, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            'Open file',
+            self.dialog_start_directory("export"),
+            "Model files (*.pt *.onnx)",
+        )
 
         if fname:
+            self.remember_dialog_selection("export", fname)
             logger.info(f"Loading model from file: {fname}")
             self.model = YOLO(fname)
             self.export_model_path = fname
@@ -56452,9 +58542,15 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.stop_live_collect_runtime(reset_input=True)
         options = QFileDialog.Options()
         options |= QFileDialog.ReadOnly
-        directory = QFileDialog.getExistingDirectory(self, "Select Import Directory", options=options)
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "Select Import Directory",
+            self.dialog_start_directory("dataset"),
+            options=options,
+        )
 
         if directory:
+            self.remember_dialog_selection("dataset", directory)
             self.image_directory = directory
 
             self.images = self.get_image_files(directory)
@@ -56478,13 +58574,15 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         selected_option = self.dropdown.currentText()
         default_filename = selected_option if selected_option in ["valid.txt", "train.txt"] else ""
         default_dir = getattr(self, "train_valid_output_directory", "") or self.settings.get("trainValidOutputDirectory", "")
-        default_path = os.path.join(default_dir, default_filename) if default_dir else default_filename
+        start_dir = self.dialog_start_directory("training", default_dir)
+        default_path = os.path.join(start_dir, default_filename) if start_dir else default_filename
 
         save_file, _ = QFileDialog.getSaveFileName(
             self, "Select Output File", default_path, "Text Files (*.txt);;All Files (*)", options=options
         )
 
         if save_file:
+            self.remember_dialog_selection("training", save_file)
             output_dir = os.path.dirname(save_file).replace("\\", "/")
             self.train_valid_output_directory = output_dir
             self.queue_settings_save()
@@ -56520,7 +58618,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
                 QMessageBox.information(self, 'Information', 'valid.txt file has been created!')
 
-            self.create_and_update_yaml_and_data_files(output_dir, selected_option)
+            try:
+                self.create_and_update_yaml_and_data_files(output_dir, selected_option)
+            except Exception as error:
+                QMessageBox.critical(self, "Training File Generation", str(error))
 
     def create_and_update_yaml_and_data_files(self, output_dir, selected_option, source_yaml_path=""):
         """
@@ -56544,8 +58645,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.classes = self.load_classes(data_directory=dataset_dir)
 
         if not self.classes:
-            QMessageBox.critical(self, "Error", "No valid classes found. Check 'classes.txt' in your dataset directory.")
-            return
+            raise ValueError("No valid classes found. Check classes.txt in the dataset's .darkfusion folder.")
 
         class_numb = len(self.classes)
 
@@ -56555,7 +58655,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         obj_names_file = os.path.join(output_dir, "obj.names").replace("\\", "/")
         data_file_path = os.path.join(output_dir, "obj.data").replace("\\", "/")
         obj_yaml_file = os.path.join(output_dir, "obj.yaml").replace("\\", "/")
-        backup_dir = os.path.join(output_dir, "backup").replace("\\", "/")
+        backup_dir = os.path.join(dataset_dir, "runs").replace("\\", "/")
         preserved_yaml = {}
         for yaml_candidate in (source_yaml_path, obj_yaml_file):
             yaml_candidate = self.normalize_path(yaml_candidate or "")
@@ -56572,29 +58672,32 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         # Keep obj.names in sync with classes.txt.
         try:
-            with open(obj_names_file, "w", encoding="utf-8") as f:
-                for class_name in self.classes:
-                    f.write(class_name + "\n")
+            self._training_eval_write_text_atomic(
+                obj_names_file,
+                "".join(class_name + "\n" for class_name in self.classes),
+            )
 
             logger.info(f"Updated obj.names to match classes.txt (loaded {len(self.classes)} classes)")
 
         except Exception as e:
             logger.error(f"Failed to update obj.names: {e}")
-            return
+            raise
 
         # Create Darknet obj.data.
         try:
-            with open(data_file_path, "w", encoding="utf-8") as f:
-                f.write(f"classes = {class_numb}\n")
-                f.write(f"train = {train_txt_path}\n")
-                f.write(f"valid = {valid_txt_path}\n")
-                f.write(f"names = {obj_names_file}\n")
-                f.write(f"backup = {backup_dir}\n")
+            self._training_eval_write_text_atomic(
+                data_file_path,
+                f"classes = {class_numb}\n"
+                f"train = {train_txt_path}\n"
+                f"valid = {valid_txt_path}\n"
+                f"names = {obj_names_file}\n"
+                f"backup = {backup_dir}\n",
+            )
 
             logger.info(f" Created `obj.data` with {class_numb} classes.")
         except Exception as e:
             logger.error(f"Failed to create obj.data: {e}")
-            return
+            raise
         # Create Ultralytics obj.yaml.
         try:
             yaml_payload = {
@@ -56608,21 +58711,26 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                     yaml_payload[key] = value
 
             # points.json is the editable DarkFusion source when present; otherwise keep obj.yaml metadata.
-            points_json_path = os.path.join(dataset_dir, "points.json")
+            points_json_path = resolve_dataset_pose_schema_path(dataset_dir, migrate=True)
             if os.path.exists(points_json_path):
                 try:
                     with open(points_json_path, "r", encoding="utf-8") as json_file:
                         points_data = json.load(json_file)
+                    for pose_key in ("kpt_shape", "flip_idx", "skeleton", "kpt_names"):
+                        yaml_payload.pop(pose_key, None)
                     keypoints = points_data.get("keypoints", [])
                     num_keypoints = len(keypoints)
                     if num_keypoints > 0:
-                        yaml_payload["kpt_shape"] = [num_keypoints, 3]
-                        flip_idx = points_data.get("flip_idx", [])
-                        if flip_idx:
-                            yaml_payload["flip_idx"] = flip_idx
-                        skeleton = points_data.get("skeleton", [])
-                        if skeleton:
-                            yaml_payload["skeleton"] = skeleton
+                        configured_shape = points_data.get("kpt_shape")
+                        dimensions = 3
+                        if isinstance(configured_shape, (list, tuple)) and len(configured_shape) >= 2:
+                            try:
+                                dimensions = max(2, min(3, int(configured_shape[1])))
+                            except Exception:
+                                dimensions = 3
+                        yaml_payload["kpt_shape"] = [num_keypoints, dimensions]
+                        yaml_payload["flip_idx"] = list(points_data.get("flip_idx", []) or [])
+                        yaml_payload["skeleton"] = list(points_data.get("skeleton", []) or [])
                         kpt_names = []
                         for idx, kp in enumerate(keypoints):
                             if isinstance(kp, dict):
@@ -56641,9 +58749,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 logger.info("No points.json or preserved keypoint metadata found. Skipping keypoint structure.")
 
             yaml_payload["names"] = {i: str(name) for i, name in enumerate(self.classes)}
-            with open(obj_yaml_file, "w", encoding="utf-8") as f:
-                f.write("# YOLOv8 configuration file\n\n")
-                yaml.safe_dump(yaml_payload, f, sort_keys=False, allow_unicode=True)
+            yaml_content = "# YOLOv8 configuration file\n\n" + yaml.safe_dump(
+                yaml_payload,
+                sort_keys=False,
+                allow_unicode=True,
+            )
+            self._training_eval_write_text_atomic(obj_yaml_file, yaml_content)
 
             logger.info(f"Created obj.yaml with {class_numb} classes.")
             self._training_eval_yaml_split_report_cache = {}
@@ -56656,6 +58767,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         except Exception as e:
             logger.error(f"Failed to create obj.yaml: {e}")
+            raise
 
 
     # -----------------------------
@@ -56785,10 +58897,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
     def import_data(self):
         """Import text files and class configurations."""
-        data_directory = QtWidgets.QFileDialog.getExistingDirectory(self, 'Select Data Directory')
+        data_directory = QtWidgets.QFileDialog.getExistingDirectory(
+            self, 'Select Data Directory', self.dialog_start_directory("dataset")
+        )
         if not data_directory:
             logger.warning("No directory selected.")
             return
+        self.remember_dialog_selection("dataset", data_directory)
 
         data_directory = os.path.normpath(data_directory)
         self.text_files = glob.glob(os.path.join(data_directory, '*.txt'))
@@ -57394,11 +59509,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         options = QFileDialog.Options()
         options |= QFileDialog.ReadOnly
 
-        initial_directory = self.default_yaml_path.text()
+        initial_directory = self.dialog_start_directory("training", self.default_yaml_path.text())
         file_name, _ = QFileDialog.getOpenFileName(
             None, "Select YAML File", initial_directory, "YAML Files (*.yaml *.yml);;All Files (*)", options=options)
 
         if file_name:
+            self.remember_dialog_selection("training", file_name)
             self.hide_activation_checkbox.setChecked(False)
             self.yaml_filename = file_name
             self.default_yaml_path.setText(file_name)
@@ -57462,11 +59578,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         options = QtWidgets.QFileDialog.Options()
         options |= QtWidgets.QFileDialog.ReadOnly
-        initial_directory = "C:/"
+        initial_directory = self.dialog_start_directory("model", getattr(self, "filename", ""))
         file_name, _ = QtWidgets.QFileDialog.getOpenFileName(
             self, "Select Config File", initial_directory, "Config Files (*.cfg);;All Files (*)", options=options)
 
         if file_name:
+            self.remember_dialog_selection("model", file_name)
             self.filename = file_name
             self.cfg_open_label.setText(f"Cfg: {file_name}")
             self.parse_cfg_file(file_name)
@@ -57663,10 +59780,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             # Save updated config
             options = QtWidgets.QFileDialog.Options()
             save_file_name, _ = QtWidgets.QFileDialog.getSaveFileName(
-                self, "Save Config File As", os.path.expanduser("~"),
+                self, "Save Config File As", self.dialog_start_directory("model", getattr(self, "filename", "")),
                 "Config Files (*.cfg);;All Files (*)", options=options)
 
             if save_file_name:
+                self.remember_dialog_selection("model", save_file_name)
                 if not save_file_name.endswith('.cfg'):
                     save_file_name += '.cfg'
 
@@ -57696,23 +59814,26 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
             # Select two label files to combine
             file1, _ = QFileDialog.getOpenFileName(
-                self, "Select First Label File", "", "Text Files (*.txt);;All Files (*)", options=options
+                self, "Select First Label File", self.dialog_start_directory("dataset"), "Text Files (*.txt);;All Files (*)", options=options
             )
             if not file1:
                 raise RuntimeError("First file selection cancelled.")
+            self.remember_dialog_selection("dataset", file1)
 
             file2, _ = QFileDialog.getOpenFileName(
-                self, "Select Second Label File", "", "Text Files (*.txt);;All Files (*)", options=options
+                self, "Select Second Label File", self.dialog_start_directory("dataset", file1), "Text Files (*.txt);;All Files (*)", options=options
             )
             if not file2:
                 raise RuntimeError("Second file selection cancelled.")
+            self.remember_dialog_selection("dataset", file2)
 
             # Choose where to save combined result
             output_file, _ = QFileDialog.getSaveFileName(
-                self, "Save Combined Label File", "", "Text Files (*.txt);;All Files (*)", options=options
+                self, "Save Combined Label File", self.dialog_start_directory("export", file1), "Text Files (*.txt);;All Files (*)", options=options
             )
             if not output_file:
                 raise RuntimeError("Output file selection cancelled.")
+            self.remember_dialog_selection("export", output_file)
 
             # Read both files safely
             combined_lines = []
@@ -57746,14 +59867,20 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             logger.info("Combine TXT function finished.")
 
     def select_source_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Source Directory")
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select Source Directory", self.dialog_start_directory("dataset", self.text_from.text())
+        )
         if folder:
+            self.remember_dialog_selection("dataset", folder)
             self.text_from.setText(folder)
             self.queue_settings_save()
 
     def select_target_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Target Directory")
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select Target Directory", self.dialog_start_directory("export", self.text_to.text())
+        )
         if folder:
+            self.remember_dialog_selection("export", folder)
             self.text_to.setText(folder)
             self.queue_settings_save()
 

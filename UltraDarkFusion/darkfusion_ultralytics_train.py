@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 import sys
 import json
+import math
+import shutil
 from datetime import datetime
 
 import numpy as np
@@ -98,8 +100,77 @@ def install_keep_duplicate_label_patch() -> None:
     dataset.save_dataset_cache_file = _skip_cache_save
 
 
-def install_darkfusion_stop_controls() -> None:
-    """Honor DarkFusion stop request files at safe trainer lifecycle points."""
+def _finite_number(value) -> bool:
+    """Return True for finite scalar-like values without raising on tensors."""
+    try:
+        import torch
+
+        if isinstance(value, torch.Tensor):
+            return bool(torch.isfinite(value.detach()).all().item())
+    except Exception:
+        pass
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _trainer_values_are_finite(trainer) -> bool:
+    values = []
+    for name in ("loss", "fitness"):
+        value = getattr(trainer, name, None)
+        if value is not None:
+            values.append(value)
+    tloss = getattr(trainer, "tloss", None)
+    if isinstance(tloss, dict):
+        values.extend(tloss.values())
+    metrics = getattr(trainer, "metrics", None)
+    if isinstance(metrics, dict):
+        values.extend(value for value in metrics.values() if isinstance(value, (int, float, np.number)))
+    return all(_finite_number(value) for value in values) if values else True
+
+
+def _write_training_health(trainer, state: str, detail: str = "") -> None:
+    payload = {
+        "state": str(state),
+        "detail": str(detail or ""),
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "epoch": int(getattr(trainer, "epoch", -1)) + 1,
+        "fitness": float(getattr(trainer, "fitness", 0.0) or 0.0)
+        if _finite_number(getattr(trainer, "fitness", None))
+        else None,
+    }
+    try:
+        path = os.path.join(str(trainer.save_dir), ".darkfusion_training_health.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+    except Exception:
+        pass
+
+
+def _preserve_healthy_checkpoint(trainer) -> None:
+    """Copy the latest completed checkpoint after the epoch passes health checks."""
+    try:
+        last_path = str(trainer.last)
+        healthy_path = os.path.join(str(trainer.wdir), "darkfusion_healthy.pt")
+        if os.path.isfile(last_path):
+            shutil.copy2(last_path, healthy_path)
+            _write_training_health(
+                trainer,
+                "healthy",
+                "Latest healthy checkpoint preserved as weights/darkfusion_healthy.pt.",
+            )
+    except Exception as error:
+        try:
+            from ultralytics.utils import LOGGER
+
+            LOGGER.warning(f"DarkFusion could not preserve the healthy checkpoint: {error}")
+        except Exception:
+            pass
+
+
+def install_darkfusion_training_callbacks() -> None:
+    """Install safe-stop, frozen-BN, and abnormal-run protection callbacks."""
     from ultralytics.engine.trainer import BaseTrainer
     from ultralytics.utils import LOGGER
 
@@ -130,6 +201,50 @@ def install_darkfusion_stop_controls() -> None:
             pass
 
     def run_callbacks_with_stop_control(trainer, event: str):
+        health = getattr(trainer, "_darkfusion_health_state", None)
+        if not isinstance(health, dict):
+            health = {
+                "best_fitness": None,
+                "collapse_epochs": 0,
+                "nonfinite_epochs": 0,
+                "frozen_bn_count": None,
+                "frozen_bn_epoch": None,
+            }
+            trainer._darkfusion_health_state = health
+
+        if event == "on_train_start":
+            _write_training_health(trainer, "running", "Training started normally.")
+
+        if event == "on_train_batch_start":
+            # Parameters marked requires_grad=False are frozen, but BatchNorm
+            # running statistics can otherwise continue changing. Ultralytics
+            # puts the full model in train mode after on_train_epoch_start, so
+            # enforce this at the batch boundary where it remains effective.
+            current_epoch = int(getattr(trainer, "epoch", -1))
+            if health.get("frozen_bn_epoch") == current_epoch:
+                original_run_callbacks(trainer, event)
+                return
+            health["frozen_bn_epoch"] = current_epoch
+            try:
+                import torch
+
+                frozen_bn_count = 0
+                for module in trainer.model.modules():
+                    if not isinstance(module, torch.nn.modules.batchnorm._BatchNorm):
+                        continue
+                    parameters = list(module.parameters(recurse=False))
+                    if parameters and all(not parameter.requires_grad for parameter in parameters):
+                        module.eval()
+                        frozen_bn_count += 1
+                if health["frozen_bn_count"] is None:
+                    health["frozen_bn_count"] = frozen_bn_count
+                    if frozen_bn_count:
+                        LOGGER.info(
+                            f"DarkFusion protected {frozen_bn_count} frozen BatchNorm layer(s) from statistics updates."
+                        )
+            except Exception as error:
+                LOGGER.warning(f"DarkFusion frozen BatchNorm protection could not be applied: {error}")
+
         original_run_callbacks(trainer, event)
         stop_now = marker_path(trainer, ".darkfusion_stop_now")
         stop_after_epoch = marker_path(trainer, ".darkfusion_stop_after_epoch")
@@ -151,13 +266,73 @@ def install_darkfusion_stop_controls() -> None:
                 acknowledge(trainer, requested, "after checkpoint save")
                 LOGGER.warning("DarkFusion stop requested. Current epoch and checkpoint are complete.")
 
+        if event == "on_fit_epoch_end":
+            # Ultralytics emits this event once more during final best-model
+            # validation after the training epoch loop has completed.
+            if int(getattr(trainer, "epoch", -1)) >= int(getattr(trainer, "epochs", 0)):
+                return
+            finite = _trainer_values_are_finite(trainer)
+            if not finite:
+                health["nonfinite_epochs"] += 1
+                health["collapse_epochs"] = 0
+                detail = (
+                    "Non-finite loss or validation metrics remained after Ultralytics recovery "
+                    f"for {health['nonfinite_epochs']} completed epoch(s)."
+                )
+                _write_training_health(trainer, "abnormal", detail)
+                LOGGER.warning(f"DarkFusion training watchdog: {detail}")
+                if health["nonfinite_epochs"] >= 2:
+                    trainer.stop = True
+                    _write_training_health(
+                        trainer,
+                        "stopped_abnormal",
+                        detail + " Training stopped; use darkfusion_healthy.pt or best.pt.",
+                    )
+            else:
+                health["nonfinite_epochs"] = 0
+                fitness = float(getattr(trainer, "fitness", 0.0) or 0.0)
+                prior_best = health.get("best_fitness")
+                if prior_best is None or fitness > prior_best:
+                    health["best_fitness"] = fitness
+                    health["collapse_epochs"] = 0
+                    _preserve_healthy_checkpoint(trainer)
+                else:
+                    epoch_number = int(getattr(trainer, "epoch", -1)) + 1
+                    catastrophic = prior_best >= 0.05 and fitness < prior_best * 0.20 and epoch_number >= 5
+                    health["collapse_epochs"] = health["collapse_epochs"] + 1 if catastrophic else 0
+                    if not catastrophic:
+                        _preserve_healthy_checkpoint(trainer)
+                    if catastrophic:
+                        LOGGER.warning(
+                            "DarkFusion training watchdog: validation fitness is below 20%% of the "
+                            "best observed value (%s/%s). Collapse count %s/3.",
+                            f"{fitness:.5g}",
+                            f"{prior_best:.5g}",
+                            health["collapse_epochs"],
+                        )
+                    if health["collapse_epochs"] >= 3:
+                        trainer.stop = True
+                        detail = (
+                            "Validation fitness stayed below 20% of its best value for three "
+                            "consecutive completed epochs. This is separate from patience."
+                        )
+                        _write_training_health(trainer, "stopped_collapse", detail)
+                        LOGGER.warning(
+                            "DarkFusion stopped a persistently collapsed run. "
+                            "Use weights/darkfusion_healthy.pt or weights/best.pt."
+                        )
+
     BaseTrainer.run_callbacks = run_callbacks_with_stop_control
     BaseTrainer._darkfusion_stop_controls_installed = True
 
 
 def main() -> None:
-    install_keep_duplicate_label_patch()
-    install_darkfusion_stop_controls()
+    keep_duplicates_flag = "--darkfusion-keep-duplicates"
+    keep_duplicates = keep_duplicates_flag in sys.argv
+    sys.argv = [argument for argument in sys.argv if argument != keep_duplicates_flag]
+    if keep_duplicates:
+        install_keep_duplicate_label_patch()
+    install_darkfusion_training_callbacks()
     from ultralytics.cfg import entrypoint
 
     sys.argv = ["yolo", *sys.argv[1:]]
