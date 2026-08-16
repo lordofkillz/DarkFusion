@@ -32,6 +32,7 @@ import shutil
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 import pyautogui
 from collections import OrderedDict
@@ -1590,6 +1591,30 @@ def save_cv_image(image_path, image, quality=95):
             return bool(cv2.imwrite(image_path, image))
         except Exception:
             return False
+
+
+def extraction_frame_paths(output_dir, prefix, frame_index, image_extension=".jpg"):
+    """Build the shared, zero-based frame identity used by every extractor."""
+    extension = normalize_image_extension(image_extension, default=".jpg")
+    stem = f"{str(prefix or 'session')}_frame_{max(0, int(frame_index or 0))}"
+    image_path = os.path.join(str(output_dir), stem + extension)
+    label_path = os.path.join(str(output_dir), stem + ".txt")
+    return image_path, label_path
+
+
+def existing_labeled_extraction_image(image_path, label_path):
+    """Return the existing paired image when a non-empty label must be protected."""
+    try:
+        if not os.path.isfile(label_path) or os.path.getsize(label_path) <= 0:
+            return ""
+        image_stem = os.path.splitext(image_path)[0]
+        for extension in OUTPUT_IMAGE_SUFFIXES:
+            candidate = image_stem + extension
+            if os.path.isfile(candidate):
+                return candidate
+    except OSError:
+        return ""
+    return ""
 
 
 def normalize_dataset_conversion_extension(value, default=".jpg"):
@@ -7302,8 +7327,11 @@ class VideoProcessor(QObject):
                     frame = cv2.resize(frame, custom_size, interpolation=cv2.INTER_LANCZOS4)
 
                 if frame_count % extract_rate == 0:
-                    frame_path = os.path.join(output_dir, f"frame_{frame_count:05d}{image_extension}")
-                    save_cv_image(frame_path, frame)
+                    frame_path, label_path = extraction_frame_paths(
+                        output_dir, Path(video_path).stem, frame_count, image_extension
+                    )
+                    if not existing_labeled_extraction_image(frame_path, label_path):
+                        save_cv_image(frame_path, frame)
 
                 frame_count += 1
                 progress = int((frame_count / total_frames) * 100) if total_frames > 0 else 0
@@ -7328,6 +7356,7 @@ class GUIVideoProcessor(VideoProcessor):
         self.output_path = ""
         self.label_progress = progress_bar
         self.stop_processing = False
+        self.original_size = True
 
         self.progress_updated.connect(self.label_progress.setValue)
 
@@ -7364,6 +7393,11 @@ class GUIVideoProcessor(VideoProcessor):
     def set_custom_size(self, size):
         self.custom_size = size
 
+    def set_original_size(self, value):
+        self.original_size = bool(value)
+        if self.original_size:
+            self.custom_size = None
+
     def run(self):
         """
         Processes all videos added to the list.
@@ -7377,7 +7411,7 @@ class GUIVideoProcessor(VideoProcessor):
 
         for idx, video_path in enumerate(self.videos):
             video_name = os.path.splitext(os.path.basename(video_path))[0]
-            output_dir = os.path.join(self.output_path, f"{video_name}_Extracted_Frames")
+            output_dir = os.path.join(self.output_path, f"{video_name}_Frames")
 
 
             extract_rate = 1 if self.extract_all_frames else (self.custom_frame_count or 1)
@@ -11521,8 +11555,17 @@ class FrameExtractionThread(QThread):
 
         prefix = self.config.get("video_name") or "session"
         image_ext = normalize_image_extension(self.config.get("image_extension", ".jpg"))
-        frame_filename = f"{prefix}_frame_{frame_count}{image_ext}"
-        frame_filepath = os.path.join(output_dir, frame_filename)
+        frame_filepath, annotation_filepath = extraction_frame_paths(
+            output_dir, prefix, frame_count, image_ext
+        )
+
+        # A labeled frame is immutable during extraction: overwriting its image
+        # after crop/resize settings change would silently invalidate the label.
+        try:
+            if existing_labeled_extraction_image(frame_filepath, annotation_filepath):
+                return True
+        except OSError:
+            pass
 
         if not save_cv_image(frame_filepath, save_frame):
             self.warning.emit(f"Failed to save frame: {frame_filepath}")
@@ -11686,6 +11729,32 @@ class FrameExtractionThread(QThread):
 
         if saved_count and saved_count % 10 == 0:
             self.progress_format.emit(f"Saved {saved_count} frames...")
+
+
+class AdjacentPropagationWorker(QThread):
+    """Run expensive SAM/pose propagation without blocking the Qt event loop."""
+    completed = pyqtSignal(object)
+
+    def __init__(self, owner, source_file, target_file, parent=None):
+        super().__init__(parent)
+        self.owner = owner
+        self.source_file = source_file
+        self.target_file = target_file
+
+    def run(self):
+        try:
+            result = self.owner._compute_adjacent_propagation(
+                self.source_file, self.target_file
+            )
+        except Exception as e:
+            logger.exception("Adjacent propagation worker failed: %s", e)
+            result = {
+                "ok": False,
+                "message": f"Propagation failed: {e}",
+                "source_file": self.source_file,
+                "target_file": self.target_file,
+            }
+        self.completed.emit(result)
 
 
 class ImageConverterRunnableSignals(QObject):
@@ -17966,17 +18035,15 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         transport_row.setSpacing(6)
         for key in ("back", "prev_frame", "play", "next_frame", "forward"):
             transport_row.addWidget(controls[key], 1)
-        if not hasattr(self, "video_propagate_button"):
-            self.video_propagate_button = QtWidgets.QPushButton("Propagate", playback_group)
-            self.video_propagate_button.setObjectName("video_propagate_button")
-            self.video_propagate_button.setToolTip(
-                "Track the current video prediction into nearby frames and save editable labels."
+        if not hasattr(self, "video_label_frame_button"):
+            self.video_label_frame_button = QtWidgets.QPushButton("Label Frame", playback_group)
+            self.video_label_frame_button.setObjectName("video_label_frame_button")
+            self.video_label_frame_button.setToolTip(
+                "Pause, extract this exact frame, and open it in the normal image labeler."
             )
-            self.video_propagate_button.setMinimumHeight(32)
-            self.video_propagate_button.clicked.connect(
-                lambda: self.open_label_propagation_dialog("video")
-            )
-        transport_row.addWidget(self.video_propagate_button, 1)
+            self.video_label_frame_button.setMinimumHeight(32)
+            self.video_label_frame_button.clicked.connect(self.label_current_video_frame)
+        transport_row.addWidget(self.video_label_frame_button, 1)
 
         options_row = QtWidgets.QHBoxLayout()
         options_row.setObjectName("video_playback_options_row")
@@ -21856,6 +21923,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             return
 
         current_text = main_tabs.tabText(index).strip()
+        if current_text != "Label" and hasattr(self, "_finalize_sparse_video_working_frame"):
+            self._finalize_sparse_video_working_frame()
         if current_text != "Collect":
             self.stop_live_collect_runtime(reset_input=True)
 
@@ -24421,6 +24490,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                         scene.height()
                     )
 
+                if hasattr(self, "_finalize_sparse_video_working_frame"):
+                    self._finalize_sparse_video_working_frame()
+
         except Exception as e:
             logger.error(f"Failed saving during closeEvent: {e}")
 
@@ -24469,6 +24541,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
     def stop_live_collect_runtime(self, reset_input=False):
         """Stop video, stream, desktop, camera, and extraction runtime without clearing loaded models."""
+        self._adjacent_propagation_generation = int(
+            getattr(self, "_adjacent_propagation_generation", 0) or 0
+        ) + 1
         self.extracting_frames = False
         self.extract_mode_active = False
         self.playback_extraction_enabled = True
@@ -24496,6 +24571,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 pass
 
         self._release_capture()
+        self._release_video_label_navigation_capture()
         self._close_mss_resources()
 
         if hasattr(self, "play_video_button") and self.play_video_button is not None:
@@ -28142,6 +28218,75 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 logger.warning("Could not initialize semantic polygon Snap: %s", e)
                 self.sam_semantic_snap_predictor = None
                 self._sam_semantic_snap_model_path = None
+                return None
+
+    def ensure_sam_video_predictor_loaded(self, imgsz=None):
+        """Lazily create an eager-mode SAM3 video tracker for label propagation."""
+        lock = getattr(self, "_sam_model_load_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._sam_model_load_lock = lock
+
+        with lock:
+            sam_path = self._sam_model_path()
+            if not os.path.isabs(sam_path):
+                sam_path = os.path.join(os.getcwd(), sam_path)
+            sam_path = os.path.abspath(sam_path)
+            predictor = getattr(self, "sam_video_propagation_predictor", None)
+            if (
+                predictor is not None
+                and getattr(self, "_sam_video_propagation_model_path", None) == sam_path
+            ):
+                return predictor
+            if not os.path.isfile(sam_path):
+                return None
+
+            try:
+                from ultralytics.models.sam import SAM3VideoPredictor
+
+                # Ultralytics 8.4.113 passes the boolean False through as a
+                # non-None compile mode for this particular predictor.  On
+                # Windows that invokes TorchInductor/Triton and fails before
+                # frame one. Build the identical tracker explicitly in eager
+                # mode instead of patching site-packages.
+                class DarkFusionEagerSAM3VideoPredictor(SAM3VideoPredictor):
+                    def get_model(inner_self):
+                        from ultralytics.models.sam.build_sam3 import build_interactive_sam3
+
+                        model = build_interactive_sam3(
+                            inner_self.args.model, compile=None
+                        )
+                        model.set_binarize(True)
+                        return model
+
+                video_imgsz = int(math.ceil(self._sam_imgsz(imgsz) / 14.0) * 14)
+                overrides = {
+                    "conf": 0.25,
+                    "task": "segment",
+                    "mode": "predict",
+                    "model": sam_path,
+                    "imgsz": video_imgsz,
+                    "device": self._sam_device(),
+                    "compile": False,
+                    "save": False,
+                    "verbose": False,
+                }
+                if self._sam_half_enabled() and str(overrides["device"]).startswith("cuda"):
+                    overrides["quantize"] = 16
+                predictor = DarkFusionEagerSAM3VideoPredictor(overrides=overrides)
+                self.sam_video_propagation_predictor = predictor
+                self._sam_video_propagation_model_path = sam_path
+                if getattr(self, "_sam_video_inference_lock", None) is None:
+                    self._sam_video_inference_lock = threading.RLock()
+                logger.info(
+                    "Initialized eager SAM3 video tracker for label propagation (imgsz=%s).",
+                    video_imgsz,
+                )
+                return predictor
+            except Exception as e:
+                logger.warning("Could not initialize SAM3 video propagation: %s", e)
+                self.sam_video_propagation_predictor = None
+                self._sam_video_propagation_model_path = None
                 return None
 
     def start_sam3_startup_warmup(self):
@@ -33253,7 +33398,17 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self._active_extraction_settings = dict(config or {})
         self._last_extraction_error = ""
         self.reset_prediction_size_filter_stats("frame extraction")
-        self.ensure_pose_list_for_output_dir(self._active_extraction_settings.get("output_dir"))
+        extraction_output_dir = self._active_extraction_settings.get("output_dir")
+        self.ensure_pose_list_for_output_dir(extraction_output_dir)
+        if extraction_output_dir:
+            self._ensure_video_dataset_metadata(extraction_output_dir)
+            if self._active_extraction_settings.get("kind") == "video":
+                self._ensure_video_annotation_manifest(
+                    extraction_output_dir,
+                    self._active_extraction_settings.get("original_source"),
+                    transform_settings=self._active_extraction_settings,
+                    workflow="batch_extraction",
+                )
         self.set_extraction_ui_state("running", "Extraction running.")
 
         worker = FrameExtractionThread(self, self._active_extraction_settings, parent=self)
@@ -33308,7 +33463,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self._active_extraction_settings = dict(config or {})
         self._last_extraction_error = ""
         self.reset_prediction_size_filter_stats("camera frame extraction")
-        self.ensure_pose_list_for_output_dir(self._active_extraction_settings.get("output_dir"))
+        extraction_output_dir = self._active_extraction_settings.get("output_dir")
+        self.ensure_pose_list_for_output_dir(extraction_output_dir)
+        if extraction_output_dir:
+            self._ensure_video_dataset_metadata(extraction_output_dir)
         self.set_extraction_ui_state("running", "Extraction running.")
 
         self._camera_extraction_capture = cap
@@ -33485,13 +33643,30 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.log_prediction_size_filter_summary("frame extraction")
 
         if not stopped and not error:
-            QMessageBox.information(
-                self,
-                "Info",
+            output_dir = str(summary.get("output_dir", "") or "")
+            extracted_images = sorted(self.get_image_files(output_dir)) if output_dir else []
+            message = QMessageBox(self)
+            message.setWindowTitle("Frame Extraction Complete")
+            message.setIcon(QMessageBox.Information)
+            message.setText(
                 "Frame extraction completed.\n"
                 f"Frames read: {summary.get('frames_read', 0)}\n"
-                f"Frames saved: {summary.get('frames_saved', 0)}"
+                f"Frames available: {len(extracted_images)}"
             )
+            open_button = None
+            if extracted_images:
+                open_button = message.addButton("Open in Label", QMessageBox.AcceptRole)
+            message.addButton(QMessageBox.Close)
+            message.exec_()
+
+            if open_button is not None and message.clickedButton() is open_button:
+                config = getattr(self, "_active_extraction_settings", None) or {}
+                original_source = str(config.get("original_source", "") or "")
+                if original_source and os.path.isfile(original_source):
+                    self._video_annotation_return_source = original_source
+                    self._video_annotation_return_frame = int(config.get("start_frame") or 0)
+                    self._video_annotation_return_output_dir = output_dir
+                self._open_video_frame_in_image_labeler(extracted_images[0])
 
     def on_extraction_thread_finished(self, worker):
         if getattr(self, "extraction_thread", None) is worker:
@@ -33528,8 +33703,15 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 return
 
         selected_video_source = self.get_selected_video_path()
+        selected_local_video = bool(
+            selected_video_source
+            and not self.is_video_url(selected_video_source)
+            and os.path.isfile(selected_video_source)
+        )
 
-        if not self.output_path:
+        # Local videos have a natural default: save beside the source video.
+        # Camera, desktop, and URL inputs still need an explicit destination.
+        if not self.output_path and not selected_local_video:
             if self.set_output_directory():
                 QMessageBox.information(
                     self,
@@ -33685,10 +33867,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                     continue
 
                 prefix = getattr(self, "video_name", "session")
-                frame_filename = f"{prefix}_frame_{frame_count}{self.get_image_extension()}"
-                frame_filepath = os.path.join(output_dir, frame_filename)
+                frame_filepath, label_path = extraction_frame_paths(
+                    output_dir, prefix, frame_count, self.get_image_extension()
+                )
 
-                save_cv_image(frame_filepath, frame)
+                if not existing_labeled_extraction_image(frame_filepath, label_path):
+                    save_cv_image(frame_filepath, frame)
                 logger.info(f"Saved desktop frame without detection: {frame_filepath}")
             else:
                 self.save_frame_on_inference(
@@ -33746,10 +33930,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                         continue
 
                     prefix = getattr(self, "video_name", "session")
-                    frame_filename = f"{prefix}_frame_{frame_count}{self.get_image_extension()}"
-                    frame_filepath = os.path.join(output_dir, frame_filename)
+                    frame_filepath, label_path = extraction_frame_paths(
+                        output_dir, prefix, frame_count, self.get_image_extension()
+                    )
 
-                    save_cv_image(frame_filepath, frame)
+                    if not existing_labeled_extraction_image(frame_filepath, label_path):
+                        save_cv_image(frame_filepath, frame)
                     logger.info(f"Saved camera frame without detection: {frame_filepath}")
                 else:
                     self.save_frame_on_inference(
@@ -33854,6 +34040,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         output_dir = self.get_video_output_dir(original_source)
         os.makedirs(output_dir, exist_ok=True)
         self.ensure_pose_list_for_output_dir(output_dir)
+        self._ensure_video_dataset_metadata(output_dir)
 
         logger.info(f"Output directory: {output_dir}")
         logger.info(f"Model loaded: {model_loaded}")
@@ -33911,8 +34098,18 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 prefix = getattr(self, "video_name", "session")
                 image_ext = self.get_image_extension()
 
-                frame_filename = f"{prefix}_frame_{frame_count}{image_ext}"
-                frame_filepath = os.path.join(output_dir, frame_filename)
+                frame_filepath, annotation_filepath = extraction_frame_paths(
+                    output_dir, prefix, frame_count, image_ext
+                )
+
+                try:
+                    if existing_labeled_extraction_image(frame_filepath, annotation_filepath):
+                        logger.info(f"Preserved existing labeled video frame: {frame_filepath}")
+                        saved_count += 1
+                        frame_count += 1
+                        continue
+                except OSError:
+                    pass
 
                 if not save_cv_image(frame_filepath, save_frame):
                     logger.warning(f"Failed to save frame without detection: {frame_filepath}")
@@ -33978,23 +34175,39 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             # ---------------------------------------------------------------------
             # Skip frames
             # ---------------------------------------------------------------------
-            if frame_count is not None and not self.should_extract_frame(frame_count):
+            active_settings = getattr(self, "_active_extraction_settings", None)
+            if (
+                frame_count is not None
+                and not isinstance(active_settings, dict)
+                and not self.should_extract_frame(frame_count)
+            ):
                 return False
 
             # ---------------------------------------------------------------------
             # Build filename
             # ---------------------------------------------------------------------
-            prefix = getattr(self, "video_name", "session")
-            image_ext = self.get_image_extension()
+            prefix = (
+                active_settings.get("video_name")
+                if isinstance(active_settings, dict)
+                else getattr(self, "video_name", "session")
+            ) or "session"
+            image_ext = (
+                active_settings.get("image_extension")
+                if isinstance(active_settings, dict)
+                else self.get_image_extension()
+            ) or ".jpg"
 
             if frame_count is not None:
-                frame_filename = f"{prefix}_frame_{frame_count}{image_ext}"
+                frame_filepath, annotation_filepath = extraction_frame_paths(
+                    output_dir, prefix, frame_count, image_ext
+                )
             else:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S%f")
-                frame_filename = f"{prefix}_frame_{timestamp}{image_ext}"
-
-            frame_filepath = os.path.join(output_dir, frame_filename)
-            annotation_filepath = os.path.splitext(frame_filepath)[0] + ".txt"
+                frame_filepath = os.path.join(
+                    output_dir,
+                    f"{prefix}_frame_{timestamp}{normalize_image_extension(image_ext)}",
+                )
+                annotation_filepath = os.path.splitext(frame_filepath)[0] + ".txt"
 
             # ---------------------------------------------------------------------
             # Apply the exact same spatial transforms that extraction/display uses
@@ -34005,6 +34218,22 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             if save_frame is None or not isinstance(save_frame, np.ndarray) or save_frame.size == 0:
                 logger.warning("Transformed frame became invalid, skipping save.")
                 return False
+
+            # Never let a later auto-extraction overwrite or delete reviewed
+            # manual/propagated labels. It also preserves the image dimensions
+            # those normalized coordinates were authored against.
+            try:
+                if os.path.isfile(annotation_filepath) and os.path.getsize(annotation_filepath) > 0:
+                    has_labeled_image = bool(existing_labeled_extraction_image(
+                        frame_filepath, annotation_filepath
+                    ))
+                    if not has_labeled_image:
+                        if not save_cv_image(frame_filepath, save_frame):
+                            return False
+                    logger.info(f"Preserved existing labeled video frame: {frame_filepath}")
+                    return True
+            except OSError:
+                pass
 
             # ---------------------------------------------------------------------
             # If inference is disabled or no model, save image only
@@ -34599,10 +34828,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             return
 
         total_frames = int(getattr(self, "total_frames", 0) or 0)
+        labeled = self.video_frame_has_saved_labels(frame)
+        suffix = "  • Labeled" if labeled else ""
         if total_frames > 0:
-            label.setText(f"Frame {max(0, frame) + 1} / {total_frames}")
+            label.setText(f"Frame {max(0, frame) + 1} / {total_frames}{suffix}")
         else:
-            label.setText(f"Frame {max(0, frame) + 1} / --")
+            label.setText(f"Frame {max(0, frame) + 1} / --{suffix}")
 
     def _trim_rate_window(self, values, now, seconds=1.5):
         values.append(now)
@@ -35387,6 +35618,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         else:
             frame_to_show = prepared
 
+        try:
+            frame_to_show = self.draw_saved_video_labels(
+                frame_to_show,
+                self.latest_video_frame_number,
+            )
+        except Exception as e:
+            logger.warning(f"Failed drawing saved video labels: {e}")
+
         if hasattr(self, "fast_bgr_to_rgb"):
             display_frame = self.fast_bgr_to_rgb(frame_to_show)
         else:
@@ -35906,6 +36145,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
     def _start_video_playback(self, capture_source, original_source):
         """Common code to start video playback after source is determined."""
+        self._release_video_label_navigation_capture()
         previous_source = getattr(self, "current_playback_original_source", "")
         if previous_source and previous_source != original_source:
             self.clear_video_marks()
@@ -35963,7 +36203,20 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         )
         reader.set_speed(self.playback_speed)
         mark_in, _mark_out = self.get_video_mark_range()
-        if mark_in is not None and mark_in > 0 and not self.is_live_video_source(original_source):
+        return_source = str(getattr(self, "_video_annotation_return_source", "") or "")
+        return_frame = getattr(self, "_video_annotation_return_frame", None)
+        returning_from_labeler = (
+            return_frame is not None
+            and return_source
+            and os.path.normcase(os.path.abspath(return_source))
+            == os.path.normcase(os.path.abspath(str(original_source)))
+        )
+        if returning_from_labeler and not self.is_live_video_source(original_source):
+            reader.seek(max(0, int(return_frame)))
+            self._video_annotation_return_source = ""
+            self._video_annotation_return_frame = None
+            self._video_annotation_return_output_dir = ""
+        elif mark_in is not None and mark_in > 0 and not self.is_live_video_source(original_source):
             reader.seek(mark_in)
         if not self.is_live_video_source(original_source):
             reader.set_loop_range(
@@ -41762,6 +42015,19 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             logger.warning(f"Clicked item has invalid image path: {image_file}")
             return
 
+        previous_file = getattr(self, "current_file", None)
+        if (
+            previous_file
+            and self.normalize_path(previous_file) != self.normalize_path(image_file)
+            and not self.is_placeholder_file(previous_file)
+            and not getattr(self, "_loading_image", False)
+        ):
+            scene = self.screen_view.scene()
+            if scene is not None:
+                self.save_bounding_boxes(
+                    previous_file, scene.width(), scene.height(), scene=scene
+                )
+
         self.current_file = image_file
         row_index = index.row()
 
@@ -43100,6 +43366,42 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         if self.is_placeholder_file(self.current_file):
             logger.warning("Delete skipped for placeholder image.")
+            return
+
+        video_context = self.video_annotation_context_for_image(self.current_file)
+        if video_context is not None:
+            deleted_file = self.normalize_path(self.current_file)
+            self.delete_files(deleted_file)
+            self.image_files = [
+                path for path in (self.image_files or [])
+                if self.normalize_path(path) != deleted_file
+            ]
+            self.filtered_image_files = [
+                path for path in (self.filtered_image_files or [])
+                if self.normalize_path(path) != deleted_file
+            ]
+
+            current_frame = int(video_context["frame_index"])
+            total_frames = self._video_annotation_total_frame_count(video_context)
+            offset = 1 if total_frames <= 0 or current_frame + 1 < total_frames else -1
+            if current_frame + offset >= 0 and self._navigate_video_annotation_by_offset(
+                video_context,
+                offset,
+                deleted_file,
+                save_current=False,
+                allow_propagation=False,
+            ):
+                if hasattr(self, "statusBar"):
+                    self.statusBar().showMessage(
+                        f"Removed extracted video frame {current_frame + 1} and its label.",
+                        4000,
+                    )
+                return
+
+            self.current_file = None
+            self.current_img_index = -1
+            self.update_list_view(self.filtered_image_files)
+            self.display_placeholder()
             return
 
 
@@ -44604,9 +44906,438 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             video_name = f"{safe_source}_{timestamp}"
 
         self.video_name = video_name
-        self.output_subfolder = os.path.join(self.output_path, f"{video_name}_Frames")
+        output_root = getattr(self, "output_path", None)
+        if not output_root and video_path and os.path.isfile(str(video_path)):
+            output_root = os.path.dirname(os.path.abspath(str(video_path)))
+        output_root = output_root or os.getcwd()
+        self.output_subfolder = os.path.join(output_root, f"{video_name}_Frames")
 
         return self.output_subfolder
+
+    def _video_annotation_source(self):
+        source = str(
+            getattr(self, "current_playback_original_source", "")
+            or getattr(self, "current_playback_source", "")
+            or ""
+        ).strip()
+        return source if source and os.path.isfile(source) else ""
+
+    def video_annotation_paths(self, source, frame_index, image_extension=None):
+        """Return the one canonical image/label identity used by every video workflow."""
+        source = os.path.abspath(str(source))
+        frame_index = max(0, int(frame_index or 0))
+        output_dir = self.get_video_output_dir(source)
+        extension = normalize_image_extension(
+            image_extension or self.get_image_extension(), default=".jpg"
+        )
+        image_path, label_path = extraction_frame_paths(
+            output_dir, Path(source).stem, frame_index, extension
+        )
+        stem = os.path.splitext(os.path.basename(image_path))[0]
+        for existing_extension in OUTPUT_IMAGE_SUFFIXES:
+            candidate = os.path.join(output_dir, stem + existing_extension)
+            if os.path.isfile(candidate):
+                image_path = candidate
+                break
+        return output_dir, image_path, label_path
+
+    def video_annotation_label_path(self, source, frame_index):
+        source = os.path.abspath(str(source))
+        output_dir = self.get_video_output_dir(source)
+        _image_path, label_path = extraction_frame_paths(
+            output_dir, Path(source).stem, frame_index, self.get_image_extension()
+        )
+        return label_path
+
+    def _record_video_annotation_frame(
+        self, source, frame_index, image_path, label_path, sparse_manual=False
+    ):
+        """Record provenance only; YOLO txt remains the annotation source of truth."""
+        output_dir = os.path.dirname(image_path)
+        manifest_path = os.path.join(output_dir, ".darkfusion", "video_annotations.json")
+        manifest = read_json_file(manifest_path, default={})
+        if manifest.get("source") not in (None, "", os.path.abspath(source)):
+            manifest = {}
+        manifest.update({
+            "schema_version": 1,
+            "source": os.path.abspath(source),
+            "frame_numbering": "zero_based",
+            "annotation_format": "YOLO txt beside extracted image",
+        })
+        # Manual video labeling materializes only the frame currently being
+        # edited.  Mark that workflow explicitly so Prev/Next can discard an
+        # untouched working frame without changing normal bulk extraction.
+        if sparse_manual and not manifest.get("workflow"):
+            recorded_frames = manifest.get("frames")
+            existing_images = []
+            try:
+                existing_images = self.get_image_files(output_dir)
+            except Exception:
+                pass
+            # Older batch manifests did not identify their workflow and have
+            # no per-frame records.  Do not reinterpret a populated batch
+            # directory as sparse or delete its intentionally extracted data.
+            if existing_images and len(existing_images) > 1 and not recorded_frames:
+                manifest["workflow"] = "batch_extraction"
+            else:
+                manifest["workflow"] = "sparse_manual"
+        total_frames = int(getattr(self, "total_frames", 0) or 0)
+        if total_frames > 0:
+            manifest["total_frames"] = total_frames
+        video_fps = float(getattr(self, "video_fps", 0.0) or 0.0)
+        if video_fps > 0:
+            manifest["fps"] = video_fps
+        manifest["transform"] = self.current_video_transform_settings()
+        frames = manifest.setdefault("frames", {})
+        frames[str(max(0, int(frame_index or 0)))] = {
+            "image": os.path.relpath(image_path, output_dir).replace("\\", "/"),
+            "label": os.path.relpath(label_path, output_dir).replace("\\", "/"),
+        }
+        write_json_file_atomic(manifest_path, manifest)
+
+    def _discard_unlabeled_sparse_video_frame(self, context, image_path):
+        """Remove an untouched temporary frame from sparse manual video labeling."""
+        manifest = context.get("manifest") or {}
+        if manifest.get("workflow") != "sparse_manual":
+            return False
+
+        image_path = self.normalize_path(image_path)
+        label_path = os.path.splitext(image_path)[0] + ".txt"
+        try:
+            if os.path.isfile(label_path) and os.path.getsize(label_path) > 0:
+                return False
+        except OSError:
+            return False
+
+        removed = False
+        for path in (label_path, image_path):
+            try:
+                if os.path.isfile(path):
+                    os.remove(path)
+                    removed = True
+            except OSError as e:
+                logger.warning(f"Could not remove untouched video-label frame {path}: {e}")
+
+        if removed:
+            frame_key = str(max(0, int(context.get("frame_index", 0) or 0)))
+            frames = manifest.get("frames")
+            if isinstance(frames, dict):
+                frames.pop(frame_key, None)
+            manifest_path = os.path.join(
+                context.get("output_dir", os.path.dirname(image_path)),
+                ".darkfusion",
+                "video_annotations.json",
+            )
+            write_json_file_atomic(manifest_path, manifest)
+            logger.info(f"Removed untouched temporary video frame: {image_path}")
+        return removed
+
+    def _finalize_sparse_video_working_frame(self):
+        """Keep a manually opened video frame only when it has real annotations."""
+        current_file = self.normalize_path(getattr(self, "current_file", ""))
+        if not current_file:
+            return False
+        context = self.video_annotation_context_for_image(current_file)
+        if context is None:
+            return False
+        removed = self._discard_unlabeled_sparse_video_frame(context, current_file)
+        if removed:
+            self.image_files = [
+                path for path in (self.image_files or [])
+                if self.normalize_path(path) != current_file
+            ]
+            self.filtered_image_files = [
+                path for path in (self.filtered_image_files or [])
+                if self.normalize_path(path) != current_file
+            ]
+        return removed
+
+    def _ensure_video_annotation_manifest(
+        self,
+        output_dir,
+        source,
+        total_frames=0,
+        fps=0.0,
+        transform_settings=None,
+        workflow=None,
+    ):
+        if not output_dir or not source or not os.path.isfile(str(source)):
+            return
+        manifest_path = os.path.join(str(output_dir), ".darkfusion", "video_annotations.json")
+        manifest = read_json_file(manifest_path, default={})
+        absolute_source = os.path.abspath(str(source))
+        if manifest.get("source") not in (None, "", absolute_source):
+            manifest = {}
+        manifest.update({
+            "schema_version": 1,
+            "source": absolute_source,
+            "frame_numbering": "zero_based",
+            "annotation_format": "YOLO txt beside extracted image",
+        })
+        if workflow:
+            manifest["workflow"] = str(workflow)
+        if int(total_frames or 0) > 0:
+            manifest["total_frames"] = int(total_frames)
+        if float(fps or 0.0) > 0:
+            manifest["fps"] = float(fps)
+        if isinstance(transform_settings, dict):
+            transform_keys = (
+                "crop_enabled", "resize_enabled", "resize_policy", "width", "height",
+                "network_width", "network_height", "model_size_available",
+            )
+            manifest["transform"] = {
+                key: transform_settings.get(key) for key in transform_keys
+            }
+        manifest.setdefault("frames", {})
+        write_json_file_atomic(manifest_path, manifest)
+
+    def video_annotation_context_for_image(self, image_path=None):
+        """Resolve an extracted image back to its source video and exact frame index."""
+        image_path = self.normalize_path(image_path or getattr(self, "current_file", ""))
+        if not image_path or not os.path.isfile(image_path):
+            return None
+        directory = os.path.dirname(image_path)
+        manifest_path = os.path.join(directory, ".darkfusion", "video_annotations.json")
+        manifest = read_json_file(manifest_path, default={})
+        source = str(manifest.get("source", "") or "")
+        if not source:
+            source = str(getattr(self, "_video_annotation_return_source", "") or "")
+            return_dir = self.normalize_path(
+                getattr(self, "_video_annotation_return_output_dir", "")
+            )
+            if not return_dir or return_dir != self.normalize_path(directory):
+                return None
+        if not source or not os.path.isfile(source):
+            return None
+        match = re.fullmatch(
+            rf"{re.escape(Path(source).stem)}_frame_(\d+)",
+            Path(image_path).stem,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            return None
+        return {
+            "source": os.path.abspath(source),
+            "frame_index": int(match.group(1)),
+            "output_dir": directory,
+            "manifest": manifest,
+        }
+
+    def _video_annotation_total_frame_count(self, context):
+        manifest_total = int((context.get("manifest") or {}).get("total_frames", 0) or 0)
+        if manifest_total > 0:
+            return manifest_total
+        source = context["source"]
+        cache = getattr(self, "_video_annotation_frame_count_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._video_annotation_frame_count_cache = cache
+        if source in cache:
+            return cache[source]
+        capture = cv2.VideoCapture(source)
+        try:
+            total = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0) if capture.isOpened() else 0
+        finally:
+            capture.release()
+        cache[source] = total
+        if total > 0:
+            self._ensure_video_annotation_manifest(
+                context.get("output_dir"), source, total_frames=total
+            )
+            context.setdefault("manifest", {})["total_frames"] = total
+        return total
+
+    def _read_video_annotation_frame(self, source, frame_index, transform_settings=None):
+        capture = getattr(self, "_video_label_navigation_capture", None)
+        capture_source = str(getattr(self, "_video_label_navigation_source", "") or "")
+        if capture is None or not capture.isOpened() or capture_source != source:
+            if capture is not None:
+                capture.release()
+            capture = cv2.VideoCapture(source)
+            if not capture.isOpened():
+                capture.release()
+                self._video_label_navigation_capture = None
+                return None
+            self._video_label_navigation_capture = capture
+            self._video_label_navigation_source = source
+            self._video_label_navigation_next_frame = None
+        if getattr(self, "_video_label_navigation_next_frame", None) != frame_index:
+            capture.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+        ok, frame = capture.read()
+        if not ok or frame is None:
+            return None
+        self._video_label_navigation_next_frame = frame_index + 1
+        if isinstance(transform_settings, dict):
+            return transform_video_frame_by_settings(frame, transform_settings)
+        return self.prepare_playback_frame(frame)
+
+    def _release_video_label_navigation_capture(self):
+        capture = getattr(self, "_video_label_navigation_capture", None)
+        if capture is not None:
+            try:
+                capture.release()
+            except Exception:
+                pass
+        self._video_label_navigation_capture = None
+        self._video_label_navigation_source = ""
+        self._video_label_navigation_next_frame = None
+
+    def _ensure_video_dataset_metadata(self, output_dir):
+        classes_path = dataset_metadata_path(output_dir, "classes.txt", create_parent=True)
+        if os.path.isfile(classes_path):
+            return
+        classes = list(self.class_display_names() or getattr(self, "class_names", []) or ["person"])
+        try:
+            with open(classes_path, "w", encoding="utf-8") as class_file:
+                class_file.write("\n".join(str(name) for name in classes) + "\n")
+        except OSError as e:
+            logger.warning(f"Could not save video dataset classes: {e}")
+
+    def video_frame_has_saved_labels(self, frame_index, source=None):
+        source = source or self._video_annotation_source()
+        if not source:
+            return False
+        label_path = self.video_annotation_label_path(source, frame_index)
+        try:
+            return os.path.isfile(label_path) and os.path.getsize(label_path) > 0
+        except OSError:
+            return False
+
+    def _saved_video_label_overlay(self, source, frame_index, frame_shape):
+        label_path = self.video_annotation_label_path(source, frame_index)
+        if not os.path.isfile(label_path):
+            return None
+        try:
+            cache_key = (label_path, os.path.getmtime(label_path), self._polygon_label_parse_preference())
+        except OSError:
+            return None
+        cache = getattr(self, "_saved_video_label_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._saved_video_label_cache = cache
+        if cache_key in cache:
+            return cache[cache_key]
+
+        height, width = frame_shape[:2]
+        names = self.class_display_names()
+        overlay = {"frame_shape": (height, width), "boxes": [], "polygons": [], "keypoints": []}
+        for line in self.load_label_lines(label_path):
+            obj = BoundingBox.from_str(line, preferred_polygon_type=self._polygon_label_parse_preference())
+            if obj is None:
+                continue
+            class_id = int(obj.class_id)
+            class_name = names[class_id] if 0 <= class_id < len(names) else str(class_id)
+            saved_name = f"Saved: {class_name}"
+            if obj.segmentation:
+                points = [
+                    (obj.segmentation[i] * width, obj.segmentation[i + 1] * height)
+                    for i in range(0, len(obj.segmentation) - 1, 2)
+                ]
+                overlay["polygons"].append({"class_id": class_id, "label": saved_name, "points": points})
+            elif obj.obb:
+                points = [
+                    (obj.obb[i] * width, obj.obb[i + 1] * height)
+                    for i in range(0, len(obj.obb) - 1, 2)
+                ]
+                overlay["polygons"].append({"class_id": class_id, "label": saved_name, "points": points})
+            else:
+                x1 = (obj.x_center - obj.width / 2.0) * width
+                y1 = (obj.y_center - obj.height / 2.0) * height
+                x2 = (obj.x_center + obj.width / 2.0) * width
+                y2 = (obj.y_center + obj.height / 2.0) * height
+                overlay["boxes"].append({"class_id": class_id, "label": saved_name, "xyxy": [x1, y1, x2, y2]})
+                if obj.keypoints:
+                    overlay["keypoints"].append({
+                        "class_id": class_id,
+                        "points": [(x * width, y * height) for x, y, _v in obj.keypoints],
+                        "visibility": [v for _x, _y, v in obj.keypoints],
+                    })
+        cache.clear()
+        cache[cache_key] = overlay
+        return overlay
+
+    def draw_saved_video_labels(self, frame, frame_index, source=None):
+        source = source or self._video_annotation_source()
+        if not source or frame is None:
+            return frame
+        overlay = self._saved_video_label_overlay(source, frame_index, frame.shape)
+        return self.draw_video_overlay_on_frame(frame, overlay) if overlay else frame
+
+    def _open_video_frame_in_image_labeler(self, image_path):
+        image_path = self.normalize_path(image_path)
+        directory = os.path.dirname(image_path)
+        previous_directory = self.normalize_path(getattr(self, "image_directory", ""))
+        reusable_images = list(getattr(self, "image_files", []) or [])
+        self.stop_live_collect_runtime(reset_input=False)
+        self.enter_image_annotation_mode(clear_video_surface=True)
+        self.set_image_directory(directory)
+        self._review_filter_label_cache = {}
+        self.class_names = self.load_classes() or ["person"]
+        self.update_classes_dropdown(self.class_names)
+        if previous_directory == self.normalize_path(directory) and reusable_images:
+            self.image_files = [self.normalize_path(path) for path in reusable_images]
+        else:
+            self.image_files = sorted(self.get_image_files(directory))
+        video_context = self.video_annotation_context_for_image(image_path)
+        if (
+            video_context is not None
+            and (video_context.get("manifest") or {}).get("workflow") == "sparse_manual"
+        ):
+            normalized_current = self.normalize_path(image_path)
+            labeled_images = []
+            for path in self.image_files:
+                if self.normalize_path(path) == normalized_current:
+                    labeled_images.append(path)
+                    continue
+                frame_match = re.search(
+                    r"_frame_(\d+)$", Path(path).stem, flags=re.IGNORECASE
+                )
+                if frame_match and self.video_frame_has_saved_labels(
+                    int(frame_match.group(1)), source=video_context["source"]
+                ):
+                    labeled_images.append(path)
+            self.image_files = labeled_images
+        self.filtered_image_files = list(self.image_files)
+        if image_path not in self.image_files:
+            self.image_files.append(image_path)
+            self.image_files.sort()
+            self.filtered_image_files = list(self.image_files)
+        self.current_img_index = self.filtered_image_files.index(image_path)
+        self.current_image_index = self.current_img_index
+        self.current_file = image_path
+        self.update_list_view(self.filtered_image_files)
+        self.display_image(image_path, rebuild_preview=True)
+        self.sync_list_view_selection(image_path)
+        self.ensure_points_json_exists()
+        self.update_dataset_progress()
+
+    def label_current_video_frame(self):
+        """Extract the paused frame and hand it to the proven image-labeling workflow."""
+        source = self._video_annotation_source()
+        frame = getattr(self, "_last_video_frame_bgr", None)
+        if not source:
+            QMessageBox.information(self, "Label Video Frame", "Load a local video first.")
+            return False
+        if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
+            QMessageBox.information(self, "Label Video Frame", "Play or seek to a frame first.")
+            return False
+        frame_index = self.current_video_frame_index()
+        self.seek_video_frame(frame_index, pause=True)
+        output_dir, image_path, label_path = self.video_annotation_paths(source, frame_index)
+        os.makedirs(output_dir, exist_ok=True)
+        self._ensure_video_dataset_metadata(output_dir)
+        if not os.path.isfile(image_path) and not save_cv_image(image_path, frame.copy()):
+            QMessageBox.warning(self, "Label Video Frame", f"Could not save:\n{image_path}")
+            return False
+        self._record_video_annotation_frame(
+            source, frame_index, image_path, label_path, sparse_manual=True
+        )
+        self._video_annotation_return_source = source
+        self._video_annotation_return_frame = frame_index
+        self._video_annotation_return_output_dir = output_dir
+        self._open_video_frame_in_image_labeler(image_path)
+        logger.info(f"Opened video frame {frame_index} for manual labeling: {image_path}")
+        return True
 
     def sync_class_labels_from_dropdown(self):
         """
@@ -45614,8 +46345,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 4000,
             )
 
-    def _propagate_labels_to_adjacent_image(self, source_file, target_file):
-        """Propagate all saved source annotations to one adjacent target image."""
+    def _compute_adjacent_propagation(self, source_file, target_file):
+        """Compute expensive propagation only; safe to run away from the UI thread."""
         source_file = self.normalize_path(source_file)
         target_file = self.normalize_path(target_file)
         source_label = self.get_label_file(source_file)
@@ -45625,20 +46356,65 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             else []
         )
         if not seed_lines:
-            return False, "Propagation skipped: the current image has no finished annotations."
-        if not self._propagation_pose_ready(seed_lines):
-            return False, "Propagation skipped: compatible pose weights are not loaded."
+            return {
+                "ok": False,
+                "message": "Propagation skipped: the current image has no finished annotations.",
+                "source_file": source_file,
+                "target_file": target_file,
+            }
 
         source_image = self._read_image_cv(source_file)
         target_image = self._read_image_cv(target_file)
         if source_image is None or target_image is None:
-            return False, "Propagation skipped: an adjacent image could not be read."
+            return {
+                "ok": False,
+                "message": "Propagation skipped: an adjacent image could not be read.",
+                "source_file": source_file,
+                "target_file": target_file,
+            }
+        if self._propagation_scene_changed(source_image, target_image):
+            return {
+                "ok": False,
+                "message": "Object lost: propagation stopped at a likely scene change.",
+                "source_file": source_file,
+                "target_file": target_file,
+            }
 
-        new_lines = self._propagate_lines_to_frame(
+        new_lines = self._propagate_lines_to_frame_best(
             source_image, target_image, seed_lines, 0.70
         )
         if not new_lines:
-            return False, "Propagation could not confidently follow the annotations on this frame."
+            return {
+                "ok": False,
+                "message": "Object lost or unconfirmed: no label was added to this frame.",
+                "source_file": source_file,
+                "target_file": target_file,
+            }
+
+        height, width = target_image.shape[:2]
+        return {
+            "ok": True,
+            "source_file": source_file,
+            "target_file": target_file,
+            "new_lines": new_lines,
+            "image_size": (width, height),
+            "rejected": int(getattr(self, "_last_propagation_rejected_count", 0) or 0),
+        }
+
+    def _apply_adjacent_propagation_result(self, result):
+        result = dict(result or {})
+        target_file = self.normalize_path(result.get("target_file", ""))
+        source_file = self.normalize_path(result.get("source_file", ""))
+        if not result.get("ok"):
+            return False, str(result.get("message") or "Propagation did not produce a label.")
+
+        # Preserve any correction the user drew while background propagation ran.
+        if target_file and self.normalize_path(getattr(self, "current_file", "")) == target_file:
+            scene = self.screen_view.scene()
+            if scene is not None:
+                self.save_bounding_boxes(
+                    target_file, scene.width(), scene.height(), scene=scene
+                )
 
         target_label = self.get_label_file(target_file)
         existing_lines = (
@@ -45646,7 +46422,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             if target_label and os.path.exists(target_label)
             else []
         )
-        height, width = target_image.shape[:2]
+        width, height = result.get("image_size") or (0, 0)
+        new_lines = list(result.get("new_lines") or [])
         merged_lines, changed, _review_needed = self._merge_propagated_lines(
             existing_lines, new_lines, "skip", (width, height)
         )
@@ -45663,7 +46440,69 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if not self._write_label_lines(target_label, merged_lines):
             return False, f"Propagation could not save {os.path.basename(target_label)}."
         self._finish_propagation_batch(manifest)
-        return True, f"Propagated {len(new_lines)} annotation(s) to {os.path.basename(target_file)}."
+        rejected = int(result.get("rejected", 0) or 0)
+        skipped_text = (
+            f"; skipped {rejected} lost/unconfirmed" if rejected else ""
+        )
+        return True, (
+            f"Propagated {len(new_lines)} annotation(s){skipped_text} "
+            f"to {os.path.basename(target_file)}."
+        )
+
+    def _propagate_labels_to_adjacent_image(self, source_file, target_file):
+        """Synchronous compatibility wrapper used by non-interactive callers."""
+        source_label = self.get_label_file(source_file)
+        seed_lines = self.load_label_lines(source_label) if source_label else []
+        if not self._propagation_pose_ready(seed_lines):
+            return False, "Propagation skipped: compatible pose weights are not loaded."
+        return self._apply_adjacent_propagation_result(
+            self._compute_adjacent_propagation(source_file, target_file)
+        )
+
+    def _start_adjacent_propagation(self, source_file, target_file):
+        worker = getattr(self, "_adjacent_propagation_worker", None)
+        if self.qthread_is_running(worker):
+            return False
+        source_label = self.get_label_file(source_file)
+        seed_lines = self.load_label_lines(source_label) if source_label else []
+        if not seed_lines or not self._propagation_pose_ready(seed_lines):
+            return False
+
+        generation = int(getattr(self, "_adjacent_propagation_generation", 0) or 0) + 1
+        self._adjacent_propagation_generation = generation
+        worker = AdjacentPropagationWorker(
+            self, self.normalize_path(source_file), self.normalize_path(target_file), parent=self
+        )
+        worker.completed.connect(
+            lambda result, generation=generation: self._on_adjacent_propagation_completed(
+                result, generation
+            )
+        )
+        worker.finished.connect(lambda worker=worker: self._cleanup_worker_reference(
+            "_adjacent_propagation_worker", worker
+        ))
+        self._adjacent_propagation_worker = worker
+        if hasattr(self, "statusBar"):
+            self.statusBar().showMessage(
+                f"Propagating to {os.path.basename(target_file)} in the background..."
+            )
+        worker.start()
+        return True
+
+    def _on_adjacent_propagation_completed(self, result, generation=None):
+        if generation is not None and int(generation) != int(
+            getattr(self, "_adjacent_propagation_generation", 0) or 0
+        ):
+            logger.debug("Ignored stale adjacent propagation result.")
+            return
+        changed, message = self._apply_adjacent_propagation_result(result)
+        target_file = self.normalize_path((result or {}).get("target_file", ""))
+        if changed and target_file == self.normalize_path(getattr(self, "current_file", "")):
+            self.refresh_bounding_box_display()
+            self.refresh_annotation_preview_after_save(target_file)
+        self._last_navigation_propagation_message = message
+        if hasattr(self, "statusBar"):
+            self.statusBar().showMessage(message, 6000)
 
     def open_label_propagation_dialog(self, source_kind="images"):
         source_kind = "video" if source_kind == "video" else "images"
@@ -45697,8 +46536,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         object_combo.addItem("Selected object", "selected")
         object_combo.addItem("All objects", "all")
         if source_kind == "video":
-            object_combo.setItemText(0, "First visible tracked object")
-            object_combo.setItemText(1, "All visible tracked objects")
+            object_combo.setItemText(0, "First visible prediction")
+            object_combo.setItemText(1, "All saved / visible objects")
+            object_combo.setCurrentIndex(1)
 
         direction_combo = QComboBox(dialog)
         direction_combo.addItem("Forward", "forward")
@@ -45819,6 +46659,22 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         return []
 
     def _propagation_seed_lines_from_video(self, object_mode):
+        source = self._video_annotation_source()
+        if source:
+            _output_dir, _image_path, saved_label_path = self.video_annotation_paths(
+                source, self.current_video_frame_index()
+            )
+            saved_lines = self.load_label_lines(saved_label_path)
+            if saved_lines:
+                if object_mode == "all":
+                    return saved_lines
+                QMessageBox.information(
+                    self,
+                    "Saved Video Labels",
+                    "A video frame has no selectable canvas item. Use All objects to propagate its saved manual labels.",
+                )
+                return []
+
         overlay = getattr(self, "latest_video_overlay", None) or {}
         frame = getattr(self, "_last_video_frame_bgr", None)
         if frame is None:
@@ -45922,6 +46778,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         return intersection / union if union > 0 else 0.0
 
     def _propagation_shift_bbox(self, previous_image, next_image, bbox):
+        """Track a label box into the next frame, or return None when tracking is unreliable."""
         try:
             previous_gray = cv2.cvtColor(previous_image, cv2.COLOR_BGR2GRAY)
             next_gray = cv2.cvtColor(next_image, cv2.COLOR_BGR2GRAY)
@@ -45943,16 +46800,392 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             mask[max(0, y1):max(y1 + 1, y2), max(0, x1):max(x1 + 1, x2)] = 255
             points = cv2.goodFeaturesToTrack(previous_gray, 80, 0.01, 5, mask=mask)
             if points is None or len(points) < 3:
-                return x1, y1, x2, y2
-            moved, status, _error = cv2.calcOpticalFlowPyrLK(previous_gray, next_gray, points, None)
-            valid = status.reshape(-1) > 0
-            if valid.sum() < 3:
-                return x1, y1, x2, y2
-            delta = np.median(moved[valid] - points[valid], axis=0).reshape(-1)
+                return None
+
+            moved, forward_status, _error = cv2.calcOpticalFlowPyrLK(
+                previous_gray, next_gray, points, None
+            )
+            if moved is None or forward_status is None:
+                return None
+            returned, backward_status, _back_error = cv2.calcOpticalFlowPyrLK(
+                next_gray, previous_gray, moved, None
+            )
+            if returned is None or backward_status is None:
+                return None
+
+            valid = (forward_status.reshape(-1) > 0) & (backward_status.reshape(-1) > 0)
+            valid &= np.isfinite(moved.reshape(-1, 2)).all(axis=1)
+            valid &= np.isfinite(returned.reshape(-1, 2)).all(axis=1)
+            required = max(3, int(math.ceil(len(points) * 0.35)))
+            if int(valid.sum()) < required:
+                return None
+
+            box_diag = max(1.0, math.hypot(x2 - x1, y2 - y1))
+            fb_limit = min(4.0, max(1.25, box_diag * 0.0125))
+            fb_error = np.linalg.norm(
+                returned.reshape(-1, 2) - points.reshape(-1, 2), axis=1
+            )
+            valid &= fb_error <= fb_limit
+            if int(valid.sum()) < required:
+                return None
+
+            deltas = moved.reshape(-1, 2)[valid] - points.reshape(-1, 2)[valid]
+            delta = np.median(deltas, axis=0)
+            residual = np.linalg.norm(deltas - delta, axis=1)
+            coherence_limit = min(6.0, max(2.0, box_diag * 0.02))
+            coherent = residual <= coherence_limit
+            if int(coherent.sum()) < required:
+                return None
+            delta = np.median(deltas[coherent], axis=0).reshape(-1)
             dx, dy = float(delta[0]), float(delta[1])
-            return x1 + dx, y1 + dy, x2 + dx, y2 + dy
+            shifted = (
+                max(0.0, min(next_w - 1.0, x1 + dx)),
+                max(0.0, min(next_h - 1.0, y1 + dy)),
+                max(0.0, min(next_w - 1.0, x2 + dx)),
+                max(0.0, min(next_h - 1.0, y2 + dy)),
+            )
+            if shifted[2] <= shifted[0] or shifted[3] <= shifted[1]:
+                return None
+            return shifted
+        except Exception as e:
+            logger.debug("Propagation optical-flow verification failed: %s", e)
+            return None
+
+    @staticmethod
+    def _propagation_rect_mask(width, height, bbox):
+        mask = np.zeros((height, width), dtype=np.uint8)
+        x1, y1, x2, y2 = [int(round(value)) for value in bbox]
+        x1, x2 = sorted((max(0, min(width, x1)), max(0, min(width, x2))))
+        y1, y2 = sorted((max(0, min(height, y1)), max(0, min(height, y2))))
+        if x2 > x1 and y2 > y1:
+            mask[y1:y2, x1:x2] = 1
+        return mask
+
+    @staticmethod
+    def _propagation_mask_similarity(source_image, target_image, source_mask, target_mask):
+        """Return a conservative color-appearance match score in the range 0..1."""
+        try:
+            source_mask = (np.asarray(source_mask) > 0).astype(np.uint8)
+            target_mask = (np.asarray(target_mask) > 0).astype(np.uint8)
+            if source_mask.shape != source_image.shape[:2] or target_mask.shape != target_image.shape[:2]:
+                return 0.0
+            if np.count_nonzero(source_mask) < 20 or np.count_nonzero(target_mask) < 20:
+                return 0.0
+
+            def masked_histogram(image, image_mask):
+                if image.ndim == 2:
+                    image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+                elif image.shape[2] == 4:
+                    image = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+                hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+                histogram = cv2.calcHist(
+                    [hsv], [0, 1], (image_mask * 255), [24, 16], [0, 180, 0, 256]
+                )
+                return cv2.normalize(histogram, None, alpha=1.0, norm_type=cv2.NORM_L1)
+
+            source_hist = masked_histogram(source_image, source_mask)
+            target_hist = masked_histogram(target_image, target_mask)
+            distance = float(
+                cv2.compareHist(source_hist, target_hist, cv2.HISTCMP_BHATTACHARYYA)
+            )
+            return max(0.0, min(1.0, 1.0 - distance))
         except Exception:
-            return bbox
+            return 0.0
+
+    @staticmethod
+    def _propagation_mask_agrees_with_guide(mask, guide_mask):
+        try:
+            candidate = np.asarray(mask) > 0
+            guide = np.asarray(guide_mask) > 0
+            if candidate.shape != guide.shape:
+                return False
+            candidate_area = int(np.count_nonzero(candidate))
+            guide_area = int(np.count_nonzero(guide))
+            overlap = int(np.count_nonzero(candidate & guide))
+            union = candidate_area + guide_area - overlap
+            if candidate_area < 20 or guide_area < 20:
+                return False
+            guide_coverage = overlap / max(1, guide_area)
+            iou = overlap / max(1, union)
+            return guide_coverage >= 0.25 and iou >= 0.10
+        except Exception:
+            return False
+
+    def _sam3_video_pair_masks(self, previous_image, target_image, prompt_bboxes):
+        """Track prompt boxes across one adjacent pair with native SAM3 video memory."""
+        if not prompt_bboxes:
+            return []
+        predictor = self.ensure_sam_video_predictor_loaded(imgsz=self._sam_imgsz())
+        if predictor is None:
+            return None
+
+        target_h, target_w = target_image.shape[:2]
+        if target_w < 2 or target_h < 2:
+            return None
+        # Video encoders require even dimensions. Masks are resized back below.
+        pair_w = target_w - (target_w % 2)
+        pair_h = target_h - (target_h % 2)
+        pair_w = max(2, pair_w)
+        pair_h = max(2, pair_h)
+        previous_pair = cv2.resize(previous_image, (pair_w, pair_h), interpolation=cv2.INTER_LINEAR)
+        target_pair = cv2.resize(target_image, (pair_w, pair_h), interpolation=cv2.INTER_LINEAR)
+        scaled_prompts = []
+        for x1, y1, x2, y2 in prompt_bboxes:
+            scaled_prompts.append([
+                float(x1) * pair_w / max(1, target_w),
+                float(y1) * pair_h / max(1, target_h),
+                float(x2) * pair_w / max(1, target_w),
+                float(y2) * pair_h / max(1, target_h),
+            ])
+
+        descriptor, video_path = tempfile.mkstemp(prefix="darkfusion_sam3_", suffix=".mp4")
+        os.close(descriptor)
+        try:
+            writer = cv2.VideoWriter(
+                video_path,
+                cv2.VideoWriter_fourcc(*"mp4v"),
+                2.0,
+                (pair_w, pair_h),
+            )
+            if not writer.isOpened():
+                return None
+            try:
+                writer.write(previous_pair)
+                writer.write(target_pair)
+            finally:
+                writer.release()
+
+            inference_lock = getattr(self, "_sam_video_inference_lock", None)
+            if inference_lock is None:
+                inference_lock = threading.RLock()
+                self._sam_video_inference_lock = inference_lock
+            with inference_lock:
+                predictor.inference_state.clear()
+                predictor.im = None
+                predictor.features = None
+                predictor.prompts = {}
+                results = list(
+                    predictor(
+                        source=video_path,
+                        bboxes=scaled_prompts,
+                        stream=True,
+                    )
+                )
+            if len(results) < 2:
+                return []
+            result_masks = getattr(getattr(results[-1], "masks", None), "data", None)
+            if result_masks is None:
+                return []
+            masks = []
+            for raw_mask in result_masks:
+                if hasattr(raw_mask, "detach"):
+                    raw_mask = raw_mask.detach().float().cpu().numpy()
+                mask = (np.asarray(raw_mask).squeeze() > 0).astype(np.uint8)
+                if mask.shape != (target_h, target_w):
+                    mask = cv2.resize(
+                        mask, (target_w, target_h), interpolation=cv2.INTER_NEAREST
+                    )
+                if np.count_nonzero(mask) >= 20:
+                    masks.append(mask)
+            return masks
+        except Exception as e:
+            logger.warning("Native SAM3 video propagation failed; using safe Snap fallback: %s", e)
+            return None
+        finally:
+            try:
+                capture = getattr(getattr(predictor, "dataset", None), "cap", None)
+                if capture is not None:
+                    capture.release()
+            except Exception:
+                pass
+            try:
+                os.remove(video_path)
+            except OSError:
+                pass
+
+    def _native_propagation_candidate_score(
+        self,
+        previous_image,
+        target_image,
+        source_mask,
+        reference_bbox,
+        candidate_mask,
+    ):
+        """Score and validate one native tracker mask against one source object."""
+        rect = self.mask_to_bbox_rect(candidate_mask)
+        if rect is None:
+            return None
+        x, y, width, height = rect
+        candidate_bbox = (float(x), float(y), float(x + width), float(y + height))
+        source_fraction = np.count_nonzero(source_mask) / max(1, source_mask.size)
+        target_fraction = np.count_nonzero(candidate_mask) / max(1, candidate_mask.size)
+        area_ratio = target_fraction / max(source_fraction, 1e-9)
+        if not 0.20 <= area_ratio <= 5.0:
+            return None
+
+        sx1, sy1, sx2, sy2 = reference_bbox
+        source_cx, source_cy = (sx1 + sx2) * 0.5, (sy1 + sy2) * 0.5
+        target_cx = (candidate_bbox[0] + candidate_bbox[2]) * 0.5
+        target_cy = (candidate_bbox[1] + candidate_bbox[3]) * 0.5
+        reference_diag = max(1.0, math.hypot(sx2 - sx1, sy2 - sy1))
+        movement = math.hypot(target_cx - source_cx, target_cy - source_cy) / reference_diag
+        if movement > 0.85:
+            return None
+
+        appearance = self._propagation_mask_similarity(
+            previous_image, target_image, source_mask, candidate_mask
+        )
+        if appearance < 0.30:
+            return None
+        overlap = self._propagation_iou(reference_bbox, candidate_bbox)
+        return 0.55 * overlap + 0.35 * appearance + 0.10 * max(0.0, 1.0 - movement)
+
+    def _propagate_lines_to_frame_native(
+        self, previous_image, target_image, previous_lines, confidence
+    ):
+        """Use native SAM3 video tracking, returning None only when unavailable."""
+        previous_h, previous_w = previous_image.shape[:2]
+        target_h, target_w = target_image.shape[:2]
+        tracked = []
+        pose_lines = []
+        for line in previous_lines:
+            try:
+                obj = BoundingBox.from_str(
+                    line, preferred_polygon_type=self._polygon_label_parse_preference()
+                )
+                if obj is None:
+                    continue
+                label_type = self._label_type(obj)
+                if label_type == "keypoints":
+                    pose_lines.append(line)
+                    continue
+                source_bbox = self._label_seed_bbox(obj, previous_w, previous_h)
+                if source_bbox is None:
+                    continue
+                if label_type == "segmentation":
+                    source_mask = self.polygon_to_mask(
+                        getattr(obj, "segmentation", None), previous_w, previous_h
+                    )
+                elif label_type == "obb":
+                    source_mask = self.obb_to_mask(
+                        getattr(obj, "obb", None), previous_w, previous_h
+                    )
+                else:
+                    source_mask = self._propagation_rect_mask(
+                        previous_w, previous_h, source_bbox
+                    )
+                if source_mask is None or np.count_nonzero(source_mask) < 20:
+                    continue
+                shifted_bbox = self._propagation_shift_bbox(
+                    previous_image, target_image, source_bbox
+                )
+                if shifted_bbox is None:
+                    shifted_bbox = (
+                        source_bbox[0] * target_w / max(1, previous_w),
+                        source_bbox[1] * target_h / max(1, previous_h),
+                        source_bbox[2] * target_w / max(1, previous_w),
+                        source_bbox[3] * target_h / max(1, previous_h),
+                    )
+                tracked.append(
+                    {
+                        "obj": obj,
+                        "type": label_type,
+                        "source_mask": source_mask,
+                        "prompt_bbox": (
+                            source_bbox[0] * target_w / max(1, previous_w),
+                            source_bbox[1] * target_h / max(1, previous_h),
+                            source_bbox[2] * target_w / max(1, previous_w),
+                            source_bbox[3] * target_h / max(1, previous_h),
+                        ),
+                        "reference_bbox": shifted_bbox,
+                    }
+                )
+            except Exception as e:
+                logger.debug("Could not prepare native propagation prompt: %s", e)
+
+        output_lines = []
+        if tracked:
+            masks = self._sam3_video_pair_masks(
+                previous_image,
+                target_image,
+                [record["prompt_bbox"] for record in tracked],
+            )
+            if masks is None:
+                return None
+
+            unused_masks = set(range(len(masks)))
+            for record_index, record in enumerate(tracked):
+                choices = []
+                # Ultralytics preserves prompt order while all masks remain
+                # present. Still score every candidate so a lost middle object
+                # cannot shift later masks onto the wrong annotation.
+                for mask_index in unused_masks:
+                    score = self._native_propagation_candidate_score(
+                        previous_image,
+                        target_image,
+                        record["source_mask"],
+                        record["reference_bbox"],
+                        masks[mask_index],
+                    )
+                    if score is not None:
+                        if len(masks) == len(tracked) and mask_index == record_index:
+                            score += 1.0
+                        choices.append((score, mask_index))
+                if not choices:
+                    continue
+                _score, mask_index = max(choices)
+                unused_masks.discard(mask_index)
+                mask = masks[mask_index]
+                obj = record["obj"]
+                label_type = record["type"]
+                if label_type == "segmentation":
+                    new_line = self._seg_line_from_mask(
+                        obj.class_id, mask, target_w, target_h
+                    )
+                elif label_type == "obb":
+                    new_line = self._obb_line_from_mask(
+                        obj.class_id, mask, target_w, target_h
+                    )
+                else:
+                    rect = self.mask_to_bbox_rect(mask)
+                    if rect is None:
+                        continue
+                    x, y, width, height = rect
+                    xc, yc, bw, bh = self._xyxy_to_yolo_xywh(
+                        (x, y, x + width, y + height), target_w, target_h
+                    )
+                    new_line = f"{obj.class_id} {xc:.6f} {yc:.6f} {bw:.6f} {bh:.6f}"
+                if new_line:
+                    output_lines.append(new_line)
+
+        if pose_lines:
+            output_lines.extend(
+                self._propagate_lines_to_frame(
+                    previous_image, target_image, pose_lines, confidence
+                )
+            )
+        return output_lines
+
+    def _propagate_lines_to_frame_best(
+        self, previous_image, target_image, previous_lines, confidence
+    ):
+        native_lines = self._propagate_lines_to_frame_native(
+            previous_image, target_image, previous_lines, confidence
+        )
+        if native_lines is not None:
+            self._last_propagation_attempted_count = len(previous_lines)
+            self._last_propagation_rejected_count = max(
+                0, len(previous_lines) - len(native_lines)
+            )
+            return native_lines
+        fallback_lines = self._propagate_lines_to_frame(
+            previous_image, target_image, previous_lines, confidence
+        )
+        self._last_propagation_attempted_count = len(previous_lines)
+        self._last_propagation_rejected_count = max(
+            0, len(previous_lines) - len(fallback_lines)
+        )
+        return fallback_lines
 
     def _propagation_shifted_segmentation_guide(
         self,
@@ -45997,7 +47230,15 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         )
         return guide if np.count_nonzero(guide) >= 3 else None
 
-    def _propagation_pose_line(self, image, prompt_bbox, class_id, confidence):
+    def _propagation_pose_line(
+        self,
+        image,
+        prompt_bbox,
+        class_id,
+        confidence,
+        previous_image=None,
+        source_bbox=None,
+    ):
         model = getattr(self, "model", None)
         if model is None:
             return None
@@ -46022,10 +47263,22 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                     if score > best_iou:
                         best_iou = score
                         best = (xyxy[:4], xy_np[index], conf_np[index] if conf_np is not None else None)
-            if best is None or best_iou < 0.05:
+            if best is None or best_iou < 0.20:
                 return None
             h, w = image.shape[:2]
             x1, y1, x2, y2 = best[0]
+            if previous_image is not None and source_bbox is not None:
+                previous_h, previous_w = previous_image.shape[:2]
+                source_mask = self._propagation_rect_mask(
+                    previous_w, previous_h, source_bbox
+                )
+                target_mask = self._propagation_rect_mask(
+                    w, h, (x1, y1, x2, y2)
+                )
+                if self._propagation_mask_similarity(
+                    previous_image, image, source_mask, target_mask
+                ) < 0.35:
+                    return None
             xc, yc, bw, bh = self._xyxy_to_yolo_xywh((x1, y1, x2, y2), w, h)
             values = []
             for index, (x, y) in enumerate(best[1]):
@@ -46054,7 +47307,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 shifted_bbox = self._propagation_shift_bbox(
                     previous_image, target_image, source_bbox
                 )
+                if shifted_bbox is None:
+                    logger.debug("Propagation rejected label: reliable motion could not be established.")
+                    continue
                 label_type = self._label_type(box)
+                class_name = self.get_current_class_name_safe(box.class_id)
                 if label_type == "segmentation":
                     # Match manual polygon Snap exactly: the shifted polygon's
                     # bounds get only the same small 2% prompt padding.
@@ -46073,7 +47330,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                         min(target_w - 1.0, prompt_bbox[2] + pad_x), min(target_h - 1.0, prompt_bbox[3] + pad_y),
                     )
                 if label_type == "keypoints":
-                    new_line = self._propagation_pose_line(target_image, prompt_bbox, box.class_id, confidence)
+                    new_line = self._propagation_pose_line(
+                        target_image,
+                        prompt_bbox,
+                        box.class_id,
+                        confidence,
+                        previous_image=previous_image,
+                        source_bbox=source_bbox,
+                    )
                     if new_line:
                         output_lines.append(new_line)
                     continue
@@ -46089,7 +47353,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                         source_bbox,
                         shifted_bbox,
                     )
-                    class_name = self.get_current_class_name_safe(box.class_id)
                     if guide_mask is not None and class_name:
                         # Use the same class-guided, polygon-constrained SAM3
                         # Snap path as manual Segmentation finalize. Optical flow
@@ -46122,14 +47385,46 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 if mask is None or int(np.count_nonzero(mask)) < 20:
                     continue
 
-                if label_type == "segmentation" and not self.validate_sam_mask_for_bbox(
+                if not self.validate_sam_mask_for_bbox(
                     mask,
                     shifted_bbox,
                     class_name=class_name,
                 ):
                     logger.debug(
-                        "Propagation rejected a drifting segmentation mask for class '%s'.",
+                        "Propagation rejected a drifting mask for class '%s'.",
                         class_name,
+                    )
+                    continue
+                if label_type == "segmentation" and not self._propagation_mask_agrees_with_guide(
+                    mask, guide_mask
+                ):
+                    logger.debug(
+                        "Propagation rejected a mask that no longer agrees with the prior polygon."
+                    )
+                    continue
+
+                if label_type == "segmentation":
+                    source_appearance_mask = self.polygon_to_mask(
+                        getattr(box, "segmentation", None), previous_w, previous_h
+                    )
+                    target_appearance_mask = mask
+                else:
+                    source_appearance_mask = self._propagation_rect_mask(
+                        previous_w, previous_h, source_bbox
+                    )
+                    target_appearance_mask = self._propagation_rect_mask(
+                        target_w, target_h, shifted_bbox
+                    )
+                appearance_score = self._propagation_mask_similarity(
+                    previous_image,
+                    target_image,
+                    source_appearance_mask,
+                    target_appearance_mask,
+                )
+                if appearance_score < 0.35:
+                    logger.debug(
+                        "Propagation rejected a likely lost object (appearance=%.3f).",
+                        appearance_score,
                     )
                     continue
                 mask_bbox_rect = self.mask_to_bbox_rect(mask)
@@ -46261,7 +47556,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 status_label.setText(f"Paused at {record['name']}: likely scene change.")
                 break
 
-            new_lines = self._propagate_lines_to_frame(
+            new_lines = self._propagate_lines_to_frame_best(
                 previous_image, target_image, previous_lines, options["confidence"]
             )
             if not new_lines:
@@ -46367,9 +47662,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             return False
 
         source_path = Path(source)
-        output_root = Path(getattr(self, "output_path", "") or source_path.parent)
-        output_dir = output_root / f"{source_path.stem}_propagated"
+        output_dir = Path(self.get_video_output_dir(source))
         output_dir.mkdir(parents=True, exist_ok=True)
+        self._ensure_video_dataset_metadata(str(output_dir))
         capture = cv2.VideoCapture(source)
         if not capture.isOpened():
             return False
@@ -46383,20 +47678,31 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 frame_numbers = list(range(start_frame + direction, total_frames if direction > 0 else -1, direction))[:limit]
                 records = []
                 for frame_number in frame_numbers:
-                    image_path = output_dir / f"{source_path.stem}_{frame_number:08d}.jpg"
-                    label_path = image_path.with_suffix(".txt")
+                    _canonical_dir, canonical_image, canonical_label = self.video_annotation_paths(
+                        source, frame_number
+                    )
+                    image_path = Path(canonical_image)
+                    label_path = Path(canonical_label)
 
                     def read_frame(number=frame_number):
                         capture.set(cv2.CAP_PROP_POS_FRAMES, number)
                         ok, frame = capture.read()
-                        return frame if ok else None
+                        return self.prepare_playback_frame(frame) if ok else None
+
+                    def save_frame(frame, path=str(image_path), number=frame_number):
+                        saved = save_cv_image(path, frame)
+                        if saved:
+                            self._record_video_annotation_frame(
+                                source, number, path, os.path.splitext(path)[0] + ".txt"
+                            )
+                        return saved
 
                     records.append({
                         "name": f"frame {frame_number}",
                         "label_path": str(label_path),
                         "image_path": str(image_path),
                         "read": read_frame,
-                        "save_image": lambda frame, path=str(image_path): cv2.imwrite(path, frame),
+                        "save_image": save_frame,
                     })
                 total_changed += self._run_propagation_frames(
                     records, seed_image, seed_lines, options, manifest, status_label
@@ -46408,7 +47714,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         completed = self._finish_propagation_batch(manifest)
         status_label.setText(
-            f"Video propagation finished: {total_changed} frame(s) saved to {output_dir}."
+            f"Video propagation finished: {total_changed} frame(s) saved to the shared dataset {output_dir}."
             + (" Undo is available." if completed else "")
         )
         if total_changed and options.get("open_results"):
@@ -46417,15 +47723,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES
             )
             if output_images:
-                self.stop_live_collect_runtime(reset_input=True)
-                self.set_image_directory(str(output_dir))
-                self.image_files = output_images
-                self.filtered_image_files = list(output_images)
-                self.current_img_index = 0
-                self.current_image_index = 0
-                self.current_file = output_images[0]
-                self.update_list_view(output_images)
-                self.display_image(self.current_file, rebuild_preview=True)
+                self._video_annotation_return_source = source
+                self._video_annotation_return_frame = start_frame
+                self._video_annotation_return_output_dir = str(output_dir)
+                self._open_video_frame_in_image_labeler(output_images[0])
         return completed
 
     def undo_last_label_propagation(self, status_label=None):
@@ -46472,9 +47773,149 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         offset = 1 if direction == "next" else -1 if direction == "previous" else 0
         return self.navigate_by_offset(offset)
 
+    def _navigate_video_annotation_by_offset(
+        self,
+        context,
+        offset,
+        current_file,
+        save_current=True,
+        allow_propagation=True,
+    ):
+        """Make image Prev/Next mean exact video frame -1/+1 inside a video dataset."""
+        source = context["source"]
+        current_frame_index = int(context["frame_index"])
+        target_frame_index = current_frame_index + int(offset)
+        total_frames = self._video_annotation_total_frame_count(context)
+        if target_frame_index < 0 or (total_frames > 0 and target_frame_index >= total_frames):
+            self.stop_next_timer()
+            self.stop_prev_timer()
+            if hasattr(self, "statusBar"):
+                self.statusBar().showMessage("Reached the start/end of the source video.", 3000)
+            return False
+
+        scene = self.screen_view.scene()
+        if save_current and scene is not None and not self.is_placeholder_file(current_file):
+            self.save_bounding_boxes(
+                current_file,
+                scene.width(),
+                scene.height(),
+                scene=scene,
+            )
+            self._discard_unlabeled_sparse_video_frame(context, current_file)
+
+        output_dir = context["output_dir"]
+        image_path, label_path = extraction_frame_paths(
+            output_dir,
+            Path(source).stem,
+            target_frame_index,
+            self.get_image_extension(),
+        )
+        for extension in OUTPUT_IMAGE_SUFFIXES:
+            candidate = os.path.splitext(image_path)[0] + extension
+            if os.path.isfile(candidate):
+                image_path = candidate
+                break
+
+        if not os.path.isfile(image_path):
+            target_frame = self._read_video_annotation_frame(
+                source,
+                target_frame_index,
+                transform_settings=(context.get("manifest") or {}).get("transform"),
+            )
+            if target_frame is None or target_frame.size == 0:
+                self.stop_next_timer()
+                self.stop_prev_timer()
+                if hasattr(self, "statusBar"):
+                    self.statusBar().showMessage(
+                        f"Could not read video frame {target_frame_index + 1}.", 4000
+                    )
+                return False
+            os.makedirs(output_dir, exist_ok=True)
+            if not save_cv_image(image_path, target_frame):
+                return False
+
+        self._ensure_video_dataset_metadata(output_dir)
+
+        def video_frame_sort_key(path):
+            match = re.search(r"_frame_(\d+)$", Path(path).stem, flags=re.IGNORECASE)
+            return int(match.group(1)) if match else float("inf")
+
+        normalized_target = self.normalize_path(image_path)
+        all_images = [
+            self.normalize_path(path)
+            for path in (self.image_files or [])
+            if os.path.exists(path)
+        ]
+        if normalized_target not in all_images:
+            all_images.append(normalized_target)
+        self.image_files = sorted(all_images, key=video_frame_sort_key)
+        filtered = [self.normalize_path(path) for path in (self.filtered_image_files or []) if os.path.exists(path)]
+        if normalized_target not in filtered:
+            filtered.append(normalized_target)
+        self.filtered_image_files = sorted(filtered, key=video_frame_sort_key)
+        self.current_file = normalized_target
+        self.current_img_index = self.filtered_image_files.index(normalized_target)
+        try:
+            self.current_image_index = [self.normalize_path(path) for path in self.image_files].index(normalized_target)
+        except ValueError:
+            self.current_image_index = self.current_img_index
+        self._video_annotation_return_source = source
+        self._video_annotation_return_frame = target_frame_index
+        self._video_annotation_return_output_dir = output_dir
+
+        self.settings["last_dir"] = self.normalize_path(output_dir)
+        self.settings["lastImage"] = normalized_target
+        self.settings["lastImageIndex"] = int(self.current_img_index)
+        self.queue_settings_save(delay_ms=1000)
+        self.update_list_view(self.filtered_image_files)
+        self.display_image(normalized_target, rebuild_preview=True)
+        self.sync_list_view_selection(normalized_target)
+        if (
+            allow_propagation
+            and getattr(self, "_image_navigation_propagation_enabled", False)
+            and abs(int(offset)) == 1
+        ):
+            self._start_adjacent_propagation(current_file, normalized_target)
+
+        if hasattr(self, "img_index_number"):
+            self.img_index_number.blockSignals(True)
+            self.img_index_number.setMaximum(max(0, len(self.filtered_image_files) - 1))
+            self.img_index_number.setValue(self.current_img_index)
+            self.img_index_number.blockSignals(False)
+
+        self.current_label_index = 0
+        self.update_bbox_visibility()
+        if self.roi_checkbox.isChecked():
+            self.update_roi(1, preserve_polygon=True)
+        if self.roi_checkbox_2.isChecked():
+            self.update_roi(2, preserve_polygon=True)
+        self.update_dataset_progress()
+        if hasattr(self, "statusBar"):
+            total_text = str(total_frames) if total_frames > 0 else "?"
+            message = f"Video frame {target_frame_index + 1} / {total_text}"
+            propagation_message = getattr(self, "_last_navigation_propagation_message", "")
+            if propagation_message:
+                message += f" — {propagation_message}"
+            elif self.qthread_is_running(getattr(self, "_adjacent_propagation_worker", None)):
+                message += " — propagation running in background"
+            self.statusBar().showMessage(message, 4000)
+        return True
+
     def navigate_by_offset(self, offset):
         """Jump directly by an image offset while loading only the destination."""
         if getattr(self, "navigation_busy", False):
+            return False
+        if (
+            getattr(self, "_image_navigation_propagation_enabled", False)
+            and self.qthread_is_running(getattr(self, "_adjacent_propagation_worker", None))
+        ):
+            self.stop_next_timer()
+            self.stop_prev_timer()
+            if hasattr(self, "statusBar"):
+                self.statusBar().showMessage(
+                    "Propagation is still running. Correct this frame when it finishes, then continue.",
+                    4000,
+                )
             return False
 
         self._last_navigation_propagation_message = ""
@@ -46493,6 +47934,15 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 return False
 
             current_file = self.normalize_path(self.current_file)
+            video_context = self.video_annotation_context_for_image(current_file)
+            propagation_enabled = bool(
+                getattr(self, "_image_navigation_propagation_enabled", False)
+            )
+            if video_context is not None and propagation_enabled:
+                return self._navigate_video_annotation_by_offset(
+                    video_context, offset, current_file
+                )
+
             files = list(getattr(self, "filtered_image_files", []) or [])
             if not files:
                 return False
@@ -46515,6 +47965,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
             new_index = max(0, min(len(files) - 1, index + offset))
             if new_index == index:
+                if video_context is not None and not propagation_enabled and hasattr(self, "statusBar"):
+                    self.statusBar().showMessage(
+                        "Only saved labeled frames are shown. Use video -1/+1 to seek, "
+                        "or enable propagation to label the adjacent frame.",
+                        5000,
+                    )
                 if self.auto_scan_checkbox.isChecked():
                     self.auto_scan_checkbox.setChecked(False)
                     self.stop_next_timer()
@@ -46535,9 +47991,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
             if getattr(self, "_image_navigation_propagation_enabled", False):
                 if abs(offset) == 1:
-                    _changed, propagation_message = self._propagate_labels_to_adjacent_image(
-                        current_file, new_file
-                    )
+                    propagation_message = "Propagation is starting in the background..."
                 else:
                     propagation_message = (
                         "Propagation skipped for a multi-image jump; use Prev or Next one frame at a time."
@@ -46561,6 +48015,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             self.queue_settings_save(delay_ms=1000)
 
             self.display_image(self.current_file, rebuild_preview=True)
+            if (
+                getattr(self, "_image_navigation_propagation_enabled", False)
+                and abs(offset) == 1
+            ):
+                self._start_adjacent_propagation(current_file, self.current_file)
 
             if hasattr(self, "img_index_number"):
                 self.img_index_number.blockSignals(True)
