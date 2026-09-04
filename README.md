@@ -51,11 +51,15 @@ Analysis, training, tuning, and validation review.
 - Validation Review for false positives, missed ground truth, wrong classes,
   weak localization, duplicates, and poor keypoints across detect, segment,
   pose, OBB, and classify tasks.
+- Safe false-detection negative crops that center the rejected prediction,
+  exclude saved ground truth, and keep reviewable image/empty-label pairs in a
+  dedicated `negative_crops` folder.
 - Dataset analysis for mixed annotations, invalid labels, small targets,
   class balance, model stride, candidate image sizes, and task-aware
   segmentation mask resolution.
-- PyTorch `.pt`, ONNX `.onnx`, TensorRT `.engine`, and legacy Darknet model
-  workflows.
+- PyTorch `.pt`, standalone ONNX Runtime `.onnx`, TensorRT `.engine`, and
+  legacy Darknet model workflows, with selectable ONNX Runtime execution
+  providers and shared thresholds, colors, resizing, and TXT output.
 - SAHI/tiled inference, tracking, frame extraction, camera/desktop capture,
   themes, 19 bundled offline interface languages, and voice-assisted class
   selection.
@@ -131,7 +135,9 @@ checkpoints, but those model-assisted tools will be unavailable. YOLO and
 YOLOE models can be selected from any local location.
 
 See [MODEL_SETUP.md](MODEL_SETUP.md) for the exact model layout and TensorRT
-export notes.
+export notes. See
+[ONNX_RUNTIME_BACKEND.md](UltraDarkFusion/ONNX_RUNTIME_BACKEND.md) for the
+standalone ONNX backend, provider selection, TensorRT caching, and parity tests.
 
 ## What belongs in the repository
 

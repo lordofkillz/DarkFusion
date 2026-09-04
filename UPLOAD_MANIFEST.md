@@ -38,6 +38,13 @@ UltraDarkFusion v5.2 repository.
 - `UltraDarkFusion/darkfusion_ultralytics_train.py`
 - `UltraDarkFusion/darkfusion_ultralytics_tune.py`
 - `UltraDarkFusion/darkfusion_validation_review.py`
+- `UltraDarkFusion/darkfusion_teammate_review.py`
+- `UltraDarkFusion/darkfusion_onnx_runtime.py`
+- `UltraDarkFusion/darkfusion_onnx_parity.py`
+- `UltraDarkFusion/darkfusion_negative_crops.py`
+- `UltraDarkFusion/test_darkfusion_onnx_runtime.py`
+- `UltraDarkFusion/test_darkfusion_negative_crops.py`
+- `UltraDarkFusion/ONNX_RUNTIME_BACKEND.md`
 - `UltraDarkFusion/tools/ui/generate_ui_py.ps1`
 - `UltraDarkFusion/tools/model_inspection/inspect_model_skeleton.py`
 - `UltraDarkFusion/botsort.yaml`
@@ -57,6 +64,7 @@ UltraDarkFusion v5.2 repository.
 
 - SAM3, GroundingDINO, YOLO, Darknet, ONNX, and TensorRT model binaries.
 - Datasets, labels, `train.txt`, `valid.txt`, and dataset YAML files.
+- Generated `negative_crops/` review folders and their empty labels.
 - Training/tuning/validation run folders and generated reports.
 - Videos, exported frames, archives, and caches.
 - `.env`, `settings.json`, local databases, thresholds, and machine-specific

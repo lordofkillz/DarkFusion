@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -80,6 +81,19 @@ def load_dataset(data_path, split):
     yaml_dir = os.path.dirname(data_path)
     root_value = str(data.get("path", "") or "").strip()
     root = resolve_yaml_entry(root_value, yaml_dir, yaml_dir) if root_value else yaml_dir
+    if split == "all":
+        files = []
+        for key in ("train", "val", "validation", "test"):
+            entry = data.get(key)
+            if entry is not None:
+                files.extend(image_files_from_entry(entry, yaml_dir, root))
+        unique = {}
+        for image_path in files:
+            unique.setdefault(os.path.normcase(normalized(image_path)), normalized(image_path))
+        if not unique:
+            raise ValueError("Dataset YAML has no train, validation, or test images.")
+        return sorted(unique.values()), yaml_names(data), data
+
     entry = data.get(split)
     if entry is None and split == "val":
         entry = data.get("validation")
@@ -311,6 +325,33 @@ def pose_quality(ground_truth, prediction):
     return float(sum(distances) / len(distances))
 
 
+def validation_issue_key(issue):
+    """Build a stable key so reviewed decisions survive later batched scans."""
+    issue = issue if isinstance(issue, dict) else {}
+    ground_truth = issue.get("ground_truth") if isinstance(issue.get("ground_truth"), dict) else {}
+    prediction = issue.get("prediction") if isinstance(issue.get("prediction"), dict) else {}
+    label_line = ground_truth.get("label_line")
+    location = None
+    if not isinstance(label_line, int):
+        bounds = prediction.get("bbox") or ground_truth.get("bbox") or []
+        if len(bounds) >= 4:
+            location = [
+                round((float(bounds[0]) + float(bounds[2])) / 2.0, 1),
+                round((float(bounds[1]) + float(bounds[3])) / 2.0, 1),
+            ]
+    identity = {
+        "image": os.path.normcase(normalized(issue.get("image_path", ""))),
+        "task": str(issue.get("task", "")),
+        "type": str(issue.get("type", "")),
+        "class_id": int(issue.get("class_id", -1)),
+        "label_line": label_line if isinstance(label_line, int) else None,
+        "location": location,
+    }
+    return hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
 def make_issue(image_path, label_path, task, issue_type, gt=None, pred=None, overlap=None, detail=""):
     confidence = float((pred or {}).get("confidence", 0.0) or 0.0)
     severity = confidence
@@ -319,7 +360,7 @@ def make_issue(image_path, label_path, task, issue_type, gt=None, pred=None, ove
     elif issue_type in {"wrong_class", "weak_localization", "poor_keypoints"}:
         severity = max(confidence, 1.0 - float(overlap or 0.0))
     reference = pred or gt or {}
-    return {
+    issue = {
         "id": uuid.uuid4().hex,
         "image_path": normalized(image_path),
         "label_path": normalized(label_path),
@@ -335,6 +376,8 @@ def make_issue(image_path, label_path, task, issue_type, gt=None, pred=None, ove
         "detail": str(detail or ""),
         "review_status": "unreviewed",
     }
+    issue["issue_key"] = validation_issue_key(issue)
+    return issue
 
 
 def compare_image(image_path, task, class_names, ground_truth, predictions, match_iou, good_iou):
@@ -416,7 +459,15 @@ def compare_image(image_path, task, class_names, ground_truth, predictions, matc
         ]
         duplicate = bool(duplicate_matches)
         duplicate_overlap, duplicate_gt = max(duplicate_matches, default=(None, None), key=lambda item: item[0])
-        issue_type = "duplicate_prediction" if duplicate else "false_positive"
+        # A prediction on an intentionally blank image is more useful than a
+        # generic false-positive bucket: it is a hard negative produced by the
+        # exact checkpoint being reviewed.  Keep false positives for unmatched
+        # predictions on images that do contain saved ground truth.
+        issue_type = (
+            "duplicate_prediction"
+            if duplicate
+            else "hard_negative" if not ground_truth else "false_positive"
+        )
         issues.append(make_issue(
             image_path,
             label_path,
@@ -425,17 +476,61 @@ def compare_image(image_path, task, class_names, ground_truth, predictions, matc
             gt=duplicate_gt,
             pred=pred,
             overlap=duplicate_overlap,
-            detail="Prediction duplicates an already matched object." if duplicate else "Prediction was not matched to ground truth.",
+            detail=(
+                "Prediction duplicates an already matched object."
+                if duplicate
+                else "The model detected an object on an intentionally blank image. Keep the image blank to train this mistake as background."
+                if not ground_truth
+                else "Prediction was not matched to ground truth."
+            ),
         ))
     return issues
 
 
 def write_report(path, report):
-    temporary = f"{path}.tmp"
+    temporary = f"{path}.{os.getpid()}.{time.time_ns()}.tmp"
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(temporary, "w", encoding="utf-8") as handle:
-        json.dump(report, handle, indent=2)
-    os.replace(temporary, path)
+    try:
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(report, handle, indent=2)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            try:
+                os.remove(temporary)
+            except OSError:
+                pass
+
+
+def load_review_decisions(path):
+    if not path or not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            history = json.load(handle) or {}
+        return dict(history.get("decisions", {}) or {})
+    except Exception:
+        return {}
+
+
+def apply_review_decisions(report, decisions, suppressed_keys):
+    """Remove decisions made while a long-running scan is still producing its report."""
+    issues = list(report.get("issues", []) or [])
+    kept = []
+    for issue in issues:
+        issue_key = issue.get("issue_key")
+        if issue_key and issue_key in decisions:
+            suppressed_keys.add(issue_key)
+        else:
+            kept.append(issue)
+    report["issues"] = kept
+    summary = {}
+    for issue in kept:
+        issue_type = str(issue.get("type", ""))
+        summary[issue_type] = summary.get(issue_type, 0) + 1
+    report["summary"] = dict(sorted(summary.items()))
+    report["suppressed_issue_count"] = len(suppressed_keys)
+    return summary
 
 
 def main():
@@ -443,7 +538,7 @@ def main():
     parser.add_argument("--model", required=True)
     parser.add_argument("--data", required=True)
     parser.add_argument("--task", default="detect", choices=["detect", "segment", "obb", "pose", "classify"])
-    parser.add_argument("--split", default="val")
+    parser.add_argument("--split", default="val", choices=["all", "train", "val", "test"])
     parser.add_argument("--output", required=True)
     parser.add_argument("--conf", type=float, default=0.25)
     parser.add_argument("--match-iou", type=float, default=0.5)
@@ -451,19 +546,34 @@ def main():
     parser.add_argument("--imgsz", type=int, default=640)
     parser.add_argument("--device", default="0")
     parser.add_argument("--max-images", type=int, default=0)
+    parser.add_argument("--start-index", type=int, default=0)
+    parser.add_argument("--review-history", default="")
+    parser.add_argument("--batch-state", default="")
     parser.add_argument("--chunk-size", type=int, default=256)
     args = parser.parse_args()
 
     images, class_names, _data = load_dataset(args.data, args.split)
     dataset_total_images = len(images)
+    scan_start_index = max(0, int(args.start_index or 0))
+    if dataset_total_images and scan_start_index >= dataset_total_images:
+        scan_start_index = 0
     if args.max_images > 0:
-        images = images[: args.max_images]
+        images = images[scan_start_index:scan_start_index + args.max_images]
+    elif scan_start_index:
+        images = images[scan_start_index:]
     if not images:
         raise ValueError("No validation images were found.")
 
+    history_path = normalized(args.review_history) if args.review_history else ""
+    review_decisions = load_review_decisions(history_path)
+    suppressed_keys = set()
+    next_start_index = scan_start_index + len(images)
+    if next_start_index >= dataset_total_images:
+        next_start_index = 0
+
     started = time.time()
     report = {
-        "version": 1,
+        "version": 2,
         "status": "running",
         "task": args.task,
         "model": normalized(args.model),
@@ -481,6 +591,10 @@ def main():
         "total_images": len(images),
         "dataset_total_images": dataset_total_images,
         "scan_limit": max(0, int(args.max_images)),
+        "scan_start_index": scan_start_index,
+        "next_start_index": next_start_index,
+        "review_history_path": history_path,
+        "suppressed_issue_count": 0,
         "stage": "loading_model",
         "summary": {},
         "issues": [],
@@ -526,15 +640,32 @@ def main():
                 max(0.0, min(1.0, args.match_iou)),
                 max(0.0, min(1.0, args.good_iou)),
             )
+            suppressed = [
+                issue for issue in issues
+                if issue.get("issue_key") in review_decisions
+            ]
+            if suppressed:
+                suppressed_keys.update(
+                    issue.get("issue_key") for issue in suppressed if issue.get("issue_key")
+                )
+                report["suppressed_issue_count"] = len(suppressed_keys)
+                issues = [
+                    issue for issue in issues
+                    if issue.get("issue_key") not in review_decisions
+                ]
             report["issues"].extend(issues)
             for issue in issues:
                 counts[issue["type"]] = counts.get(issue["type"], 0) + 1
             report["processed_images"] = processed
             report["summary"] = dict(sorted(counts.items()))
             if processed % 100 == 0:
+                review_decisions = load_review_decisions(history_path)
+                counts = apply_review_decisions(report, review_decisions, suppressed_keys)
                 write_report(normalized(args.output), report)
                 print(f"Reviewed {processed}/{len(images)} images; {len(report['issues'])} issues", flush=True)
 
+    review_decisions = load_review_decisions(history_path)
+    counts = apply_review_decisions(report, review_decisions, suppressed_keys)
     report["status"] = "complete"
     report["stage"] = "complete"
     report["issue_image_count"] = len({
@@ -546,6 +677,21 @@ def main():
     report["elapsed_seconds"] = round(time.time() - started, 3)
     report["issues"].sort(key=lambda issue: (-float(issue.get("severity", 0.0)), issue.get("image_path", "")))
     write_report(normalized(args.output), report)
+    if args.batch_state:
+        batch_state_path = normalized(args.batch_state)
+        write_report(batch_state_path, {
+            "version": 1,
+            "model": normalized(args.model),
+            "data": normalized(args.data),
+            "split": args.split,
+            "task": args.task,
+            "scan_limit": max(0, int(args.max_images)),
+            "completed_start_index": scan_start_index,
+            "completed_image_count": len(images),
+            "next_start_index": next_start_index,
+            "dataset_total_images": dataset_total_images,
+            "completed_at": report["completed_at"],
+        })
     print(f"Validation review complete: {len(report['issues'])} issues across {len(images)} images", flush=True)
 
 

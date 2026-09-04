@@ -52,6 +52,9 @@ SAM3_SAVE_SEGMENTS = os.getenv("SAM3_SAVE_SEGMENTS", "0").strip().lower() in {"1
 PREDICT_IMGSZ = int(os.getenv("PREDICT_IMGSZ", "640"))
 PREDICTION_MIN_SIZE_PX = float(os.getenv("PREDICTION_MIN_SIZE_PX", "0"))
 PREDICTION_MAX_PERCENT = float(os.getenv("PREDICTION_MAX_PERCENT", "1"))
+IGNORE_TEAMMATES = os.getenv("IGNORE_TEAMMATES", "0").strip().lower() in {"1", "true", "yes", "y"}
+TEAMMATE_THRESHOLD = float(os.getenv("TEAMMATE_THRESHOLD", "0.90"))
+_TEAMMATE_CLASSIFIER = None
 
 WORLD_CONF = float(os.getenv("WORLD_CONF", "0.15"))
 WORLD_IOU = float(os.getenv("WORLD_IOU", "0.45"))
@@ -1009,6 +1012,57 @@ def merge_same_class_candidates(world_preds, dino_preds, class_names, class_thre
 # -------------------------
 # Main image processing
 # -------------------------
+def filter_teammate_candidates(image_path, candidates, class_names, width, height):
+    """Remove likely friendly-player candidates before DINO/World labels are saved."""
+    global _TEAMMATE_CLASSIFIER
+    if not IGNORE_TEAMMATES or not candidates:
+        return candidates
+    try:
+        from darkfusion_teammate_review import TeammateMarkerClassifier, marker_crop
+
+        if _TEAMMATE_CLASSIFIER is None:
+            _TEAMMATE_CLASSIFIER = TeammateMarkerClassifier(
+                "cuda" if torch.cuda.is_available() else "cpu"
+            )
+        with Image.open(image_path) as source:
+            image = source.convert("RGB")
+            crops = []
+            candidate_indices = []
+            for index, candidate in enumerate(candidates):
+                class_id = int(candidate.get("cls_idx", -1))
+                class_name = class_names[class_id].lower() if 0 <= class_id < len(class_names) else ""
+                if class_name and not any(
+                    token in class_name for token in ("person", "player", "enemy", "character")
+                ):
+                    continue
+                x1, y1, x2, y2 = [float(value) for value in candidate.get("xyxy", [])[:4]]
+                crop = marker_crop(image, {
+                    "bbox": [
+                        max(0.0, min(1.0, x1 / max(1, width))),
+                        max(0.0, min(1.0, y1 / max(1, height))),
+                        max(0.0, min(1.0, x2 / max(1, width))),
+                        max(0.0, min(1.0, y2 / max(1, height))),
+                    ]
+                })
+                if crop is not None:
+                    crops.append(crop)
+                    candidate_indices.append(index)
+        scores = _TEAMMATE_CLASSIFIER.score(crops, batch_size=96)
+        rejected = {
+            index for index, score in zip(candidate_indices, scores)
+            if float(score) >= max(0.50, min(0.999, float(TEAMMATE_THRESHOLD)))
+        }
+        if rejected:
+            logger.info(
+                "Ignored %d teammate prediction(s) in %s at certainty %.3f",
+                len(rejected), image_path.name, TEAMMATE_THRESHOLD,
+            )
+        return [candidate for index, candidate in enumerate(candidates) if index not in rejected]
+    except Exception as error:
+        logger.warning("Teammate filter unavailable for %s; keeping predictions: %s", image_path, error)
+        return candidates
+
+
 def process_image(
     image_path: Path,
     world_model,
@@ -1092,6 +1146,7 @@ def process_image(
         keep = classwise_nms(xyxy_list, score_list, label_list, iou_thresh=nms_iou)
         candidates = [candidates[i] for i in keep]
         candidates = cross_class_dedupe(candidates, iou_thresh=CROSS_CLASS_DEDUPE_IOU)
+        candidates = filter_teammate_candidates(image_path, candidates, class_names, W, H)
 
         final_xywhn = []
         final_cls = []
@@ -1256,7 +1311,8 @@ def run_groundingdino(
 ):
     global WORLD_MODEL_NAME, WORLD_FP16, DINO_FP16, DINO_FP16_FALLBACK
     global WORLD_CONF, WORLD_IOU, TEXT_THRESHOLD, BBOX_THRESHOLD, BATCH_SIZE, PREDICT_IMGSZ
-    global PREDICTION_MIN_SIZE_PX, PREDICTION_MAX_PERCENT
+    global PREDICTION_MIN_SIZE_PX, PREDICTION_MAX_PERCENT, IGNORE_TEAMMATES, TEAMMATE_THRESHOLD
+    global _TEAMMATE_CLASSIFIER
     global PAIR_MERGE_IOU, CROSS_CLASS_DEDUPE_IOU, DEFAULT_THRESHOLD
 
     runtime_overrides = runtime_overrides or {}
@@ -1273,6 +1329,8 @@ def run_groundingdino(
         "PREDICT_IMGSZ",
         "PREDICTION_MIN_SIZE_PX",
         "PREDICTION_MAX_PERCENT",
+        "IGNORE_TEAMMATES",
+        "TEAMMATE_THRESHOLD",
         "PAIR_MERGE_IOU",
         "CROSS_CLASS_DEDUPE_IOU",
         "DEFAULT_THRESHOLD",
@@ -1373,6 +1431,7 @@ def run_groundingdino(
             del sam3_model
         except Exception:
             pass
+        _TEAMMATE_CLASSIFIER = None
         _restore_runtime_overrides()
         cleanup_memory()
 

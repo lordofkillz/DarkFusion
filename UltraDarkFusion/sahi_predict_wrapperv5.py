@@ -5,7 +5,7 @@ import hashlib
 from sahi.predict import get_sliced_prediction
 from sahi.utils.cv import read_image
 import os
-from PIL import UnidentifiedImageError
+from PIL import Image, UnidentifiedImageError
 from sahi import AutoDetectionModel
 from prediction_size_filter import prediction_size_allowed_xyxy
 
@@ -28,6 +28,8 @@ class SahiPredictWrapper:
         show_preview=False,
         min_size_px=0.0,
         max_percent=1.0,
+        ignore_teammates=False,
+        teammate_threshold=0.90,
     ):
         self.detection_model = AutoDetectionModel.from_pretrained(
             model_type=model_type,
@@ -46,6 +48,53 @@ class SahiPredictWrapper:
         if self.max_percent <= 0.0:
             self.max_percent = 1.0
         self.size_filtered_count = 0
+        self.ignore_teammates = bool(ignore_teammates)
+        self.teammate_threshold = max(0.50, min(0.999, float(teammate_threshold or 0.90)))
+        self.teammate_filtered_count = 0
+        self._teammate_classifier = None
+
+    def _teammate_rejected_indices(self, image_rgb, predictions):
+        if not self.ignore_teammates or not predictions:
+            return set()
+        try:
+            from darkfusion_teammate_review import TeammateMarkerClassifier, marker_crop
+
+            if self._teammate_classifier is None:
+                self._teammate_classifier = TeammateMarkerClassifier(
+                    "cuda" if str(getattr(self.detection_model, "device", "")).lower() != "cpu" else "cpu"
+                )
+            image = Image.fromarray(image_rgb).convert("RGB")
+            image_h, image_w = image_rgb.shape[:2]
+            crops = []
+            indices = []
+            for index, obj in enumerate(predictions):
+                category_name = str(obj.category.name).strip().lower()
+                if category_name and not any(
+                    token in category_name for token in ("person", "player", "enemy", "character")
+                ):
+                    continue
+                x1, y1, x2, y2 = [float(value) for value in obj.bbox.to_voc_bbox()]
+                crop = marker_crop(image, {
+                    "bbox": [
+                        max(0.0, min(1.0, x1 / max(1, image_w))),
+                        max(0.0, min(1.0, y1 / max(1, image_h))),
+                        max(0.0, min(1.0, x2 / max(1, image_w))),
+                        max(0.0, min(1.0, y2 / max(1, image_h))),
+                    ]
+                })
+                if crop is not None:
+                    crops.append(crop)
+                    indices.append(index)
+            scores = self._teammate_classifier.score(crops, batch_size=96)
+            rejected = {
+                index for index, score in zip(indices, scores)
+                if float(score) >= self.teammate_threshold
+            }
+            self.teammate_filtered_count += len(rejected)
+            return rejected
+        except Exception as error:
+            logger.warning("SAHI teammate filter unavailable; keeping predictions: %s", error)
+            return set()
 
     @staticmethod
     def get_unique_color(class_name):
@@ -121,12 +170,16 @@ class SahiPredictWrapper:
             })
 
             result = get_sliced_prediction(**sliced_kwargs)
+            predictions = list(result.object_prediction_list)
+            teammate_rejected = self._teammate_rejected_indices(image_rgb, predictions)
 
             txt_file_path = os.path.splitext(image_path)[0] + '.txt'
             yolo_lines = []
             skipped_size_count = 0
 
-            for obj in result.object_prediction_list:
+            for prediction_index, obj in enumerate(predictions):
+                if prediction_index in teammate_rejected:
+                    continue
                 category_name = str(obj.category.name).strip()
                 category_key = category_name.lower()
 
@@ -201,6 +254,7 @@ class SahiPredictWrapper:
         total_labels = 0
         images_with_detections = 0
         self.size_filtered_count = 0
+        self.teammate_filtered_count = 0
 
         last_image_path = ""
         last_detected_image_path = ""
@@ -232,6 +286,7 @@ class SahiPredictWrapper:
             "images_with_detections": images_with_detections,
             "labels": total_labels,
             "skipped_size": int(self.size_filtered_count),
+            "skipped_teammates": int(self.teammate_filtered_count),
             "last_image_path": last_image_path,
             "last_detected_image_path": last_detected_image_path,
         }

@@ -13,7 +13,7 @@
 --extra-index-url https://download.pytorch.org/whl/cu128
 --extra-index-url https://pypi.ngc.nvidia.com
 
-# Build helpers used by direct ML packages.
+# Build helpers used by native ML packages.
 setuptools==78.1.1
 wheel==0.45.1
 ninja==1.13.0
@@ -40,7 +40,7 @@ ultralytics==8.4.113
 ray[tune]==2.52.1
 pydantic==2.7.1
 lap==0.5.12
-sahi==0.11.23
+sahi==0.11.36
 clip @ git+https://github.com/ultralytics/CLIP.git@88ade288431a46233f1556d1e141901b3ef0a36b
 
 # Direct GroundingDINO path used by dinov5_2.py.
@@ -63,7 +63,11 @@ accelerate>=0.31.0,<2.0.0
 # ONNX / TensorRT model support.
 onnx==1.17.0
 onnxruntime-gpu==1.22.0
-tensorrt==10.15.1.29
+# ORT 1.22 TensorRT EP is built/tested against TensorRT 10.9 + CUDA 12.
+# Do not replace this with the unsuffixed latest package (currently CUDA 13).
+# Install onnxruntime-directml in a separate environment; its onnxruntime
+# module/DLLs conflict with this CUDA/TensorRT wheel in one Python environment.
+tensorrt-cu12==10.9.0.34
 
 # Desktop UI.
 PyQt5==5.15.11
@@ -80,8 +84,10 @@ mss==10.0.0
 PyAutoGUI==0.9.54
 SpeechRecognition==3.14.3
 python-dotenv==1.1.0
-requests==2.27.1
-yt-dlp==2026.3.17
+requests==2.34.2
+# The default extra installs yt-dlp-ejs. YouTube also requires Deno >=2.3;
+# on Windows install it with: winget install --id DenoLand.Deno --exact
+yt-dlp[default]==2026.8.19
 deep-translator==1.9.1
 shapely==2.1.1
 perlin-noise==1.14
