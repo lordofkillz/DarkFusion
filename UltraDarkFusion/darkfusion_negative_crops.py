@@ -3,6 +3,80 @@
 from __future__ import annotations
 
 import math
+import os
+
+import cv2
+
+
+NEGATIVE_FOLDER_NAMES = ("blanks", "negative_crops", "negatives", "negative")
+
+
+def dataset_root_for_image(image_path, label_path="", dataset_hint=""):
+    """Resolve the dataset root shared by normal and validation review."""
+    image_path = os.path.abspath(str(image_path or ""))
+    label_path = os.path.abspath(str(label_path or image_path))
+    parts = list(os.path.normpath(image_path).split(os.sep))
+    lowered = [part.lower() for part in parts]
+    if "images" in lowered:
+        index = len(lowered) - 1 - lowered[::-1].index("images")
+        root = os.sep.join(parts[:index])
+        if root and os.path.splitdrive(image_path)[0] and root.endswith(":"):
+            root += os.sep
+        if root:
+            return os.path.abspath(root)
+
+    hint = os.path.abspath(str(dataset_hint or "")) if dataset_hint else ""
+    if hint and os.path.isdir(hint):
+        try:
+            if os.path.commonpath([hint, image_path]) == hint:
+                return hint
+        except ValueError:
+            pass
+    try:
+        common = os.path.commonpath([os.path.dirname(image_path), os.path.dirname(label_path)])
+    except ValueError:
+        common = os.path.dirname(image_path)
+    return os.path.abspath(common or os.path.dirname(image_path))
+
+
+def resolve_negative_folder(dataset_dir, create=False):
+    """Reuse an existing negative folder; otherwise choose the legacy ``blanks`` path."""
+    dataset_dir = os.path.abspath(str(dataset_dir or ""))
+    if os.path.basename(dataset_dir).lower() in NEGATIVE_FOLDER_NAMES:
+        target = dataset_dir
+    else:
+        target = ""
+        for name in NEGATIVE_FOLDER_NAMES:
+            candidate = os.path.join(dataset_dir, name)
+            if os.path.isdir(candidate):
+                target = candidate
+                break
+        if not target:
+            target = os.path.join(dataset_dir, NEGATIVE_FOLDER_NAMES[0])
+    if create:
+        os.makedirs(target, exist_ok=True)
+    return os.path.abspath(target)
+
+
+def pad_crop_for_training(image, minimum_size=128, stride=32):
+    """Center a native-resolution crop on a reflected, stride-aligned square canvas."""
+    if image is None or getattr(image, "size", 0) == 0:
+        return None, (0, 0, 0, 0)
+    height, width = image.shape[:2]
+    stride = max(1, int(stride or 1))
+    side = max(width, height, int(minimum_size or 0), stride)
+    side = int(math.ceil(side / float(stride)) * stride)
+    left = (side - width) // 2
+    right = side - width - left
+    top = (side - height) // 2
+    bottom = side - height - top
+    if not any((left, top, right, bottom)):
+        return image.copy(), (0, 0, 0, 0)
+    # Reflection avoids teaching the model a synthetic solid border. Very tiny
+    # crops cannot support reflection, so replicate their edge pixels instead.
+    border_type = cv2.BORDER_REFLECT_101 if width > 1 and height > 1 else cv2.BORDER_REPLICATE
+    padded = cv2.copyMakeBorder(image, top, bottom, left, right, border_type)
+    return padded, (left, top, right, bottom)
 
 
 def object_bounds(value):

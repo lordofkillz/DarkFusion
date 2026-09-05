@@ -13020,11 +13020,14 @@ class ImageProcessingThread(QThread):
             and not self.has_large_black_region(img)
         ):
             negative_filename = os.path.join(save_folder_path, filename)
+            txt_path = os.path.splitext(negative_filename)[0] + ".txt"
+            if os.path.isfile(negative_filename) and os.path.isfile(txt_path):
+                logger.info("Negative already exists; skipping duplicate: %s", negative_filename)
+                return
             if not save_cv_image(negative_filename, img):
                 logger.warning(f"Failed to save negative image: {negative_filename}")
                 return
 
-            txt_path = os.path.splitext(negative_filename)[0] + ".txt"
             with open(txt_path, "w", encoding="utf-8"):
                 pass
 
@@ -18435,7 +18438,8 @@ class UiLoader:
             ])
 
             table.setColumnHidden(0, not show_images)
-            table.setColumnHidden(2, True)
+            table.setColumnHidden(2, False)
+            table.setColumnWidth(2, 42)
             table.setColumnHidden(3, True)
             table.setColumnHidden(4, True)
 
@@ -33371,15 +33375,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         self.image_directory = folder_path
 
-        save_folder_name = "blanks"
-        save_folder_path = os.path.join(folder_path, save_folder_name)
-        counter = 1
-        while os.path.exists(save_folder_path):
-            save_folder_name = f"blanks_{counter}"
-            save_folder_path = os.path.join(folder_path, save_folder_name)
-            counter += 1
+        from darkfusion_negative_crops import resolve_negative_folder
 
-        os.makedirs(save_folder_path)
+        save_folder_path = resolve_negative_folder(folder_path, create=True)
 
         candidate_files = list(target_image_files or [])
         if not candidate_files:
@@ -33403,10 +33401,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             if candidate_index % 32 == 0:
                 QtWidgets.QApplication.processEvents()
             if getattr(self, "_sam3_batch_active", False) and self._sam3_should_stop():
-                try:
-                    os.rmdir(save_folder_path)
-                except OSError:
-                    pass
                 return False
 
             if os.path.splitext(image_file)[1].lower() not in DATASET_IMAGE_SUFFIXES:
@@ -33425,10 +33419,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             yolo_annotation_files.append(yolo_annotation_file)
 
         if not image_files:
-            try:
-                os.rmdir(save_folder_path)
-            except OSError:
-                pass
             logger.info("Negative-image generation skipped because no valid labeled images were queued.")
             return False
 
@@ -38883,7 +38873,16 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         self.preview_list.setColumnWidth(0, max(100, self._image_size_value + 20))
         if self.preview_list.columnCount() > 1:
-            self.preview_list.setColumnWidth(1, max(180, self.preview_list.viewport().width() - self.preview_list.columnWidth(0) - 28))
+            self.preview_list.setColumnWidth(
+                1,
+                max(
+                    180,
+                    self.preview_list.viewport().width()
+                    - self.preview_list.columnWidth(0)
+                    - self.preview_list.columnWidth(2)
+                    - 28,
+                ),
+            )
         self.preview_list.resizeRowsToContents()
 
     def is_preview_hover_zoom_enabled(self):
@@ -39399,6 +39398,271 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         card.setProperty("accent_color", accent)
         return card, accent
 
+    @staticmethod
+    def _preview_bbox_review_object(bbox):
+        """Convert a normal-preview annotation into normalized review bounds."""
+        if bbox is None:
+            return None
+        points = []
+        values = list(getattr(bbox, "segmentation", []) or getattr(bbox, "obb", []) or [])
+        if len(values) >= 6 and len(values) % 2 == 0:
+            points = [
+                [float(values[index]), float(values[index + 1])]
+                for index in range(0, len(values), 2)
+            ]
+        if points:
+            xs = [point[0] for point in points]
+            ys = [point[1] for point in points]
+            bounds = [min(xs), min(ys), max(xs), max(ys)]
+            return {"bbox": bounds, "points": points}
+        x_center = float(getattr(bbox, "x_center", 0.0))
+        y_center = float(getattr(bbox, "y_center", 0.0))
+        width = float(getattr(bbox, "width", 0.0))
+        height = float(getattr(bbox, "height", 0.0))
+        return {
+            "bbox": [
+                max(0.0, x_center - width / 2.0),
+                max(0.0, y_center - height / 2.0),
+                min(1.0, x_center + width / 2.0),
+                min(1.0, y_center + height / 2.0),
+            ]
+        }
+
+    def _current_preview_annotation_line(self, image_file, line_index, label_text):
+        """Resolve a preview row without ever acting on a different label line."""
+        label_file = os.path.splitext(image_file)[0] + ".txt"
+        lines = self.load_label_lines(label_file)
+        expected = str(label_text or "").strip()
+        try:
+            line_index = int(line_index)
+        except (TypeError, ValueError):
+            line_index = -1
+        if 0 <= line_index < len(lines) and lines[line_index] == expected:
+            return label_file, lines, line_index
+        matches = [index for index, line in enumerate(lines) if line == expected]
+        if len(matches) == 1:
+            return label_file, lines, matches[0]
+        return label_file, lines, -1
+
+    def _preview_row_for_annotation(self, image_file, line_index):
+        target = self.normalize_path(image_file)
+        for row in range(self.preview_list.rowCount()):
+            if self._review_preview_image_path(row) != target:
+                continue
+            item = self.preview_list.item(row, 4)
+            if item is not None and item.data(Qt.UserRole + 2) == line_index:
+                return row
+        return max(0, self.preview_list.currentRow())
+
+    def save_preview_annotation_negative(self, image_file, line_index, label_text, delete_after=False):
+        """Save one annotation-centered padded negative into the shared negative folder."""
+        image_file = self.normalize_path(image_file)
+        label_file, lines, line_index = self._current_preview_annotation_line(
+            image_file, line_index, label_text
+        )
+        if line_index < 0:
+            QMessageBox.warning(
+                self,
+                "Annotation Changed",
+                "This preview row no longer matches the saved label. Refresh the image and try again.",
+            )
+            return False
+
+        image = cv2.imread(image_file, cv2.IMREAD_COLOR)
+        if image is None:
+            QMessageBox.warning(self, "Negative Crop", f"Could not read:\n{image_file}")
+            return False
+        polygon_preference = self._polygon_label_parse_preference()
+        selected_bbox = BoundingBox.from_str(lines[line_index], preferred_polygon_type=polygon_preference)
+        selected_object = self._preview_bbox_review_object(selected_bbox)
+        if selected_object is None:
+            QMessageBox.warning(self, "Negative Crop", "This annotation could not be converted into crop bounds.")
+            return False
+
+        protected = []
+        for other_index, line in enumerate(lines):
+            if other_index == line_index:
+                continue
+            other_bbox = BoundingBox.from_str(line, preferred_polygon_type=polygon_preference)
+            other_object = self._preview_bbox_review_object(other_bbox)
+            if other_object is not None:
+                protected.append(other_object)
+
+        try:
+            from darkfusion_negative_crops import (
+                dataset_root_for_image,
+                object_bounds,
+                pad_crop_for_training,
+                plan_negative_crop,
+                resolve_negative_folder,
+            )
+
+            normalized_bounds = object_bounds(selected_object)
+            if normalized_bounds is None:
+                raise ValueError("The selected annotation has invalid bounds.")
+            pixel_width = max(1.0, (normalized_bounds[2] - normalized_bounds[0]) * image.shape[1])
+            pixel_height = max(1.0, (normalized_bounds[3] - normalized_bounds[1]) * image.shape[0])
+            plan = plan_negative_crop(
+                image.shape[1],
+                image.shape[0],
+                selected_object,
+                protected,
+                aspect_ratio=pixel_width / pixel_height,
+                context_scale=1.4,
+                minimum_context=0,
+                safety_margin=3,
+            )
+            if not plan.get("rect"):
+                QMessageBox.warning(
+                    self,
+                    "Unsafe Negative Crop",
+                    str(plan.get("reason") or "Another annotation would be included in this negative."),
+                )
+                return False
+            x1, y1, x2, y2 = plan["rect"]
+            crop = image[y1:y2, x1:x2]
+            minimum_canvas = max(32, int(getattr(self, "_image_size_value", 128) or 128))
+            output_image_data, padding = pad_crop_for_training(crop, minimum_canvas, 32)
+            if output_image_data is None:
+                raise ValueError("The selected crop is empty.")
+
+            dataset_root = dataset_root_for_image(
+                image_file,
+                label_file,
+                self.current_dataset_directory(),
+            )
+            output_dir = self.normalize_path(resolve_negative_folder(dataset_root, create=True))
+        except Exception as error:
+            QMessageBox.warning(self, "Negative Crop", f"Could not prepare the crop:\n{error}")
+            return False
+
+        annotation_key = hashlib.sha256(
+            (os.path.normcase(image_file) + "|" + lines[line_index]).encode("utf-8")
+        ).hexdigest()
+        source_stem, source_extension = os.path.splitext(os.path.basename(image_file))
+        extension = source_extension if source_extension.lower() in OUTPUT_IMAGE_SUFFIXES else ".jpg"
+        output_stem = f"{source_stem}__annotation_negative_{annotation_key[:10]}"
+        output_image = self.normalize_path(os.path.join(output_dir, output_stem + extension))
+        output_label = self.normalize_path(os.path.join(output_dir, output_stem + ".txt"))
+
+        if os.path.isfile(output_image) and os.path.isfile(output_label):
+            self.statusBar().showMessage(
+                f"Negative already exists: {os.path.basename(output_image)}", 4500
+            )
+            if delete_after:
+                row = self._preview_row_for_annotation(image_file, line_index)
+                self.delete_item(row, image_file, line_index)
+            return True
+
+        try:
+            if not save_cv_image(output_image, output_image_data):
+                raise OSError("The padded image could not be encoded.")
+            if not self._write_label_lines(output_label, []):
+                raise OSError("The empty YOLO label could not be written.")
+            manifest_path = self.normalize_path(os.path.join(output_dir, "manifest.jsonl"))
+            with open(manifest_path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps({
+                    "created_at": datetime.now().isoformat(timespec="seconds"),
+                    "kind": "annotation_negative",
+                    "key": annotation_key,
+                    "source_image": image_file,
+                    "source_label": label_file,
+                    "source_line": lines[line_index],
+                    "source_line_index": line_index,
+                    "image_path": output_image,
+                    "label_path": output_label,
+                    "crop_xyxy": list(plan["rect"]),
+                    "padding_ltrb": list(padding),
+                    "protected_annotation_count": len(protected),
+                }, ensure_ascii=False) + "\n")
+        except Exception as error:
+            for created_path in (output_label, output_image):
+                try:
+                    if os.path.isfile(created_path):
+                        os.remove(created_path)
+                except OSError:
+                    pass
+            QMessageBox.warning(self, "Negative Crop", f"Could not save the negative:\n{error}")
+            return False
+
+        if delete_after:
+            row = self._preview_row_for_annotation(image_file, line_index)
+            self.delete_item(row, image_file, line_index)
+        action_text = "Saved negative and removed annotation" if delete_after else "Saved negative crop"
+        self.statusBar().showMessage(
+            f"{action_text}: {os.path.basename(output_image)}", 5000
+        )
+        return True
+
+    def change_preview_annotation_class(self, image_file, line_index, label_text):
+        label_file, lines, resolved_index = self._current_preview_annotation_line(
+            self.normalize_path(image_file), line_index, label_text
+        )
+        if resolved_index < 0:
+            QMessageBox.warning(self, "Change Class", "The annotation changed; refresh and try again.")
+            return False
+        choices = [
+            (int(class_id), str(class_name))
+            for class_id, class_name in sorted(self.id_to_class.items(), key=lambda item: int(item[0]))
+        ]
+        if not choices:
+            return False
+        current_id = int(float(lines[resolved_index].split()[0]))
+        labels = [f"{class_id}: {class_name}" for class_id, class_name in choices]
+        current_choice = next((i for i, item in enumerate(choices) if item[0] == current_id), 0)
+        selected, accepted = QInputDialog.getItem(
+            self, "Change Annotation Class", "New class:", labels, current_choice, False
+        )
+        if not accepted:
+            return False
+        new_id = choices[labels.index(selected)][0]
+        parts = lines[resolved_index].split()
+        parts[0] = str(new_id)
+        lines[resolved_index] = " ".join(parts)
+        if not self._write_label_lines(label_file, lines):
+            QMessageBox.warning(self, "Change Class", "The label file could not be updated.")
+            return False
+        self.display_image(image_file, rebuild_preview=True)
+        self.statusBar().showMessage(f"Changed annotation class to {new_id}.", 3500)
+        return True
+
+    def show_preview_annotation_actions(self, button, image_file, line_index, label_text):
+        """Show explicit per-row actions without changing preview left/right-click behavior."""
+        self.hide_preview_hover_zoom()
+        menu = QMenu(self)
+        save_action = menu.addAction("Save Negative Crop")
+        save_delete_action = menu.addAction("Save Negative Crop + Delete Annotation")
+        menu.addSeparator()
+        change_class_action = menu.addAction("Change Class...")
+        copy_action = menu.addAction("Copy YOLO Label")
+        chosen = menu.exec_(button.mapToGlobal(QtCore.QPoint(0, button.height())))
+        if chosen is save_action:
+            self.save_preview_annotation_negative(image_file, line_index, label_text, False)
+        elif chosen is save_delete_action:
+            self.save_preview_annotation_negative(image_file, line_index, label_text, True)
+        elif chosen is change_class_action:
+            self.change_preview_annotation_class(image_file, line_index, label_text)
+        elif chosen is copy_action:
+            QApplication.clipboard().setText(str(label_text))
+            self.statusBar().showMessage("Copied YOLO annotation row.", 2500)
+
+    def _create_preview_action_button(self, image_file, line_index, label_text):
+        button = QtWidgets.QToolButton(self.preview_list)
+        button.setText("⋮")
+        button.setFixedSize(30, 30)
+        button.setToolTip("Actions for this individual annotation")
+        button.setCursor(Qt.PointingHandCursor)
+        button.setStyleSheet(
+            "QToolButton { background: #202a34; color: #f2f5f8; border: 1px solid #3b4a59; "
+            "border-radius: 5px; font-size: 18px; font-weight: 700; }"
+            "QToolButton:hover { background: #2d4255; border-color: #7cc7ff; }"
+        )
+        button.clicked.connect(
+            lambda _checked=False, control=button, path=image_file, index=line_index, text=label_text:
+            self.show_preview_annotation_actions(control, path, index, text)
+        )
+        return button
+
     def _create_thumbnail_widget(self, image_file, bbox, idx, img_width, img_height, pixmap):
         resized_pixmap, bounds = self._build_preview_pixmap_for_bbox(bbox, img_width, img_height, pixmap)
         if resized_pixmap is None:
@@ -39458,6 +39722,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.preview_list.setItem(row_count, 1, details_item)
         self.preview_list.setCellWidget(row_count, 1, details_widget)
         self.preview_list.setItem(row_count, 2, QTableWidgetItem(str(bbox.class_id)))
+        self.preview_list.setCellWidget(
+            row_count,
+            2,
+            self._create_preview_action_button(image_file, idx, label_text),
+        )
         self.preview_list.setItem(row_count, 3, QTableWidgetItem(size_text))
         self.preview_list.setItem(row_count, 4, bbox_item)
 
@@ -40153,8 +40422,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         image_col_width = max(100, int(getattr(self, "_image_size_value", 128)) + 20)
 
         table.setColumnWidth(0, image_col_width)
-        table.setColumnWidth(1, max(180, table.viewport().width() - image_col_width - 28))
-        table.setColumnHidden(2, True)
+        action_col_width = 42
+        table.setColumnWidth(1, max(180, table.viewport().width() - image_col_width - action_col_width - 28))
+        table.setColumnWidth(2, action_col_width)
+        table.setColumnHidden(2, False)
         table.setColumnHidden(3, True)
         table.setColumnHidden(4, True)
 
@@ -59324,7 +59595,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         negative_crop_button.setToolTip(
             "Center a crop on this rejected false detection, exclude every saved ground-truth "
             "object, and save the crop plus its empty YOLO label together in the dataset's "
-            "negative_crops folder."
+            "existing negative folder."
         )
         negative_crop_button.setEnabled(False)
         self.validation_review_negative_crop_button = negative_crop_button
@@ -59812,23 +60083,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         stem, extension = os.path.splitext(os.path.basename(image_path))
         extension = extension if extension.lower() in OUTPUT_IMAGE_SUFFIXES else ".jpg"
         output_stem = f"{stem}__false_detection_negative_{issue_key[:10]}"
-        image_dir = self.normalize_path(os.path.dirname(image_path))
-        label_dir = self.normalize_path(os.path.dirname(label_path))
-        image_parts = list(Path(image_path).parts)
-        lowered_parts = [part.lower() for part in image_parts]
-        if "images" in lowered_parts:
-            images_index = len(lowered_parts) - 1 - lowered_parts[::-1].index("images")
-            dataset_root = self.normalize_path(str(Path(*image_parts[:images_index])))
-        else:
-            try:
-                dataset_root = self.normalize_path(os.path.commonpath([image_dir, label_dir]))
-            except (ValueError, OSError):
-                dataset_root = image_dir
-        # Avoid placing the review folder at a drive root when images and labels
-        # happen to live in unrelated trees.
-        if not dataset_root or dataset_root == os.path.dirname(dataset_root):
-            dataset_root = image_dir
-        output_dir = self.normalize_path(os.path.join(dataset_root, "negative_crops"))
+        from darkfusion_negative_crops import dataset_root_for_image, resolve_negative_folder
+
+        dataset_root = dataset_root_for_image(
+            image_path,
+            label_path,
+            getattr(self, "image_directory", "") or "",
+        )
+        output_dir = self.normalize_path(resolve_negative_folder(dataset_root, create=True))
         output_image = self.normalize_path(os.path.join(output_dir, output_stem + extension))
         output_label = self.normalize_path(os.path.join(output_dir, output_stem + ".txt"))
         return output_image, output_label, issue_key

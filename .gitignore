@@ -32,6 +32,8 @@ runs/
 darkfusion_review/
 darkfusion_quarantine/
 negative_crops/
+blanks/
+blanks_*/
 tmp_*/
 tmp_*
 *_backup_*.py

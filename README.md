@@ -51,9 +51,9 @@ Analysis, training, tuning, and validation review.
 - Validation Review for false positives, missed ground truth, wrong classes,
   weak localization, duplicates, and poor keypoints across detect, segment,
   pose, OBB, and classify tasks.
-- Safe false-detection negative crops that center the rejected prediction,
-  exclude saved ground truth, and keep reviewable image/empty-label pairs in a
-  dedicated `negative_crops` folder.
+- Safe per-annotation and false-detection negative crops that center the
+  selected region, exclude other saved annotations, pad small native crops,
+  and reuse the dataset's existing negative-output folder.
 - Dataset analysis for mixed annotations, invalid labels, small targets,
   class balance, model stride, candidate image sizes, and task-aware
   segmentation mask resolution.
