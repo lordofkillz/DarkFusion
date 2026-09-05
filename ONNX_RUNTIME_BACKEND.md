@@ -68,32 +68,6 @@ For the current YOLO path, export with `nms=False`. Python postprocessing was
 faster in local testing than the tested ONNX graph containing NMS, and it keeps
 confidence/IoU settings adjustable at runtime.
 
-## Parity testing
-
-`darkfusion_onnx_parity.py` is development-only and imports Ultralytics solely
-as a reference implementation. It disables Ultralytics automatic dependency
-installation before importing it.
-
-```powershell
-python darkfusion_onnx_parity.py `
-  --model best.onnx `
-  --source image.png `
-  --preload `
-  --provider cuda `
-  --task detect `
-  --warmup 3 `
-  --runs 20
-```
-
-Use `--preload` for video-like benchmarking where DarkFusion already owns the
-decoded OpenCV frame. Omit it to include disk image decoding.
-
-Fast unit tests:
-
-```powershell
-python -m unittest -v test_darkfusion_onnx_runtime.py
-```
-
 ## DarkFusion UI integration
 
 Open **Auto Label → Weights** to select the inference backend and ONNX Runtime

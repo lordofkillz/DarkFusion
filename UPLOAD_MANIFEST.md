@@ -13,6 +13,7 @@ UltraDarkFusion v5.2 repository.
 - `LICENSE.txt`
 - `README.md`
 - `MODEL_SETUP.md`
+- `ONNX_RUNTIME_BACKEND.md`
 - `USER_GUIDE.md`
 - `UPLOAD_MANIFEST.md`
 - `requirements.txt`
@@ -40,11 +41,7 @@ UltraDarkFusion v5.2 repository.
 - `UltraDarkFusion/darkfusion_validation_review.py`
 - `UltraDarkFusion/darkfusion_teammate_review.py`
 - `UltraDarkFusion/darkfusion_onnx_runtime.py`
-- `UltraDarkFusion/darkfusion_onnx_parity.py`
 - `UltraDarkFusion/darkfusion_negative_crops.py`
-- `UltraDarkFusion/test_darkfusion_onnx_runtime.py`
-- `UltraDarkFusion/test_darkfusion_negative_crops.py`
-- `UltraDarkFusion/ONNX_RUNTIME_BACKEND.md`
 - `UltraDarkFusion/tools/ui/generate_ui_py.ps1`
 - `UltraDarkFusion/tools/model_inspection/inspect_model_skeleton.py`
 - `UltraDarkFusion/botsort.yaml`

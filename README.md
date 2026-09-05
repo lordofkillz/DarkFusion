@@ -136,7 +136,7 @@ YOLOE models can be selected from any local location.
 
 See [MODEL_SETUP.md](MODEL_SETUP.md) for the exact model layout and TensorRT
 export notes. See
-[ONNX_RUNTIME_BACKEND.md](UltraDarkFusion/ONNX_RUNTIME_BACKEND.md) for the
+[ONNX_RUNTIME_BACKEND.md](ONNX_RUNTIME_BACKEND.md) for the
 standalone ONNX backend, provider selection, TensorRT caching, and parity tests.
 
 ## What belongs in the repository
