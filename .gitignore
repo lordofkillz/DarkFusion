@@ -25,7 +25,11 @@ __pycache__/
 
 # DarkFusion generated state and reports
 .darkfusion/
+.darkfusion_cache/
 .codex*/
+UltraDarkFusion/.codex-*.png
+UltraDarkFusion/.marker-layout-check.png
+UltraDarkFusion/.teammate-*.jpg
 debug/
 runs/
 **/runs/

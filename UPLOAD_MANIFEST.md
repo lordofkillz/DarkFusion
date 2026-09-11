@@ -42,6 +42,8 @@ UltraDarkFusion v5.2 repository.
 - `UltraDarkFusion/darkfusion_teammate_review.py`
 - `UltraDarkFusion/darkfusion_onnx_runtime.py`
 - `UltraDarkFusion/darkfusion_negative_crops.py`
+- `UltraDarkFusion/darkfusion_system_metrics.py`
+- `UltraDarkFusion/training_eta.py`
 - `UltraDarkFusion/tools/ui/generate_ui_py.ps1`
 - `UltraDarkFusion/tools/model_inspection/inspect_model_skeleton.py`
 - `UltraDarkFusion/botsort.yaml`

@@ -41,6 +41,26 @@ def _finite_float(value):
     return value if math.isfinite(value) else None
 
 
+def prediction_dimensions_allowed(width, height, img_width, img_height, min_size_px=0.0, max_percent=1.0):
+    """Check image-pixel dimensions, allowing only floating-point boundary noise."""
+    width = _finite_float(width)
+    height = _finite_float(height)
+    if width is None or height is None or width <= 0.0 or height <= 0.0:
+        return False
+
+    min_w, max_w, min_h, max_h = prediction_size_limits(
+        img_width, img_height, min_size_px=min_size_px, max_percent=max_percent
+    )
+    # Scene transforms and normalized YOLO coordinates can turn 4 into
+    # 3.99999999999998. This is a millionth of an image pixel, not a screen
+    # pixel allowance and not a rounding rule for genuinely undersized boxes.
+    epsilon = 1e-6
+    return (
+        min_w - epsilon <= width <= max_w + epsilon
+        and min_h - epsilon <= height <= max_h + epsilon
+    )
+
+
 def points_xyxy(points, img_width, img_height, normalized=False):
     try:
         pts = np.asarray(points, dtype=np.float32)
@@ -161,13 +181,10 @@ def prediction_size_allowed_xyxy(xyxy, img_width, img_height, min_size_px=0.0, m
     if width <= 0.0 or height <= 0.0:
         return False
 
-    min_w, max_w, min_h, max_h = prediction_size_limits(
-        img_width,
-        img_height,
-        min_size_px=min_size_px,
-        max_percent=max_percent,
+    return prediction_dimensions_allowed(
+        width, height, img_width, img_height,
+        min_size_px=min_size_px, max_percent=max_percent,
     )
-    return min_w <= width <= max_w and min_h <= height <= max_h
 
 
 def prediction_size_allowed(prediction, img_width, img_height, min_size_px=0.0, max_percent=1.0):

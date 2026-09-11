@@ -19,6 +19,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 import concurrent.futures
 import csv
+import gc
 import hashlib
 import importlib.util
 from datetime import datetime
@@ -44,6 +45,7 @@ import numpy as np
 import yaml
 import psutil
 import GPUtil
+from darkfusion_system_metrics import GpuPowerSampler
 from threading import Thread
 import functools
 from PIL import Image
@@ -110,6 +112,7 @@ from prediction_size_filter import (
     filter_predictions_to_size_limits as shared_filter_predictions_to_size_limits,
     prediction_size_allowed as shared_prediction_size_allowed,
     prediction_size_allowed_xyxy,
+    prediction_dimensions_allowed,
     prediction_size_limits,
 )
 
@@ -733,108 +736,6 @@ class TrainingArtifactViewer(QDialog):
                 subprocess.Popen(["xdg-open", os.path.dirname(self.path)])
         except Exception as e:
             QMessageBox.warning(self, "Open Folder", str(e))
-
-
-class ValidationReviewImageView(ZoomableImageView):
-    """Zoomable validation image with task-aware ground-truth/prediction overlays."""
-
-    COLORS = {
-        "ground_truth": QColor("#45d483"),
-        "prediction": QColor("#ff5968"),
-        "missed": QColor("#ff9f43"),
-        "weak": QColor("#f0d264"),
-        "matched": QColor("#42c6ff"),
-    }
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.issue = {}
-        self.show_ground_truth = True
-        self.show_prediction = True
-
-    @staticmethod
-    def _pixel_points(item, width, height):
-        return [
-            QPointF(float(point[0]) * width, float(point[1]) * height)
-            for point in (item or {}).get("points", [])
-            if isinstance(point, (list, tuple)) and len(point) >= 2
-        ]
-
-    @staticmethod
-    def _pixel_bbox(item, width, height):
-        values = list((item or {}).get("bbox", []) or [])
-        if len(values) < 4:
-            return None
-        return QRectF(
-            float(values[0]) * width,
-            float(values[1]) * height,
-            max(1.0, (float(values[2]) - float(values[0])) * width),
-            max(1.0, (float(values[3]) - float(values[1])) * height),
-        )
-
-    def _draw_object(self, painter, item, color, width, height, task):
-        if not isinstance(item, dict):
-            return
-        fill = QColor(color)
-        fill.setAlpha(45)
-        painter.setPen(QPen(color, max(2, round(min(width, height) / 350))))
-        painter.setBrush(QBrush(fill))
-        points = self._pixel_points(item, width, height)
-        if len(points) >= 3 and task in {"segment", "obb"}:
-            painter.drawPolygon(QPolygonF(points))
-        else:
-            bounds = self._pixel_bbox(item, width, height)
-            if bounds is not None:
-                painter.drawRect(bounds)
-
-        if task == "pose":
-            painter.setBrush(QBrush(color))
-            radius = max(2.5, min(width, height) / 220.0)
-            for point in item.get("keypoints", []) or []:
-                if len(point) < 2 or (len(point) >= 3 and float(point[2]) <= 0):
-                    continue
-                painter.drawEllipse(QPointF(float(point[0]) * width, float(point[1]) * height), radius, radius)
-
-    def set_review_issue(self, issue):
-        self.issue = dict(issue or {})
-        image_path = str(self.issue.get("image_path", "") or "")
-        pixmap = QPixmap(image_path)
-        if pixmap.isNull():
-            return False
-        canvas = QPixmap(pixmap)
-        painter = QPainter(canvas)
-        painter.setRenderHint(QPainter.Antialiasing)
-        task = str(self.issue.get("task", "detect") or "detect")
-        issue_type = str(self.issue.get("type", "") or "")
-        if self.show_ground_truth:
-            gt_color = self.COLORS["missed"] if issue_type == "false_negative" else self.COLORS["ground_truth"]
-            self._draw_object(painter, self.issue.get("ground_truth"), gt_color, canvas.width(), canvas.height(), task)
-        if self.show_prediction:
-            pred_color = self.COLORS["weak"] if issue_type in {"weak_localization", "poor_keypoints"} else self.COLORS["prediction"]
-            self._draw_object(painter, self.issue.get("prediction"), pred_color, canvas.width(), canvas.height(), task)
-        painter.end()
-        self._pixmap_item.setPixmap(canvas)
-        self._scene.setSceneRect(QRectF(canvas.rect()))
-        self._zoom = 0
-        self.resetTransform()
-        self.fit_to_view()
-        QTimer.singleShot(0, self.fit_to_view)
-        return True
-
-    def clear_review(self):
-        self.issue = {}
-        self._pixmap_item.setPixmap(QPixmap())
-        self._scene.setSceneRect(QRectF())
-        self._zoom = 0
-        self.resetTransform()
-
-    def set_layer_visibility(self, ground_truth=None, prediction=None):
-        if ground_truth is not None:
-            self.show_ground_truth = bool(ground_truth)
-        if prediction is not None:
-            self.show_prediction = bool(prediction)
-        if self.issue:
-            self.set_review_issue(self.issue)
 
 
 SUPPORTED_VIDEO_URL_EXTS = (
@@ -2800,10 +2701,9 @@ class CustomGraphicsView(QGraphicsView):
             )
         else:
             self.sound_player.setMuted(True)
-        self.zoom_scale = 1.0
+        self.zoom_scale = float(self.transform().m11())
         self.fitInView_scale = 1.0
         self.auto_fit_enabled = True
-        self.show_crosshair = False
 
         self.right_click_timer = QTimer(self)
         self.right_click_timer.setInterval(100)
@@ -2817,6 +2717,7 @@ class CustomGraphicsView(QGraphicsView):
             | QPainter.TextAntialiasing
         )
         self.fitInView(self.sceneRect(), Qt.KeepAspectRatio)
+        self._refresh_zoom_metrics()
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setFrameShape(QGraphicsView.NoFrame)
@@ -2845,6 +2746,7 @@ class CustomGraphicsView(QGraphicsView):
         self.current_obb_drawer = None
 
         self.crosshair_position = QPointF()
+        self._measurement_cursor_inside = False
         self.last_mouse_pos = None
         self.last_mouse_position = None
 
@@ -2852,6 +2754,7 @@ class CustomGraphicsView(QGraphicsView):
         self.auto_fit_enabled = False
         if self.main_window is not None and hasattr(self.main_window, "settings"):
             self.show_crosshair = bool(self.main_window.settings.get("showXYLines", False))
+            self.show_measurement_overlay = bool(self.main_window.settings.get("showMeasurementOverlay", True))
 
             saved_color = self.main_window.settings.get("crosshairColor", [255, 255, 0])
             if isinstance(saved_color, (list, tuple)) and len(saved_color) >= 3:
@@ -2864,6 +2767,7 @@ class CustomGraphicsView(QGraphicsView):
                 self.crosshair_color_rgb = (255, 255, 0)
         else:
             self.show_crosshair = False
+            self.show_measurement_overlay = True
             self.crosshair_color_rgb = (255, 255, 0)
 
         if self.main_window is not None and hasattr(self.main_window, "box_size"):
@@ -2956,30 +2860,57 @@ class CustomGraphicsView(QGraphicsView):
         if self.main_window is not None and hasattr(self.main_window, "max_label"):
             BoundingBoxDrawer.MAX_SIZE = self.main_window.max_label.value()
 
+    def _refresh_zoom_metrics(self):
+        """Track actual image-to-view scale, with a fit limit for this viewport."""
+        self.zoom_scale = float(self.transform().m11())
+        scene_rect = self.sceneRect()
+        viewport_rect = self.viewport().rect()
+        if scene_rect.isEmpty() or viewport_rect.isEmpty():
+            self.fitInView_scale = self.zoom_scale
+            return
+        # QGraphicsView.fitInView reserves a two-pixel margin on each edge.
+        self.fitInView_scale = min(
+            max(1.0, float(viewport_rect.width()) - 4.0) / scene_rect.width(),
+            max(1.0, float(viewport_rect.height()) - 4.0) / scene_rect.height(),
+        )
+
+    def _fit_image_in_view(self):
+        if self.scene() is not None and not self.sceneRect().isEmpty():
+            self.resetTransform()
+            self.fitInView(self.sceneRect(), Qt.KeepAspectRatio)
+        self._refresh_zoom_metrics()
+
     def wheelEvent(self, event):
+        wheel_delta = event.angleDelta().y()
+        if not wheel_delta:
+            event.ignore()
+            return
+        self._refresh_zoom_metrics()
+        if self.scene() is None or self.sceneRect().isEmpty() or self.zoom_scale <= 0:
+            event.ignore()
+            return
         zoom_in_factor = 1.15
-        zoom_out_factor = 1 / zoom_in_factor
-        old_pos = self.mapToScene(event.pos())
-
-        self.setRenderHint(QPainter.SmoothPixmapTransform, True)
-
-        if event.angleDelta().y() > 0:
-            zoom_factor = zoom_in_factor
-            self.zoom_scale *= zoom_in_factor
+        if wheel_delta > 0:
+            target_scale = self.zoom_scale * zoom_in_factor
         else:
-            min_zoom_scale = max(self.fitInView_scale, 0.1)
-            if self.zoom_scale * zoom_out_factor < min_zoom_scale:
-                self.setRenderHint(QPainter.SmoothPixmapTransform, False)
-                return
-            zoom_factor = zoom_out_factor
-            self.zoom_scale *= zoom_out_factor
-
+            # A locked image may already be smaller than fit; do not enlarge it
+            # on a zoom-out gesture. The final normal step lands exactly at fit.
+            target_scale = min(
+                self.zoom_scale, max(self.fitInView_scale, self.zoom_scale / zoom_in_factor)
+            )
+        zoom_factor = target_scale / self.zoom_scale
+        if math.isclose(zoom_factor, 1.0, rel_tol=1e-12, abs_tol=1e-12):
+            event.accept()
+            return
+        old_pos = self.mapToScene(event.pos())
+        self.setRenderHint(QPainter.SmoothPixmapTransform, True)
         self.scale(zoom_factor, zoom_factor)
         new_pos = self.mapToScene(event.pos())
         delta = new_pos - old_pos
         self.centerOn(self.mapToScene(self.viewport().rect().center()) - delta)
-
+        self._refresh_zoom_metrics()
         self.setRenderHint(QPainter.SmoothPixmapTransform, False)
+        event.accept()
 
         if self.main_window is not None and hasattr(self.main_window, "capture_zoom_lock_state"):
             if self.main_window.is_zoom_locked():
@@ -2989,6 +2920,7 @@ class CustomGraphicsView(QGraphicsView):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self._refresh_zoom_metrics()
 
         if hasattr(self, "pan_overlay"):
             self.pan_overlay.ensure_within_ui_bounds()
@@ -3003,14 +2935,13 @@ class CustomGraphicsView(QGraphicsView):
             return
 
         if self.auto_fit_enabled and self.scene():
-            self.fitInView(self.scene().sceneRect(), Qt.KeepAspectRatio)
-            self.fitInView_scale = self.transform().m11()
+            self._fit_image_in_view()
 
     def reset_zoom(self):
-        if self.scene():
-            self.fitInView(self.scene().sceneRect(), Qt.KeepAspectRatio)
-            self.fitInView_scale = self.transform().m11()
-            self.zoom_scale = 1.0
+        self._fit_image_in_view()
+        if self.main_window is not None and hasattr(self.main_window, "capture_zoom_lock_state"):
+            if self.main_window.is_zoom_locked():
+                self.main_window.capture_zoom_lock_state()
         if hasattr(self, "pan_overlay"):
             self.pan_overlay.update_visibility()
 
@@ -3305,6 +3236,11 @@ class CustomGraphicsView(QGraphicsView):
         self.update()
 
     def mouseMoveEvent(self, event):
+        # Drawing and edit modes return early below. Update their cursor overlay
+        # first, so the crosshair and image-pixel size badge follow the pointer
+        # even when the crosshair lines are hidden but the measurement overlay is on.
+        if self.show_crosshair or self.show_measurement_overlay or (self.drawing and self.current_bbox):
+            self._update_crosshair(event.pos())
         scene_pos = self.mapToScene(event.pos())
 
         if self._dragged_keypoint_handle is not None and event.buttons() & Qt.LeftButton:
@@ -3368,9 +3304,6 @@ class CustomGraphicsView(QGraphicsView):
                     self.main_window.capture_zoom_lock_state()
 
             return
-
-        if self.show_crosshair:
-            self._update_crosshair(event.pos())
 
         super().mouseMoveEvent(event)
 
@@ -3520,6 +3453,9 @@ class CustomGraphicsView(QGraphicsView):
                 return
 
             elif self.current_bbox:
+                # Mouse moves can be coalesced. Include the actual release corner
+                # before checking the minimum, especially for small zoomed boxes.
+                self._handle_drawing_bbox(event)
                 self._finalize_bbox()
                 self.drawing = False
                 event.accept()
@@ -3559,6 +3495,7 @@ class CustomGraphicsView(QGraphicsView):
     def _start_drawing(self, event):
         self.drawing = True
         self.start_point = self.mapToScene(event.pos())
+        self._update_crosshair(event.pos())
         self.setCursor(Qt.CrossCursor)
 
         if hasattr(self.main_window, "clear_blank_overlay"):
@@ -3782,11 +3719,211 @@ class CustomGraphicsView(QGraphicsView):
 
     def _update_crosshair(self, pos):
         self.crosshair_position = pos
+        self._measurement_cursor_inside = True
         self.viewport().update()
+
+    def viewportEvent(self, event):
+        if event.type() == QEvent.Leave:
+            self._measurement_cursor_inside = False
+            self.viewport().update()
+        return super().viewportEvent(event)
+
+    def _annotation_measurement_size(self, item):
+        """Measure annotation geometry in image pixels, excluding pens and labels."""
+        try:
+            if isinstance(item, BoundingBoxDrawer):
+                rect = item.mapToScene(item.rect().normalized()).boundingRect()
+            else:
+                polygon = getattr(item, "polygon", None)
+                polygon = polygon() if callable(polygon) else polygon
+                if polygon is None or polygon.isEmpty():
+                    return None
+                polygon = item.mapToScene(polygon)
+                if isinstance(item, globals().get("OBBDrawer", ())) and len(polygon) == 4:
+                    return (
+                        math.hypot(polygon[1].x() - polygon[0].x(), polygon[1].y() - polygon[0].y()),
+                        math.hypot(polygon[2].x() - polygon[1].x(), polygon[2].y() - polygon[1].y()),
+                    )
+                rect = polygon.boundingRect()
+            return rect.width(), rect.height()
+        except RuntimeError:
+            return None
+
+    def _measurement_target_item(self):
+        if not self.show_measurement_overlay:
+            return None
+
+        if self.drawing and self.current_bbox is not None:
+            return self.current_bbox
+
+        if self.drawing and getattr(self, "current_segmentation", None) is not None:
+            return self.current_segmentation
+        obb = getattr(self, "current_obb_drawer", None)
+        if obb is not None and getattr(obb, "current_state", None) in ("defining_centerline", "awaiting_width_point"):
+            return obb
+        if self.drawing or not getattr(self, "_measurement_cursor_inside", False):
+            return None
+
+        scene = self.scene()
+        if scene is None:
+            return None
+
+        position = QPointF(self.crosshair_position).toPoint()
+        if not self.viewport().rect().contains(position):
+            return None
+
+        annotation_types = tuple(
+            annotation_type
+            for annotation_type in (
+                globals().get("BoundingBoxDrawer"),
+                globals().get("OBBDrawer"),
+                globals().get("SegmentationDrawer"),
+            )
+            if annotation_type is not None
+        )
+        candidates = []
+        seen = set()
+        # Query the indexed scene at the pointer, including screen-sized handles.
+        for hit in self.items(position):
+            item = hit
+            while item is not None and not isinstance(item, annotation_types):
+                drawer = getattr(item, "drawer", None)
+                item = drawer if isinstance(drawer, annotation_types) else item.parentItem()
+            if item is None or id(item) in seen or not item.isVisible() or item.effectiveOpacity() <= 0:
+                continue
+            seen.add(id(item))
+            size = self._annotation_measurement_size(item)
+            if size is not None:
+                candidates.append((size[0] * size[1], -item.zValue(), item))
+        return min(candidates, key=lambda entry: entry[:2])[2] if candidates else None
+
+    def _drawing_size_feedback(self):
+        """Transient image-pixel feedback; never changes annotation styles/data."""
+        if not self.show_measurement_overlay:
+            return None
+
+        target = self._measurement_target_item()
+        if target is None:
+            return None
+
+        size = self._annotation_measurement_size(target)
+        if size is None:
+            return None
+
+        width, height = size
+        if width <= 0 or height <= 0:
+            return None
+
+        text = f"{width:.2f} \u00d7 {height:.2f} image px"
+        allowed = self._current_bbox_size_allowed() if self.drawing and self.current_bbox is target else True
+        if self.drawing and self.current_bbox is target and not allowed:
+            img_width, img_height = self._get_image_dimensions()
+            if self.main_window is not None and hasattr(self.main_window, "get_annotation_size_limits"):
+                min_w, max_w, min_h, max_h = self.main_window.get_annotation_size_limits(img_width, img_height)
+            else:
+                min_w, max_w, min_h, max_h = prediction_size_limits(
+                    img_width, img_height, min_size_px=BoundingBoxDrawer.MIN_SIZE,
+                )
+            if width < min_w - 1e-6 or height < min_h - 1e-6:
+                text += f"  |  min {min_w:g} \u00d7 {min_h:g} px"
+            elif width > max_w + 1e-6 or height > max_h + 1e-6:
+                text += f"  |  max {max_w:g} \u00d7 {max_h:g} px"
+            else:
+                text += "  |  too small"
+        return text, allowed
+
+    def _paint_drawing_size_feedback(self, painter):
+        feedback = self._drawing_size_feedback()
+        if feedback is None:
+            return None
+
+        text, allowed = feedback
+        margin, pad_x, pad_y = 6.0, 8.0, 4.0
+        bounds = QRectF(self.viewport().rect()).adjusted(margin, margin, -margin, -margin)
+        if bounds.width() <= 2 * pad_x or bounds.height() <= 2 * pad_y:
+            return None
+
+        painter.save()
+        try:
+            metrics = painter.fontMetrics()
+            text = metrics.elidedText(text, Qt.ElideRight, int(bounds.width() - 2 * pad_x))
+            width = min(bounds.width(), metrics.horizontalAdvance(text) + 2 * pad_x)
+            height = min(bounds.height(), metrics.height() + 2 * pad_y)
+            cursor = self.crosshair_position
+            x, y = cursor.x() + 16.0, cursor.y() + 20.0
+            if x + width > bounds.right():
+                x = cursor.x() - width - 16.0
+            if y + height > bounds.bottom():
+                y = cursor.y() - height - 20.0
+            x = max(bounds.left(), min(x, bounds.right() - width))
+            y = max(bounds.top(), min(y, bounds.bottom() - height))
+            badge = QRectF(x, y, width, height)
+
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(15, 18, 24, 225))
+            painter.drawRoundedRect(badge, 4.0, 4.0)
+            painter.setPen(QColor(240, 243, 248) if allowed else QColor(255, 211, 117))
+            painter.drawText(badge.adjusted(pad_x, pad_y, -pad_x, -pad_y), Qt.AlignCenter, text)
+            return badge
+        finally:
+            painter.restore()
+
+    def _paint_blank_image_overlay(self, painter):
+        """Keep the blank status readable without covering the displayed image."""
+        scene = self.scene()
+        image_item = getattr(scene, "_blank_overlay_image_item", None)
+        window = self.main_window
+        if (
+            image_item is None
+            or not getattr(window, "settings", {}).get("showBlankImageOverlay", True)
+            or not getattr(window, "annotation_scene_active", False)
+            or getattr(window, "train_view_active", False)
+        ):
+            return None
+
+        try:
+            if image_item.scene() is not scene or not image_item.isVisible():
+                return None
+            image_bounds = self.viewportTransform().mapRect(image_item.sceneBoundingRect())
+        except RuntimeError:
+            # Clearing a scene deletes its image item before the next paint.
+            return None
+        bounds = image_bounds.intersected(QRectF(self.viewport().rect()))
+        if bounds.isEmpty():
+            return None
+
+        short_side = min(bounds.width(), bounds.height())
+        font = self.font()
+        font.setPixelSize(round(max(12.0, min(22.0, short_side * 0.035))))
+        font.setBold(True)
+        margin = max(6.0, min(12.0, short_side * 0.02))
+        pad_x, pad_y = 8.0, 4.0
+
+        painter.save()
+        try:
+            painter.setFont(font)
+            metrics = painter.fontMetrics()
+            width = metrics.horizontalAdvance("BLANK") + 2 * pad_x
+            height = metrics.height() + 2 * pad_y
+            # At extreme zoom-out, omit the badge instead of hiding the image.
+            if width > bounds.width() * 0.45 or height > bounds.height() * 0.22:
+                return None
+            badge = QRectF(bounds.left() + margin, bounds.bottom() - margin - height, width, height)
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(15, 18, 24, 215))
+            painter.drawRoundedRect(badge, 4.0, 4.0)
+            painter.setPen(QColor(226, 235, 241))
+            painter.drawText(badge.adjusted(pad_x, pad_y, -pad_x, -pad_y), Qt.AlignCenter, "BLANK")
+            return badge
+        finally:
+            painter.restore()
 
     def paintEvent(self, event):
         super().paintEvent(event)
         painter = QPainter(self.viewport())
+        self._paint_blank_image_overlay(painter)
 
         if self.show_crosshair:
             painter.setPen(QColor(*self.crosshair_color_rgb) if hasattr(self, "crosshair_color_rgb") else Qt.yellow)
@@ -3795,31 +3932,17 @@ class CustomGraphicsView(QGraphicsView):
             painter.drawLine(center_x, self.viewport().rect().top(), center_x, self.viewport().rect().bottom())
             painter.drawLine(self.viewport().rect().left(), center_y, self.viewport().rect().right(), center_y)
 
+        if self.show_measurement_overlay:
+            self._paint_drawing_size_feedback(painter)
         painter.end()
 
     def _handle_drawing_bbox(self, event):
         try:
             end_point = self.mapToScene(event.pos())
-            start_point = np.array([self.start_point.x(), self.start_point.y()], dtype=int)
-            end_point_np = np.array([end_point.x(), end_point.y()], dtype=int)
-
-            scene_rect = self.sceneRect()
-            min_point = np.clip(
-                np.minimum(start_point, end_point_np),
-                [scene_rect.left(), scene_rect.top()],
-                [scene_rect.right(), scene_rect.bottom()],
-            ).astype(int)
-
-            max_point = np.clip(
-                np.maximum(start_point, end_point_np),
-                [scene_rect.left(), scene_rect.top()],
-                [scene_rect.right(), scene_rect.bottom()],
-            ).astype(int)
-
-            dimensions = np.maximum(max_point - min_point, 0)
-            x, y = min_point
-            width, height = dimensions
-            self.current_bbox.setRect(x, y, width, height)
+            # Scene coordinates are image pixels at every zoom. Keep their
+            # fractional precision; flooring each corner can lose a whole pixel.
+            rect = QRectF(self.start_point, end_point).normalized().intersected(self.sceneRect())
+            self.current_bbox.setRect(rect)
             self.current_bbox.normalize_rect()
             self.current_bbox.update_class_name_item()
 
@@ -3874,7 +3997,10 @@ class CustomGraphicsView(QGraphicsView):
         ):
             return self.main_window.annotation_pixel_size_allowed(width, height, img_width, img_height)
 
-        return width >= BoundingBoxDrawer.MIN_SIZE and height >= BoundingBoxDrawer.MIN_SIZE
+        return prediction_dimensions_allowed(
+            width, height, max(width, img_width), max(height, img_height),
+            min_size_px=BoundingBoxDrawer.MIN_SIZE,
+        )
 
     def _discard_current_bbox(self):
         if not self.current_bbox:
@@ -3892,6 +4018,7 @@ class CustomGraphicsView(QGraphicsView):
     def _finalize_bbox(self):
         try:
             if self.current_bbox and self._current_bbox_size_allowed():
+                drawn_rect = QRectF(self.current_bbox.rect()).normalized()
                 if self.main_window.outline_Checkbox.isChecked() and hasattr(self.main_window, "processed_image"):
                     image_np = self.main_window.processed_image
 
@@ -3977,8 +4104,13 @@ class CustomGraphicsView(QGraphicsView):
                                 logger.debug("BBox snapped using edge fallback.")
 
                 if not self._current_bbox_size_allowed():
-                    self._discard_current_bbox()
-                    return
+                    # A snap is optional refinement, not a reason to lose an
+                    # otherwise valid drawing at the configured size boundary.
+                    self.current_bbox.setRect(drawn_rect)
+                    self.current_bbox.normalize_rect()
+                    self.current_bbox.update_bbox()
+                    self.current_bbox.update_class_name_item()
+                    logger.debug("Snap result outside label size limits; kept the drawn box.")
 
                 self._save_and_play_sound()
 
@@ -3996,6 +4128,8 @@ class CustomGraphicsView(QGraphicsView):
             self.current_bbox = None
             self.clear_selection()
             self.setCursor(Qt.ArrowCursor)
+            if hasattr(self.main_window, "update_blank_overlay_state"):
+                self.main_window.update_blank_overlay_state(self.scene())
 
     def clear_selection(self):
         if self.selected_bbox:
@@ -4028,6 +4162,8 @@ class CustomGraphicsView(QGraphicsView):
         finally:
             self.current_obb_drawer = None
             self.drawing_obb = False
+            if hasattr(self.main_window, "update_blank_overlay_state"):
+                self.main_window.update_blank_overlay_state(self.scene())
 
     def _post_finalize_refresh_only(self, play_sound=True):
         """
@@ -4523,7 +4659,7 @@ class BoundingBoxDrawer(QGraphicsRectItem):
 
             sx, sy, sw, sh = snapped
 
-            if sw <= 1 or sh <= 1:
+            if not self.main_window.annotation_pixel_size_allowed(sw, sh, img_w, img_h):
                 return False
 
             self.setRect(int(sx), int(sy), int(sw), int(sh))
@@ -4573,7 +4709,10 @@ class BoundingBoxDrawer(QGraphicsRectItem):
 
         new_rect = QRectF(QPointF(left, top), QPointF(right, bottom)).normalized()
 
-        if new_rect.width() < self.MIN_SIZE or new_rect.height() < self.MIN_SIZE:
+        img_width, img_height = self._get_image_dimensions()
+        if not self.main_window.annotation_pixel_size_allowed(
+            new_rect.width(), new_rect.height(), img_width, img_height
+        ):
             return
 
         super().setRect(new_rect)
@@ -4633,6 +4772,9 @@ class BoxVertexHandle(QGraphicsEllipseItem):
         self.setFlag(QGraphicsItem.ItemIsMovable, True)
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
         self.setFlag(QGraphicsItem.ItemSendsScenePositionChanges, True)
+        # Only the grab handle stays screen-sized; its position and the
+        # annotation it edits remain in scene/image coordinates.
+        self.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
 
     def mousePressEvent(self, event):
         self.setBrush(QBrush(self.active_color))
@@ -5959,6 +6101,8 @@ class VertexHandle(QGraphicsEllipseItem):
         self.setFlag(QGraphicsItem.ItemIsMovable, True)
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
         self.setFlag(QGraphicsItem.ItemSendsScenePositionChanges, True)
+        # Match box handles without changing polygon/OBB vertex geometry.
+        self.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
 
     def mousePressEvent(self, event):
         self.setBrush(QBrush(self.active_color))
@@ -6863,7 +7007,9 @@ class BoundingBox:
             seg_str = " ".join(f"{coord:.6f}" for coord in self.segmentation)
             return f"{class_id_str} {seg_str}"
 
-        bbox_str = f"{class_id_str} {self.x_center:.6f} {self.y_center:.6f} {self.width:.6f} {self.height:.6f}"
+        # Preserve tiny image-pixel boxes through YOLO save/reload cycles.
+        # Six decimal places can round a 4px box below its configured minimum.
+        bbox_str = f"{class_id_str} {self.x_center:.16f} {self.y_center:.16f} {self.width:.16f} {self.height:.16f}"
 
         if self.keypoints:
             kpt_str = " ".join(f"{x:.6f} {y:.6f} {v:d}" for x, y, v in self.keypoints)
@@ -7019,6 +7165,19 @@ class SettingsDialog(QtWidgets.QDialog):
         if hasattr(self.parent(), "screen_view") and hasattr(self.parent().screen_view, "toggle_crosshair"):
             self.parent().screen_view.toggle_crosshair(checked)
 
+    def save_measurement_overlay_setting(self, checked):
+        self.parent().settings["showMeasurementOverlay"] = bool(checked)
+        self.parent().saveSettings()
+
+        if hasattr(self.parent(), "screen_view"):
+            self.parent().screen_view.show_measurement_overlay = bool(checked)
+            self.parent().screen_view.viewport().update()
+
+    def save_blank_image_overlay_setting(self, checked):
+        self.parent().settings["showBlankImageOverlay"] = bool(checked)
+        self.parent().saveSettings()
+        self.parent().update_blank_overlay_state()
+
     def pick_crosshair_color_setting(self):
         saved_color = self.parent().settings.get("crosshairColor", [255, 255, 0])
 
@@ -7106,6 +7265,16 @@ class SettingsDialog(QtWidgets.QDialog):
     def save_preview_flash_time_setting(self, value):
         if hasattr(self.parent(), "set_preview_flash_time"):
             self.parent().set_preview_flash_time(value)
+
+    def save_review_similarity_threshold_setting(self, value):
+        value = max(50, min(99, int(value)))
+        if hasattr(self.parent(), "set_review_similarity_threshold"):
+            self.parent().set_review_similarity_threshold(value)
+        if hasattr(self, "review_similarity_threshold_value_label"):
+            self.review_similarity_threshold_value_label.setText(f"{value}%")
+        timer = getattr(self, "_review_similarity_refresh_timer", None)
+        if timer is not None:
+            timer.start(350)
 
     def _copy_combo_items(self, source_combo, target_combo):
         target_combo.clear()
@@ -7290,7 +7459,10 @@ class SettingsDialog(QtWidgets.QDialog):
         self.annotation_handle_spinbox.setRange(2, 14)
         self.annotation_handle_spinbox.setSuffix(" px")
         self.annotation_handle_spinbox.setValue(int(round(annotation_handle_radius(self.parent()))))
-        self.annotation_handle_spinbox.setToolTip("Radius of draggable box, polygon, and OBB edit handles.")
+        self.annotation_handle_spinbox.setToolTip(
+            "Radius in screen pixels of draggable box, polygon, and OBB edit handles. "
+            "Stays the same size while zooming; annotation coordinates are unchanged."
+        )
         self.annotation_handle_spinbox.valueChanged.connect(
             lambda value: self.save_drawing_setting("annotationHandleSize", value)
         )
@@ -7313,7 +7485,8 @@ class SettingsDialog(QtWidgets.QDialog):
         self.min_label_size_spinbox.setValue(min_default)
         self.min_label_size_spinbox.setSuffix(" px")
         self.min_label_size_spinbox.setToolTip(
-            "Minimum label width and height in pixels. Default 6; use 4 for very small objects."
+            "Minimum label width and height in image pixels, independent of zoom. "
+            "Default 6; use 4 for very small objects."
         )
         self.min_label_size_spinbox.valueChanged.connect(
             lambda value: self.save_existing_drawing_control("box_size", "minLabelSize", value)
@@ -7440,6 +7613,28 @@ class SettingsDialog(QtWidgets.QDialog):
         self.hide_labels_checkbox.toggled.connect(self.save_hide_labels_setting)
         display_layout.addWidget(self.hide_labels_checkbox)
 
+        self.measurement_overlay_checkbox = QtWidgets.QCheckBox("Show annotation measurements")
+        self.measurement_overlay_checkbox.setToolTip(
+            "Show width and height in image pixels beside the cursor while hovering over "
+            "annotations or drawing. Turn off to hide measurements in both cases."
+        )
+        self.measurement_overlay_checkbox.setChecked(
+            bool(self.parent().settings.get("showMeasurementOverlay", True))
+        )
+        self.measurement_overlay_checkbox.toggled.connect(self.save_measurement_overlay_setting)
+        display_layout.addWidget(self.measurement_overlay_checkbox)
+
+        self.blank_image_overlay_checkbox = QtWidgets.QCheckBox("Show blank-image overlay")
+        self.blank_image_overlay_checkbox.setToolTip(
+            "Show a small BLANK badge on images with no annotations. "
+            "Its size follows the displayed image. Turn off to hide this status overlay."
+        )
+        self.blank_image_overlay_checkbox.setChecked(
+            bool(self.parent().settings.get("showBlankImageOverlay", True))
+        )
+        self.blank_image_overlay_checkbox.toggled.connect(self.save_blank_image_overlay_setting)
+        display_layout.addWidget(self.blank_image_overlay_checkbox)
+
         self.confirm_clear_frame_checkbox = QtWidgets.QCheckBox(
             "Confirm before clearing current frame labels"
         )
@@ -7526,6 +7721,35 @@ class SettingsDialog(QtWidgets.QDialog):
         )
         self.preview_hover_zoom_checkbox.toggled.connect(self.save_preview_hover_zoom_setting)
         preview_layout.addRow("", self.preview_hover_zoom_checkbox)
+
+        similarity_value = int(self.parent().settings.get("reviewSimilarityThreshold", 90) or 90)
+        similarity_row = QtWidgets.QHBoxLayout()
+        self.review_similarity_threshold_slider = QtWidgets.QSlider(Qt.Horizontal)
+        self.review_similarity_threshold_slider.setRange(50, 99)
+        self.review_similarity_threshold_slider.setSingleStep(1)
+        self.review_similarity_threshold_slider.setPageStep(5)
+        self.review_similarity_threshold_slider.setValue(max(50, min(99, similarity_value)))
+        self.review_similarity_threshold_slider.setToolTip(
+            "Match the selected object's appearance or shape within the same class. "
+            "Lower values include similar shapes with different colors, sizes, or surroundings. "
+            "Higher values favor close appearance and context matches. This is a similarity score, not certainty."
+        )
+        self.review_similarity_threshold_value_label = QtWidgets.QLabel(
+            f"{self.review_similarity_threshold_slider.value()}%"
+        )
+        self.review_similarity_threshold_value_label.setMinimumWidth(44)
+        self.review_similarity_threshold_value_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.review_similarity_threshold_slider.valueChanged.connect(
+            self.save_review_similarity_threshold_setting
+        )
+        similarity_row.addWidget(self.review_similarity_threshold_slider, 1)
+        similarity_row.addWidget(self.review_similarity_threshold_value_label)
+        preview_layout.addRow("Similarity match:", similarity_row)
+        self._review_similarity_refresh_timer = QTimer(self)
+        self._review_similarity_refresh_timer.setSingleShot(True)
+        self._review_similarity_refresh_timer.timeout.connect(
+            self.parent().refresh_active_review_similarity_filter
+        )
 
         thumbnail_value = int(self.parent().settings.get(
             "previewThumbnailSize",
@@ -8127,6 +8351,10 @@ class ScanAnnotations(QObject):
     BBOX_EDGE_TOLERANCE_PX = 1.0
     TRAINING_TINY_OBJECT_SIDE_PX = 4.0
     CLASS_IMBALANCE_RATIO = 5.0
+    VISUAL_OUTLIER_MIN_CLASS_SAMPLES = 5
+    VISUAL_OUTLIER_MAX_CLASS_FRACTION = 0.03
+    VISUAL_OUTLIER_EXACT_CLASS_LIMIT = 2000
+    VISUAL_OUTLIER_REFERENCE_LIMIT = 256
 
     def __init__(self, parent):
         super().__init__(parent)
@@ -8142,6 +8370,8 @@ class ScanAnnotations(QObject):
         self._scan_polygon_preference_override = None
         self._scan_expected_annotation_family_override = None
         self._scan_duplicate_iou_override = None
+        self._scan_visual_outliers_override = None
+        self._scan_visual_outlier_threshold_override = None
         self._scan_context_active = False
         self._reset_scan_state()
 
@@ -8157,6 +8387,7 @@ class ScanAnnotations(QObject):
         self.used_class_indices = set()
         self.class_label_counts = Counter()
         self.training_tiny_object_count = 0
+        self.visual_outlier_candidates = 0
         self.training_input_size_source = ""
         self.expected_keypoint_count = 0
         self.annotation_family_counts = Counter()
@@ -8174,16 +8405,15 @@ class ScanAnnotations(QObject):
             return str(file_path).replace("\\", "/")
 
     def _dataset_directory(self):
-        candidates = [
-            getattr(self.parent, "image_directory", ""),
-            self.base_directory,
-            getattr(self.parent, "output_path", ""),
-            getattr(self.parent, "last_image_directory", ""),
-        ]
-
-        settings = getattr(self.parent, "settings", {})
-        if isinstance(settings, dict):
-            candidates.append(settings.get("last_dir", ""))
+        """Return the dataset that is open now, never a training-YAML fallback."""
+        candidates = [getattr(self.parent, "image_directory", "")]
+        current_file = getattr(self.parent, "current_file", "")
+        if current_file and not (
+            hasattr(self.parent, "is_placeholder_file")
+            and self.parent.is_placeholder_file(current_file)
+        ):
+            candidates.append(os.path.dirname(current_file) if os.path.isfile(current_file) else current_file)
+        candidates.append(self.base_directory)
 
         for candidate in candidates:
             if candidate and os.path.isdir(candidate):
@@ -8256,17 +8486,19 @@ class ScanAnnotations(QObject):
 
     def _find_classes_file(self, dataset_dir):
         if self.override_classes_file and os.path.exists(self.override_classes_file):
-            return self.override_classes_file
+            override_path = self._normalize_path(self.override_classes_file)
+            try:
+                normalized_dataset = self._normalize_path(dataset_dir)
+                if os.path.normcase(os.path.commonpath([normalized_dataset, override_path])) == os.path.normcase(normalized_dataset):
+                    return override_path
+            except (OSError, ValueError):
+                pass
 
         candidates = [resolve_dataset_classes_path(dataset_dir, migrate=True)]
-
-        output_path = getattr(self.parent, "output_path", "")
-        if output_path:
-            candidates.extend([
-                resolve_dataset_classes_path(output_path, migrate=True),
-                os.path.join(output_path, "obj.names"),
-                os.path.join(output_path, "names.txt"),
-            ])
+        candidates.extend([
+            os.path.join(dataset_dir, "obj.names"),
+            os.path.join(dataset_dir, "names.txt"),
+        ])
 
         for candidate in candidates:
             if candidate and os.path.exists(candidate):
@@ -8485,23 +8717,9 @@ class ScanAnnotations(QObject):
         return bbox_width * img_width * scale, bbox_height * img_height * scale, scale
 
     def _iter_image_files(self, dataset_dir):
-        current_dir = self._normalize_path(getattr(self.parent, "image_directory", ""))
-        if current_dir == self._normalize_path(dataset_dir):
-            open_files = []
-            for image_file in getattr(self.parent, "image_files", []) or []:
-                if not image_file:
-                    continue
-
-                normalized = self._normalize_path(image_file)
-                if hasattr(self.parent, "is_placeholder_file") and self.parent.is_placeholder_file(normalized):
-                    continue
-
-                if os.path.isfile(normalized) and os.path.dirname(normalized) == current_dir:
-                    open_files.append(normalized)
-
-            if open_files:
-                return sorted(dict.fromkeys(open_files))
-
+        # Dataset Analysis deliberately reads the selected folder itself.  The
+        # main labeler's list may be filtered, partially loaded, or temporarily
+        # replaced by a review queue and must not define the scan scope.
         image_files = []
         for entry in os.scandir(dataset_dir):
             if not entry.is_file():
@@ -8657,6 +8875,186 @@ class ScanAnnotations(QObject):
                     f"uses only {self._annotation_family_display(dominant)} annotations."
                 ),
             ))
+
+    @staticmethod
+    def _visual_outlier_bounds(parsed):
+        """Return normalized xyxy bounds for any supported spatial annotation."""
+        if not isinstance(parsed, dict):
+            return None
+        values = list(parsed.get("values", []) or [])
+        annotation_type = str(parsed.get("annotation_type", "") or "")
+        if annotation_type in {"bbox", "bbox_keypoints"} and len(values) >= 4:
+            center_x, center_y, width, height = [float(value) for value in values[:4]]
+            bounds = (
+                center_x - width / 2.0,
+                center_y - height / 2.0,
+                center_x + width / 2.0,
+                center_y + height / 2.0,
+            )
+        elif annotation_type in {"segmentation", "obb"} and len(values) >= 6:
+            xs = [float(values[index]) for index in range(0, len(values), 2)]
+            ys = [float(values[index]) for index in range(1, len(values), 2)]
+            bounds = (min(xs), min(ys), max(xs), max(ys))
+        else:
+            return None
+        x1, y1, x2, y2 = bounds
+        x1, x2 = sorted((max(0.0, min(1.0, x1)), max(0.0, min(1.0, x2))))
+        y1, y2 = sorted((max(0.0, min(1.0, y1)), max(0.0, min(1.0, y2))))
+        if x2 <= x1 or y2 <= y1:
+            return None
+        return x1, y1, x2, y2
+
+    @staticmethod
+    def _visual_outlier_feature(image, bounds):
+        """Build a compact color/shape feature from an annotation crop."""
+        if image is None or bounds is None:
+            return None
+        height, width = image.shape[:2]
+        if width <= 0 or height <= 0:
+            return None
+        x1, y1, x2, y2 = bounds
+        center_x = (x1 + x2) * 0.5 * width
+        center_y = (y1 + y2) * 0.5 * height
+        crop_width = max(2.0, (x2 - x1) * width * 1.25)
+        crop_height = max(2.0, (y2 - y1) * height * 1.25)
+        px1 = max(0, int(math.floor(center_x - crop_width / 2.0)))
+        py1 = max(0, int(math.floor(center_y - crop_height / 2.0)))
+        px2 = min(width, int(math.ceil(center_x + crop_width / 2.0)))
+        py2 = min(height, int(math.ceil(center_y + crop_height / 2.0)))
+        if px2 - px1 < 4 or py2 - py1 < 4:
+            return None
+        crop = image[py1:py2, px1:px2]
+        crop = cv2.resize(crop, (32, 32), interpolation=cv2.INTER_AREA)
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        histogram = cv2.calcHist(
+            [hsv], [0, 1], None, [8, 4], [0, 180, 0, 256]
+        ).reshape(-1).astype(np.float32)
+        hist_norm = float(np.linalg.norm(histogram))
+        if hist_norm > 1e-9:
+            histogram /= hist_norm
+
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+        dct = cv2.dct(gray)[:8, :8].reshape(-1)
+        dct[0] = 0.0
+        dct_norm = float(np.linalg.norm(dct))
+        if dct_norm > 1e-9:
+            dct /= dct_norm
+
+        feature = np.concatenate((histogram * 0.65, dct * 0.35)).astype(np.float32)
+        feature_norm = float(np.linalg.norm(feature))
+        return feature / feature_norm if feature_norm > 1e-9 else None
+
+    def _scan_visual_outliers(self, should_cancel=lambda: False, progress_callback=None):
+        """Flag conservative within-class appearance outliers for human review."""
+        records_by_image = OrderedDict()
+        for record in self.annotation_family_records:
+            bounds = self._visual_outlier_bounds(record.get("parsed"))
+            image_path = self._normalize_path(record.get("image_path", ""))
+            if bounds is not None and image_path and os.path.isfile(image_path):
+                item = dict(record)
+                item["bounds"] = bounds
+                records_by_image.setdefault(image_path, []).append(item)
+
+        feature_records = []
+        total_images = len(records_by_image)
+        for image_number, (image_path, records) in enumerate(records_by_image.items(), start=1):
+            if should_cancel():
+                return
+            image = cv2.imread(image_path, cv2.IMREAD_COLOR)
+            if image is None:
+                continue
+            for record in records:
+                feature = self._visual_outlier_feature(image, record.get("bounds"))
+                if feature is not None:
+                    record["feature"] = feature
+                    feature_records.append(record)
+            if callable(progress_callback) and (
+                image_number == total_images or image_number % 50 == 0
+            ):
+                progress_callback(
+                    image_number,
+                    max(1, total_images),
+                    "Checking within-class visual consistency...",
+                )
+
+        grouped = OrderedDict()
+        for record in feature_records:
+            grouped.setdefault(int(record.get("class_id", -1)), []).append(record)
+
+        configured_threshold = getattr(
+            self, "_scan_visual_outlier_threshold_override", None
+        )
+        try:
+            configured_threshold = float(configured_threshold)
+        except (TypeError, ValueError):
+            configured_threshold = 0.45
+        configured_threshold = max(0.20, min(0.90, configured_threshold))
+
+        for class_id, class_records in grouped.items():
+            if should_cancel():
+                return
+            count = len(class_records)
+            if count < self.VISUAL_OUTLIER_MIN_CLASS_SAMPLES:
+                continue
+            matrix = np.vstack([record["feature"] for record in class_records])
+            if count <= self.VISUAL_OUTLIER_EXACT_CLASS_LIMIT:
+                reference_indices = np.arange(count, dtype=np.int32)
+            else:
+                reference_indices = np.linspace(
+                    0,
+                    count - 1,
+                    self.VISUAL_OUTLIER_REFERENCE_LIMIT,
+                    dtype=np.int32,
+                )
+                reference_indices = np.unique(reference_indices)
+            reference_matrix = matrix[reference_indices]
+            reference_columns = {
+                int(record_index): column
+                for column, record_index in enumerate(reference_indices)
+            }
+            nearest = np.full(count, -1.0, dtype=np.float32)
+            chunk_size = 256
+            for start in range(0, count, chunk_size):
+                stop = min(count, start + chunk_size)
+                similarities = np.matmul(
+                    matrix[start:stop], reference_matrix.T
+                )
+                for row, record_index in enumerate(range(start, stop)):
+                    reference_column = reference_columns.get(record_index)
+                    if reference_column is not None:
+                        similarities[row, reference_column] = -1.0
+                nearest[start:stop] = similarities.max(axis=1)
+            median = float(np.median(nearest))
+            mad = float(np.median(np.abs(nearest - median)))
+            adaptive_threshold = max(0.20, median - max(0.12, mad * 3.0))
+            cutoff = min(configured_threshold, adaptive_threshold)
+            candidate_indices = [
+                index for index, score in enumerate(nearest) if float(score) < cutoff
+            ]
+            maximum = min(
+                50,
+                max(1, int(math.ceil(count * self.VISUAL_OUTLIER_MAX_CLASS_FRACTION))),
+            )
+            candidate_indices.sort(key=lambda index: float(nearest[index]))
+            for index in candidate_indices[:maximum]:
+                record = class_records[index]
+                score = max(0.0, min(1.0, float(nearest[index])))
+                self.visual_outlier_candidates += 1
+                self.issues.append(self._make_issue(
+                    "visual_class_outlier",
+                    "info",
+                    record.get("file_path", ""),
+                    (
+                        f"This {self._class_name_for_index(class_id)} annotation's nearest "
+                        f"same-class visual match scored {score * 100.0:.1f}%."
+                    ),
+                    record.get("line_number"),
+                    record.get("line"),
+                    suggestion=(
+                        "Check the class and crop quality. This is a visual consistency hint, "
+                        "not proof that the label is wrong or that the object cannot be learned."
+                    ),
+                ))
 
     def _parse_label_line(self, line):
         parts = line.split()
@@ -8966,7 +9364,7 @@ class ScanAnnotations(QObject):
                 "This image has an empty label file.",
                 suggestion=(
                     "Keep it when this is an intentional negative image; otherwise open the image "
-                    "in Dataset Review and add the missing objects."
+                    "in the Dataset Analysis queue and add the missing objects in Label Maker."
                 ),
             ))
             return
@@ -9011,8 +9409,11 @@ class ScanAnnotations(QObject):
             self.annotation_family_records.append({
                 "family": family,
                 "file_path": label_file,
+                "image_path": image_path,
                 "line_number": line_number,
                 "line": line,
+                "class_id": class_id,
+                "parsed": parsed,
             })
 
             if len(file_families) > 1:
@@ -9157,6 +9558,7 @@ class ScanAnnotations(QObject):
 
         return OrderedDict([
             ("generated_at", datetime.now().isoformat(timespec="seconds")),
+            ("source", "dataset_folder"),
             ("dataset_dir", self._normalize_path(dataset_dir)),
             ("classes_file", self._normalize_path(classes_file) if classes_file else ""),
             ("summary", OrderedDict([
@@ -9184,29 +9586,16 @@ class ScanAnnotations(QObject):
                 ("training_input_size", training_size_text),
                 ("training_input_size_source", self.training_input_size_source),
                 ("training_tiny_object_count", self.training_tiny_object_count),
+                ("visual_outliers_enabled", bool(self._scan_visual_outliers_override)),
+                ("visual_outlier_threshold", float(
+                    self._scan_visual_outlier_threshold_override or 0.45
+                )),
+                ("visual_outlier_candidates", self.visual_outlier_candidates),
                 ("unused_class_count", len(unused_classes)),
                 ("unused_classes", unused_classes),
             ])),
             ("issues", self.issues),
         ])
-
-    def _update_report_issue_summary(self, report):
-        issues = report.get("issues", []) if isinstance(report, dict) else []
-        summary = report.setdefault("summary", OrderedDict())
-        severity_counts = Counter(issue.get("severity", "") for issue in issues)
-        issue_type_counts = Counter(issue.get("issue_type", "") for issue in issues)
-        files_with_issues = {
-            issue.get("file", "")
-            for issue in issues
-            if issue.get("file") and issue.get("severity") in ("error", "warning")
-        }
-
-        summary["files_with_errors_or_warnings"] = len(files_with_issues)
-        summary["errors"] = severity_counts.get("error", 0)
-        summary["warnings"] = severity_counts.get("warning", 0)
-        summary["info"] = severity_counts.get("info", 0)
-        summary["issue_types"] = dict(sorted(issue_type_counts.items()))
-        return summary
 
     def _issue_matches_image(self, issue, image_path, dataset_dir):
         if not image_path:
@@ -9221,65 +9610,6 @@ class ScanAnnotations(QObject):
 
         matching_image = self._matching_image_for_issue(issue, dataset_dir)
         return bool(matching_image) and self._normalize_path(matching_image) == image_path
-
-    def _scan_single_image_issues(self, image_path, dataset_dir):
-        image_path = self._normalize_path(image_path)
-        label_path = self._normalize_path(os.path.splitext(image_path)[0] + ".txt")
-        image_key = os.path.splitext(os.path.basename(image_path))[0].lower()
-
-        saved_state = {
-            "issues": self.issues,
-            "bad_images": self.bad_images,
-            "total_labels": self.total_labels,
-            "valid_labels": self.valid_labels,
-            "empty_label_files": self.empty_label_files,
-            "missing_label_files": self.missing_label_files,
-            "used_class_indices": self.used_class_indices,
-            "class_label_counts": self.class_label_counts,
-            "training_tiny_object_count": self.training_tiny_object_count,
-            "annotation_family_counts": self.annotation_family_counts,
-            "annotation_family_records": self.annotation_family_records,
-            "dominant_annotation_family": self.dominant_annotation_family,
-            "_image_size_cache": self._image_size_cache,
-        }
-
-        self.issues = []
-        self.bad_images = 0
-        self.total_labels = 0
-        self.valid_labels = 0
-        self.empty_label_files = 0
-        self.missing_label_files = 0
-        self.used_class_indices = set()
-        self.class_label_counts = Counter()
-        self.training_tiny_object_count = 0
-        self.annotation_family_counts = Counter()
-        self.annotation_family_records = []
-        self.dominant_annotation_family = ""
-        self._image_size_cache = {}
-
-        try:
-            image_size = self._read_image_size(image_path)
-            if image_size:
-                self._image_size_cache[image_path] = image_size
-
-            if os.path.exists(label_path):
-                self._scan_label_file(label_path, {image_key: image_path})
-
-            return list(self.issues)
-        finally:
-            self.issues = saved_state["issues"]
-            self.bad_images = saved_state["bad_images"]
-            self.total_labels = saved_state["total_labels"]
-            self.valid_labels = saved_state["valid_labels"]
-            self.empty_label_files = saved_state["empty_label_files"]
-            self.missing_label_files = saved_state["missing_label_files"]
-            self.used_class_indices = saved_state["used_class_indices"]
-            self.class_label_counts = saved_state["class_label_counts"]
-            self.training_tiny_object_count = saved_state["training_tiny_object_count"]
-            self.annotation_family_counts = saved_state["annotation_family_counts"]
-            self.annotation_family_records = saved_state["annotation_family_records"]
-            self.dominant_annotation_family = saved_state["dominant_annotation_family"]
-            self._image_size_cache = saved_state["_image_size_cache"]
 
     def _issue_source_path(self, issue, dataset_dir):
         absolute_path = issue.get("absolute_path", "")
@@ -9320,170 +9650,8 @@ class ScanAnnotations(QObject):
 
         return ""
 
-    def _unique_review_path(self, destination_dir, file_name):
-        os.makedirs(destination_dir, exist_ok=True)
-        destination = os.path.join(destination_dir, file_name)
-        if not os.path.exists(destination):
-            return destination
-
-        stem, extension = os.path.splitext(file_name)
-        counter = 1
-        while True:
-            candidate = os.path.join(destination_dir, f"{stem}_{counter}{extension}")
-            if not os.path.exists(candidate):
-                return candidate
-            counter += 1
-
-    def _move_issue_to_review_folder(self, issue, dataset_dir):
-        source_path = self._issue_source_path(issue, dataset_dir)
-        image_path = self._matching_image_for_issue(issue, dataset_dir)
-
-        files_to_move = []
-        if image_path and os.path.exists(image_path):
-            files_to_move.append(image_path)
-            label_path = os.path.splitext(image_path)[0] + ".txt"
-            if os.path.exists(label_path):
-                files_to_move.append(self._normalize_path(label_path))
-        elif source_path and os.path.exists(source_path):
-            files_to_move.append(source_path)
-
-        files_to_move = list(dict.fromkeys(self._normalize_path(path) for path in files_to_move))
-        if not files_to_move:
-            return [], ""
-
-        issue_type = re.sub(r"[^A-Za-z0-9_.-]+", "_", issue.get("issue_type", "selected_issue")).strip("_")
-        destination_dir = os.path.join(dataset_dir, PROJECT_SETTINGS_DIR, "review", issue_type or "selected_issue")
-
-        moved_files = []
-        for file_path in files_to_move:
-            destination = self._unique_review_path(destination_dir, os.path.basename(file_path))
-            shutil.move(file_path, destination)
-            moved_files.append((file_path, self._normalize_path(destination)))
-
-        self._refresh_parent_file_lists_after_move([source for source, _destination in moved_files])
-        return moved_files, self._normalize_path(destination_dir)
-
-    def _refresh_parent_file_lists_after_move(self, moved_paths):
-        moved_images = {
-            self._normalize_path(path)
-            for path in moved_paths
-            if os.path.splitext(path)[1].lower() in self.valid_image_extensions
-        }
-        if not moved_images:
-            return
-
-        image_files = getattr(self.parent, "image_files", [])
-        filtered_image_files = getattr(self.parent, "filtered_image_files", [])
-
-        if isinstance(image_files, list):
-            self.parent.image_files = [
-                path for path in image_files
-                if self._normalize_path(path) not in moved_images
-            ]
-
-        if isinstance(filtered_image_files, list):
-            self.parent.filtered_image_files = [
-                path for path in filtered_image_files
-                if self._normalize_path(path) not in moved_images
-            ]
-
-        if hasattr(self.parent, "update_list_view"):
-            self.parent.update_list_view(getattr(self.parent, "filtered_image_files", []))
-
-        current_file = self._normalize_path(getattr(self.parent, "current_file", "") or "")
-        if current_file not in moved_images:
-            return
-
-        remaining_files = getattr(self.parent, "filtered_image_files", []) or []
-        if remaining_files:
-            next_index = min(
-                getattr(self.parent, "current_img_index", 0),
-                len(remaining_files) - 1,
-            )
-            self.parent.current_img_index = next_index
-            self.parent.current_image_index = next_index
-            self.parent.current_file = remaining_files[next_index]
-            self.parent.display_image(self.parent.current_file)
-        elif hasattr(self.parent, "display_placeholder"):
-            self.parent.current_file = None
-            self.parent.display_placeholder()
-
-    def _open_issue_folder(self, issue, dataset_dir):
-        source_path = self._issue_source_path(issue, dataset_dir)
-        if not source_path:
-            QMessageBox.information(self.parent, "Dataset Analysis", "No file is attached to this issue.")
-            return
-
-        folder = os.path.dirname(source_path)
-        if not folder or not os.path.isdir(folder):
-            QMessageBox.information(self.parent, "Dataset Analysis", "The file folder could not be found.")
-            return
-
-        os.startfile(folder)
-
-    def _go_to_issue_image(self, issue, dataset_dir):
-        image_path = self._matching_image_for_issue(issue, dataset_dir)
-        if not image_path:
-            QMessageBox.information(
-                self.parent,
-                "Dataset Analysis",
-                "No matching image was found for this issue.",
-            )
-            return False
-
-        image_path = self._normalize_path(image_path)
-
-        if hasattr(self.parent, "image_directory"):
-            self.parent.image_directory = self._normalize_path(os.path.dirname(image_path))
-
-        image_files = getattr(self.parent, "image_files", [])
-        if isinstance(image_files, list) and image_path not in image_files:
-            image_files.append(image_path)
-            self.parent.image_files = image_files
-
-        filtered_image_files = getattr(self.parent, "filtered_image_files", [])
-        if isinstance(filtered_image_files, list) and image_path not in filtered_image_files:
-            self.parent.filtered_image_files = list(getattr(self.parent, "image_files", [image_path]))
-            if hasattr(self.parent, "update_list_view"):
-                self.parent.update_list_view(self.parent.filtered_image_files)
-
-        search_list = getattr(self.parent, "filtered_image_files", []) or [image_path]
-        current_index = search_list.index(image_path) if image_path in search_list else 0
-        self.parent.current_file = image_path
-        self.parent.current_img_index = current_index
-        self.parent.current_image_index = current_index
-
-        if hasattr(self.parent, "display_image"):
-            self.parent.display_image(image_path, rebuild_preview=True)
-
-        if hasattr(self.parent, "img_index_number"):
-            self.parent.img_index_number.blockSignals(True)
-            self.parent.img_index_number.setMaximum(max(0, len(search_list) - 1))
-            self.parent.img_index_number.setValue(current_index)
-            self.parent.img_index_number.blockSignals(False)
-
-        if hasattr(self.parent, "sync_list_view_selection"):
-            self.parent.sync_list_view_selection(image_path)
-
-        line_number = issue.get("line")
-        preview_list = getattr(self.parent, "preview_list", None)
-        if isinstance(line_number, int) and preview_list is not None and line_number > 0:
-            preview_row = line_number - 1
-            if preview_row < preview_list.rowCount():
-                preview_list.selectRow(preview_row)
-                item = preview_list.item(preview_row, 0)
-                if item is not None:
-                    preview_list.scrollToItem(item, QAbstractItemView.PositionAtCenter)
-
-        if hasattr(self.parent, "save_current_dataset_position"):
-            self.parent.save_current_dataset_position(image_path)
-
-        self._flash_issue_annotation(issue, image_path)
-
-        return True
-
     def _health_issue_to_review_issue(self, issue, dataset_dir):
-        """Adapt a health-check row to the shared Dataset Review viewer schema."""
+        """Adapt a folder-analysis finding to the shared Label Maker queue schema."""
         if not isinstance(issue, dict):
             return None
         image_path = self._matching_image_for_issue(issue, dataset_dir)
@@ -9559,7 +9727,7 @@ class ScanAnnotations(QObject):
         if not selected:
             QMessageBox.information(
                 self.parent,
-                "Dataset Review",
+                "Dataset Analysis",
                 "This health finding is not attached to a viewable dataset image.",
             )
             return False
@@ -9579,8 +9747,10 @@ class ScanAnnotations(QObject):
             "status": "complete",
             "stage": "dataset_health_review",
             "source": "dataset_health",
-            "model": "Dataset health checker",
-            "data": "",
+            "source_title": "Dataset Analysis",
+            "model": "Folder-based dataset analysis",
+            "data": self._normalize_path(dataset_dir),
+            "dataset_dir": self._normalize_path(dataset_dir),
             "task": str(selected.get("task", "detect")),
             "class_names": list(self.valid_classes or []),
             "review_history_path": history_path,
@@ -9615,16 +9785,27 @@ class ScanAnnotations(QObject):
             logger.warning(f"Could not flash issue annotation: {e}")
 
     def show_scan_report_dialog(self, report, report_path):
-        issues = report.get("issues", [])
-        summary = report.get("summary", {})
-        dataset_dir = report.get("dataset_dir") or self.base_directory or self._dataset_directory()
+        """Show a folder-analysis dashboard and launch cleanup in Label Maker."""
+        issues = list(report.get("issues", []) or [])
+        summary = report.get("summary", {}) or {}
+        dataset_dir = self._normalize_path(
+            report.get("dataset_dir") or self.base_directory or ""
+        )
+        if not dataset_dir or not os.path.isdir(dataset_dir):
+            QMessageBox.warning(
+                self.parent,
+                "Dataset Analysis",
+                "The dataset folder saved in this report is no longer available.",
+            )
+            return
         reviewed_issue_keys = self._load_reviewed_issue_keys(dataset_dir)
 
         dialog = QtWidgets.QDialog(self.parent)
-        dialog.setWindowTitle("Dataset Review")
+        dialog.setWindowTitle("Dataset Analysis")
         dialog.setModal(False)
         dialog.setWindowModality(Qt.NonModal)
         dialog.setAttribute(Qt.WA_DeleteOnClose, True)
+        dialog.setMinimumSize(760, 600)
         dialog.resize(1080, 720)
         self.health_report_dialog = dialog
         dialog.destroyed.connect(
@@ -9632,27 +9813,49 @@ class ScanAnnotations(QObject):
         )
 
         layout = QtWidgets.QVBoxLayout(dialog)
+        layout.setSizeConstraint(QtWidgets.QLayout.SetNoConstraint)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
 
-        title_row = QtWidgets.QHBoxLayout()
-        title_label = QtWidgets.QLabel("Dataset Review — Health")
-        title_label.setStyleSheet("font-size: 15px; font-weight: 600;")
-        title_row.addWidget(title_label)
-        title_row.addStretch()
+        title_label = QtWidgets.QLabel("Dataset Analysis")
+        title_label.setStyleSheet("font-size: 16px; font-weight: 700;")
+        layout.addWidget(title_label)
 
-        report_label = QtWidgets.QLabel(f"Report: {report_path}")
-        report_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        report_label.setStyleSheet("color: #9aa4af;")
-        title_row.addWidget(report_label)
-        layout.addLayout(title_row)
+        source_label = QtWidgets.QLabel(
+            f"<b>Dataset folder:</b> {html.escape(dataset_dir)}<br>"
+            "This scan reads the images and labels in this folder directly. "
+            "It does not use a training YAML or a train/validation split."
+        )
+        source_label.setWordWrap(True)
+        source_label.setMaximumHeight(72)
+        source_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        source_label.setStyleSheet(
+            "QLabel { background: #17212b; border: 1px solid #344454; "
+            "border-radius: 6px; padding: 9px; color: #dce6f0; }"
+        )
+        layout.addWidget(source_label)
+
+        workflow_label = QtWidgets.QLabel(
+            "Use this window to understand and filter the scan. To correct labels, "
+            "select a finding and open the queue in Label Maker. Double-clicking a row "
+            "starts the same queue at that finding."
+        )
+        workflow_label.setWordWrap(True)
+        workflow_label.setMaximumHeight(44)
+        workflow_label.setStyleSheet("color: #9aa4af;")
+        layout.addWidget(workflow_label)
 
         summary_grid = QtWidgets.QGridLayout()
         summary_grid.setHorizontalSpacing(8)
         summary_grid.setVerticalSpacing(8)
-        summary_value_labels = {}
 
         def add_summary_cell(row, col, title, value, accent="#9aa4af"):
             frame = QtWidgets.QFrame(dialog)
             frame.setFrameShape(QtWidgets.QFrame.StyledPanel)
+            frame.setSizePolicy(
+                QtWidgets.QSizePolicy.Ignored,
+                QtWidgets.QSizePolicy.Preferred,
+            )
             frame.setStyleSheet(
                 "QFrame { border: 1px solid #30363d; border-radius: 6px; padding: 6px; }"
                 "QLabel { border: none; }"
@@ -9660,55 +9863,83 @@ class ScanAnnotations(QObject):
             cell_layout = QtWidgets.QVBoxLayout(frame)
             cell_layout.setContentsMargins(8, 6, 8, 6)
             value_label = QtWidgets.QLabel(str(value))
-            value_label.setStyleSheet(f"font-size: 18px; font-weight: 700; color: {accent};")
+            value_label.setStyleSheet(
+                f"font-size: 18px; font-weight: 700; color: {accent};"
+            )
             name_label = QtWidgets.QLabel(title)
             name_label.setStyleSheet("color: #9aa4af;")
             cell_layout.addWidget(value_label)
             cell_layout.addWidget(name_label)
             summary_grid.addWidget(frame, row, col)
-            summary_value_labels[title] = value_label
 
         add_summary_cell(0, 0, "Images", summary.get("total_images", 0))
         add_summary_cell(0, 1, "Label Files", summary.get("total_label_files", 0))
         add_summary_cell(0, 2, "Errors", summary.get("errors", 0), "#ff6b6b")
         add_summary_cell(0, 3, "Warnings", summary.get("warnings", 0), "#f0b45f")
-        add_summary_cell(0, 4, "Files to Review", summary.get("files_with_errors_or_warnings", 0), "#7cc7ff")
-
-        add_summary_cell(1, 0, "Blank Labels", summary.get("empty_label_files", 0))
-        add_summary_cell(1, 1, "Missing Labels", summary.get("missing_label_files", 0))
-        add_summary_cell(1, 2, "Possible Duplicates", summary.get("duplicate_box_candidates", 0))
-        add_summary_cell(1, 3, "Unreadable Images", summary.get("bad_images", 0), "#ff6b6b")
-        add_summary_cell(1, 4, "Unused Classes", summary.get("unused_class_count", 0))
-        add_summary_cell(2, 0, "Tiny at Train Size", summary.get("training_tiny_object_count", 0), "#f0b45f")
-        add_summary_cell(2, 1, "Info Rows", summary.get("info", 0))
-        add_summary_cell(2, 2, "Duplicate IoU", f"{float(summary.get('duplicate_iou_threshold', 0.85)):.2f}")
-
+        add_summary_cell(
+            0, 4, "Files to Review",
+            summary.get("files_with_errors_or_warnings", 0),
+            "#7cc7ff",
+        )
+        add_summary_cell(0, 5, "Blank Labels", summary.get("empty_label_files", 0))
+        add_summary_cell(1, 0, "Missing Labels", summary.get("missing_label_files", 0))
+        add_summary_cell(
+            1, 2, "Unreadable Images",
+            summary.get("bad_images", 0),
+            "#ff6b6b",
+        )
+        add_summary_cell(
+            1, 1, "Possible Duplicates",
+            summary.get("duplicate_box_candidates", 0),
+        )
+        add_summary_cell(
+            1, 3, "Tiny at Train Size",
+            summary.get("training_tiny_object_count", 0),
+            "#f0b45f",
+        )
+        add_summary_cell(
+            1, 4, "Visual Outliers",
+            summary.get("visual_outlier_candidates", 0),
+            "#9ecbff",
+        )
+        add_summary_cell(
+            1, 5, "Unused Classes",
+            summary.get("unused_class_count", 0),
+        )
         layout.addLayout(summary_grid)
 
         issue_types = summary.get("issue_types", {}) or {}
-        issue_text = "No issue rows were generated."
+        issue_label = QtWidgets.QLabel()
         if issue_types:
-            top_items = sorted(issue_types.items(), key=lambda item: item[1], reverse=True)[:6]
-            issue_text = "Top issue types: " + "   ".join(
-                f"{issue_type}: {count}" for issue_type, count in top_items
+            top_items = sorted(
+                issue_types.items(), key=lambda item: item[1], reverse=True
+            )[:6]
+            issue_label.setText(
+                "Most common findings: "
+                + "   ".join(
+                    f"{str(issue_type).replace('_', ' ')}: {count}"
+                    for issue_type, count in top_items
+                )
             )
-
-        issue_label = QtWidgets.QLabel(issue_text)
+        else:
+            issue_label.setText("No findings were generated.")
         issue_label.setWordWrap(True)
-        issue_label.setStyleSheet("color: #c9d1d9; padding: 4px 0;")
+        issue_label.setStyleSheet("color: #c9d1d9; padding: 3px 0;")
         layout.addWidget(issue_label)
 
-        class_balance_label = QtWidgets.QLabel(dialog)
-        class_balance_label.setWordWrap(True)
-        class_balance_label.setStyleSheet(
-            "color: #f0b45f; padding: 6px; border: 1px solid #4b3a1f; border-radius: 4px;"
-        )
         class_balance = summary.get("class_balance", {}) or {}
-        class_balance_label.setText(class_balance.get("message", ""))
-        class_balance_label.setVisible(bool(class_balance))
-        layout.addWidget(class_balance_label)
+        if class_balance:
+            class_balance_label = QtWidgets.QLabel(
+                str(class_balance.get("message", "") or "")
+            )
+            class_balance_label.setWordWrap(True)
+            class_balance_label.setStyleSheet(
+                "color: #f0b45f; padding: 6px; border: 1px solid #4b3a1f; "
+                "border-radius: 4px;"
+            )
+            layout.addWidget(class_balance_label)
 
-        tools_group = QtWidgets.QGroupBox("Analysis Tools", dialog)
+        tools_group = QtWidgets.QGroupBox("Scan and Dataset Tools", dialog)
         tools_layout = QtWidgets.QGridLayout(tools_group)
         tools_layout.setContentsMargins(10, 8, 10, 8)
         tools_layout.setHorizontalSpacing(8)
@@ -9718,20 +9949,53 @@ class ScanAnnotations(QObject):
         duplicate_iou_spin.setRange(0.50, 0.99)
         duplicate_iou_spin.setDecimals(2)
         duplicate_iou_spin.setSingleStep(0.01)
-        duplicate_iou_spin.setValue(float(summary.get("duplicate_iou_threshold", 0.85)))
-        duplicate_iou_spin.setToolTip("Lower catches looser duplicate boxes; higher only catches near-identical boxes.")
+        duplicate_iou_spin.setValue(
+            float(summary.get("duplicate_iou_threshold", 0.85))
+        )
+        duplicate_iou_spin.setToolTip(
+            "Lower catches looser duplicate labels; higher catches only near-identical labels."
+        )
 
-        image_quality_scan_check = QtWidgets.QCheckBox("Image Quality Metrics", tools_group)
-        image_quality_scan_check.setChecked(bool(getattr(self.parent, "image_quality_analysis_enabled", False)))
-        image_quality_scan_check.setToolTip("Include blur, exposure, and contrast checks when generating statistics.")
-
-        sam_verify_check = QtWidgets.QCheckBox("SAM Verify", tools_group)
+        image_quality_scan_check = QtWidgets.QCheckBox(
+            "Image quality in Statistics", tools_group
+        )
+        image_quality_scan_check.setChecked(
+            bool(getattr(self.parent, "image_quality_analysis_enabled", False))
+        )
+        sam_verify_check = QtWidgets.QCheckBox(
+            "SAM verify overlaps", tools_group
+        )
         sam_verify_check.setChecked(
-            str(QSettings("UltraDarkFusion", "HealthCheck").value("sam_duplicate_verify", "false")).lower()
+            str(
+                QSettings("UltraDarkFusion", "HealthCheck").value(
+                    "sam_duplicate_verify", "false"
+                )
+            ).lower()
             in ("1", "true", "yes")
         )
         sam_verify_check.setToolTip(
-            "Use SAM3 masks to verify high-overlap duplicate box candidates. Slower, but safer for touching objects."
+            "Slower, but safer when separate touching objects have heavily overlapping boxes."
+        )
+        visual_outliers_check = QtWidgets.QCheckBox(
+            "Visual class outliers (slower)", tools_group
+        )
+        visual_outliers_check.setChecked(
+            bool(summary.get("visual_outliers_enabled", False))
+        )
+        visual_outliers_check.setToolTip(
+            "Compare each annotation crop with others in the same class and queue only "
+            "conservative appearance outliers. This is a review hint, not a learnability score."
+        )
+        visual_outlier_threshold = QDoubleSpinBox(tools_group)
+        visual_outlier_threshold.setRange(0.20, 0.90)
+        visual_outlier_threshold.setDecimals(2)
+        visual_outlier_threshold.setSingleStep(0.05)
+        visual_outlier_threshold.setValue(
+            float(summary.get("visual_outlier_threshold", 0.45) or 0.45)
+        )
+        visual_outlier_threshold.setToolTip(
+            "Maximum nearest-neighbor similarity that can become an outlier candidate. "
+            "The scan also applies a stricter per-class statistical cutoff."
         )
 
         refresh_scan_btn = QtWidgets.QPushButton("Refresh Scan", tools_group)
@@ -9741,20 +10005,24 @@ class ScanAnnotations(QObject):
         bar_btn = QtWidgets.QPushButton("Class Plot", tools_group)
         scatter_btn = QtWidgets.QPushButton("Scatter", tools_group)
 
-        for button in (refresh_scan_btn, dedupe_btn, stats_btn, histogram_btn, bar_btn, scatter_btn):
-            button.setMinimumHeight(28)
-            button.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
-
         tools_layout.addWidget(QtWidgets.QLabel("Duplicate IoU"), 0, 0)
         tools_layout.addWidget(duplicate_iou_spin, 0, 1)
-        tools_layout.addWidget(image_quality_scan_check, 0, 2)
+        tools_layout.addWidget(sam_verify_check, 0, 2)
         tools_layout.addWidget(refresh_scan_btn, 0, 3)
         tools_layout.addWidget(dedupe_btn, 0, 4)
-        tools_layout.addWidget(sam_verify_check, 1, 0)
-        tools_layout.addWidget(stats_btn, 1, 1)
-        tools_layout.addWidget(histogram_btn, 1, 2)
-        tools_layout.addWidget(bar_btn, 1, 3)
-        tools_layout.addWidget(scatter_btn, 1, 4)
+        tools_layout.addWidget(image_quality_scan_check, 1, 0, 1, 2)
+        tools_layout.addWidget(stats_btn, 1, 2)
+        tools_layout.addWidget(histogram_btn, 1, 3)
+        plot_row = self.parent._row_layout(6) if hasattr(self.parent, "_row_layout") else QtWidgets.QHBoxLayout()
+        plot_row.addWidget(bar_btn)
+        plot_row.addWidget(scatter_btn)
+        tools_layout.addLayout(plot_row, 1, 4)
+        tools_layout.addWidget(visual_outliers_check, 2, 0, 1, 2)
+        tools_layout.addWidget(QtWidgets.QLabel("Outlier ceiling"), 2, 2)
+        tools_layout.addWidget(visual_outlier_threshold, 2, 3)
+        visual_outlier_note = QtWidgets.QLabel("Applies on refresh")
+        visual_outlier_note.setStyleSheet("color: #9aa4af;")
+        tools_layout.addWidget(visual_outlier_note, 2, 4)
         layout.addWidget(tools_group)
 
         filter_row = QtWidgets.QHBoxLayout()
@@ -9762,25 +10030,27 @@ class ScanAnnotations(QObject):
         severity_filter.addItem("All Severities", "")
         severity_filter.addItem("Errors", "error")
         severity_filter.addItem("Warnings", "warning")
-        severity_filter.addItem("Info", "info")
+        severity_filter.addItem("Information", "info")
 
         issue_filter = QtWidgets.QComboBox(dialog)
-        issue_filter.addItem("All Issue Types", "")
-        for issue_type, _count in sorted(issue_types.items(), key=lambda item: item[1], reverse=True):
-            issue_filter.addItem(issue_type, issue_type)
+        issue_filter.addItem("All Finding Types", "")
+        for issue_type, _count in sorted(
+            issue_types.items(), key=lambda item: item[1], reverse=True
+        ):
+            issue_filter.addItem(
+                str(issue_type).replace("_", " ").title(), issue_type
+            )
 
         search_filter = QtWidgets.QLineEdit(dialog)
-        search_filter.setPlaceholderText("Filter by file, issue, or message")
-
+        search_filter.setPlaceholderText("Filter by file, finding, or message")
         hide_reviewed_checkbox = QtWidgets.QCheckBox("Hide Reviewed", dialog)
         hide_reviewed_checkbox.setChecked(True)
         current_image_checkbox = QtWidgets.QCheckBox("Current Image Only", dialog)
-
-        clear_filters_btn = QtWidgets.QPushButton("Clear Filters", dialog)
+        clear_filters_btn = QtWidgets.QPushButton("Clear", dialog)
 
         filter_row.addWidget(QtWidgets.QLabel("Severity"))
         filter_row.addWidget(severity_filter)
-        filter_row.addWidget(QtWidgets.QLabel("Issue"))
+        filter_row.addWidget(QtWidgets.QLabel("Finding"))
         filter_row.addWidget(issue_filter)
         filter_row.addWidget(search_filter, 1)
         filter_row.addWidget(hide_reviewed_checkbox)
@@ -9790,212 +10060,144 @@ class ScanAnnotations(QObject):
 
         table = QtWidgets.QTableWidget(dialog)
         table.setColumnCount(5)
-        table.setHorizontalHeaderLabels(["Severity", "Issue", "File", "Line", "Message"])
+        table.setHorizontalHeaderLabels(
+            ["Severity", "Finding", "File", "Line", "What was found"]
+        )
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         table.setSelectionBehavior(QAbstractItemView.SelectRows)
         table.setSelectionMode(QAbstractItemView.SingleSelection)
         table.setAlternatingRowColors(True)
-
+        table.verticalHeader().setVisible(False)
         table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
         table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
         table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
-        review_splitter = QtWidgets.QSplitter(Qt.Horizontal, dialog)
-        review_splitter.addWidget(table)
-        health_preview = ValidationReviewImageView(dialog)
-        review_splitter.addWidget(health_preview)
-        health_detail_panel = QtWidgets.QFrame(dialog)
-        health_detail_panel.setFrameShape(QtWidgets.QFrame.StyledPanel)
-        health_detail_layout = QtWidgets.QVBoxLayout(health_detail_panel)
-        health_detail_title = QtWidgets.QLabel("Health Finding", health_detail_panel)
-        health_detail_title.setStyleSheet("font-weight: 800; font-size: 13px;")
-        health_detail_label = QtWidgets.QLabel("Select an issue to preview it.", health_detail_panel)
-        health_detail_label.setWordWrap(True)
-        health_detail_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        health_detail_layout.addWidget(health_detail_title)
-        health_detail_layout.addWidget(health_detail_label)
-        health_detail_layout.addStretch(1)
-        review_splitter.addWidget(health_detail_panel)
-        review_splitter.setStretchFactor(0, 3)
-        review_splitter.setStretchFactor(1, 6)
-        review_splitter.setStretchFactor(2, 2)
-        layout.addWidget(review_splitter, 1)
+        layout.addWidget(table, 1)
 
         status_label = QtWidgets.QLabel(dialog)
         status_label.setStyleSheet("color: #9aa4af;")
         layout.addWidget(status_label)
 
-        max_display_rows = 1000
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
+        review_in_labeler_btn = buttons.addButton(
+            "Review in Label Maker",
+            QtWidgets.QDialogButtonBox.AcceptRole,
+        )
+        review_in_labeler_btn.setToolTip(
+            "Open all currently filtered, viewable findings as a cleanup queue."
+        )
+        review_in_labeler_btn.setDefault(True)
+        open_folder_btn = buttons.addButton(
+            "Report Folder", QtWidgets.QDialogButtonBox.ActionRole
+        )
+        layout.addWidget(buttons)
+
         visible_issues_for_navigation = []
-        filtered_issues_for_bulk_delete = []
-        delete_all_filtered_button_holder = [None]
+        maximum_rows = 2000
 
         def issue_key(issue):
             return self._issue_review_key(issue)
 
         def current_image_path():
-            return self._normalize_path(getattr(self.parent, "current_file", "") or "")
-
-        def format_top_issue_text():
-            current_issue_types = summary.get("issue_types", {}) or {}
-            if not current_issue_types:
-                return "No issue rows were generated."
-
-            top_items = sorted(current_issue_types.items(), key=lambda item: item[1], reverse=True)[:6]
-            return "Top issue types: " + "   ".join(
-                f"{issue_type}: {count}" for issue_type, count in top_items
+            return self._normalize_path(
+                getattr(self.parent, "current_file", "") or ""
             )
 
-        def refresh_summary_ui():
-            self._update_report_issue_summary(report)
-            for title, key in [
-                ("Errors", "errors"),
-                ("Warnings", "warnings"),
-                ("Info Rows", "info"),
-                ("Files to Review", "files_with_errors_or_warnings"),
-                ("Tiny at Train Size", "training_tiny_object_count"),
-            ]:
-                if title in summary_value_labels:
-                    summary_value_labels[title].setText(str(summary.get(key, 0)))
+        def selected_issue():
+            row = table.currentRow()
+            item = table.item(row, 0) if row >= 0 else None
+            return item.data(Qt.UserRole) if item is not None else None
 
-            issue_label.setText(format_top_issue_text())
-            class_balance = summary.get("class_balance", {}) or {}
-            class_balance_label.setText(class_balance.get("message", ""))
-            class_balance_label.setVisible(bool(class_balance))
+        def update_review_button():
+            review_in_labeler_btn.setEnabled(
+                isinstance(selected_issue(), dict)
+                and bool(visible_issues_for_navigation)
+            )
 
-        def refresh_issue_type_filter():
-            current_value = issue_filter.currentData() or ""
-            issue_filter.blockSignals(True)
-            issue_filter.clear()
-            issue_filter.addItem("All Issue Types", "")
-            for issue_type, _count in sorted(
-                (summary.get("issue_types", {}) or {}).items(),
-                key=lambda item: item[1],
-                reverse=True
-            ):
-                issue_filter.addItem(issue_type, issue_type)
-
-            if current_value:
-                index = issue_filter.findData(current_value)
-                issue_filter.setCurrentIndex(index if index >= 0 else 0)
-            issue_filter.blockSignals(False)
-
-        def deletable_files_for_issues(issue_rows):
-            protected_text_names = {
-                "classes.txt", "names.txt", "train.txt", "valid.txt",
-                "val.txt", "test.txt", "obj.names",
-            }
-            allowed_extensions = set(self.valid_image_extensions) | {".txt"}
-            file_paths = {}
-
-            def add_file(path):
-                path = self._normalize_path(path)
-                if not path or not os.path.isfile(path):
-                    return
-                extension = os.path.splitext(path)[1].lower()
-                if extension not in allowed_extensions:
-                    return
-                if os.path.basename(path).lower() in protected_text_names:
-                    return
-                file_paths[path.lower()] = path
-
-            for issue in issue_rows:
-                source_path = self._issue_source_path(issue, dataset_dir)
-                image_path = self._matching_image_for_issue(issue, dataset_dir)
-
-                add_file(source_path)
-                if image_path:
-                    add_file(image_path)
-                    add_file(os.path.splitext(image_path)[0] + ".txt")
-
-            return sorted(file_paths.values(), key=lambda path: path.lower())
-
-        def populate_table():
-            severity_value = severity_filter.currentData() or ""
-            issue_value = issue_filter.currentData() or ""
+        def populate_table(select_key=""):
+            severity_value = str(severity_filter.currentData() or "")
+            issue_value = str(issue_filter.currentData() or "")
             search_value = search_filter.text().strip().lower()
+            active_image = current_image_path()
             hide_reviewed = hide_reviewed_checkbox.isChecked()
             only_current = current_image_checkbox.isChecked()
-            active_image = current_image_path()
 
-            def matches_filters(issue):
-                is_reviewed = issue_key(issue) in reviewed_issue_keys
-                if hide_reviewed and is_reviewed:
-                    return False
-                if only_current and active_image and not self._issue_matches_image(issue, active_image, dataset_dir):
-                    return False
-                if severity_value and issue.get("severity", "").lower() != severity_value:
-                    return False
-                if issue_value and issue.get("issue_type", "") != issue_value:
-                    return False
-                if not search_value:
-                    return True
+            matching = []
+            for issue in issues:
+                if hide_reviewed and issue_key(issue) in reviewed_issue_keys:
+                    continue
+                if (
+                    only_current
+                    and active_image
+                    and not self._issue_matches_image(
+                        issue, active_image, dataset_dir
+                    )
+                ):
+                    continue
+                if (
+                    severity_value
+                    and str(issue.get("severity", "")).lower() != severity_value
+                ):
+                    continue
+                if issue_value and str(issue.get("issue_type", "")) != issue_value:
+                    continue
+                haystack = " ".join(
+                    [
+                        str(issue.get("issue_type", "")),
+                        str(issue.get("file", "")),
+                        str(issue.get("message", "")),
+                        "" if issue.get("line") is None else str(issue.get("line")),
+                    ]
+                ).lower()
+                if search_value and search_value not in haystack:
+                    continue
+                matching.append(issue)
 
-                searchable = " ".join([
-                    issue.get("issue_type", ""),
-                    issue.get("file", ""),
-                    issue.get("message", ""),
-                    "" if issue.get("line") is None else str(issue.get("line")),
-                ]).lower()
-                return search_value in searchable
+            visible_issues_for_navigation[:] = matching
+            displayed = matching[:maximum_rows]
+            table.setUpdatesEnabled(False)
+            table.setRowCount(len(displayed))
+            selected_row = 0 if displayed else -1
+            try:
+                for row, issue in enumerate(displayed):
+                    reviewed = issue_key(issue) in reviewed_issue_keys
+                    values = [
+                        str(issue.get("severity", "")).title(),
+                        str(issue.get("issue_type", "")).replace("_", " ").title(),
+                        str(issue.get("file", "")),
+                        "" if issue.get("line") is None else str(issue.get("line")),
+                        str(issue.get("message", "")),
+                    ]
+                    for column, value in enumerate(values):
+                        item = QTableWidgetItem(value)
+                        if column == 0:
+                            item.setData(Qt.UserRole, issue)
+                        if reviewed:
+                            item.setForeground(QBrush(QColor("#7f8a98")))
+                        elif column == 0 and str(issue.get("severity", "")).lower() == "error":
+                            item.setForeground(QBrush(QColor("#ff6b6b")))
+                        elif column == 0 and str(issue.get("severity", "")).lower() == "warning":
+                            item.setForeground(QBrush(QColor("#f0b45f")))
+                        table.setItem(row, column, item)
+                    if select_key and issue_key(issue) == select_key:
+                        selected_row = row
+            finally:
+                table.setUpdatesEnabled(True)
 
-            matching_issues = [issue for issue in issues if matches_filters(issue)]
-            visible_issues = matching_issues[:max_display_rows]
-            visible_issues_for_navigation[:] = visible_issues
-            filtered_issues_for_bulk_delete[:] = matching_issues
-
-            delete_all_filtered_btn = delete_all_filtered_button_holder[0]
-            if delete_all_filtered_btn is not None:
-                files_to_delete = deletable_files_for_issues(matching_issues)
-                delete_all_filtered_btn.setEnabled(bool(files_to_delete))
-                delete_all_filtered_btn.setText(
-                    f"Delete All Filtered ({len(files_to_delete)} files)"
-                    if files_to_delete
-                    else "Delete All Filtered"
-                )
-
-            table.setRowCount(len(visible_issues))
-            for row, issue in enumerate(visible_issues):
-                is_reviewed = issue_key(issue) in reviewed_issue_keys
-                values = [
-                    issue.get("severity", ""),
-                    issue.get("issue_type", ""),
-                    issue.get("file", ""),
-                    "" if issue.get("line") is None else str(issue.get("line")),
-                    issue.get("message", ""),
-                ]
-                for col, value in enumerate(values):
-                    item = QTableWidgetItem(value)
-                    item.setData(Qt.UserRole, issue)
-                    if is_reviewed:
-                        item.setForeground(QBrush(QColor(120, 130, 140)))
-                        item.setBackground(QBrush(QColor(35, 39, 45)))
-                    if col == 0:
-                        severity = value.lower()
-                        if is_reviewed:
-                            item.setForeground(QBrush(QColor(120, 130, 140)))
-                        elif severity == "error":
-                            item.setForeground(QBrush(QColor(220, 80, 80)))
-                        elif severity == "warning":
-                            item.setForeground(QBrush(QColor(220, 170, 70)))
-                        elif severity == "info":
-                            item.setForeground(QBrush(QColor(150, 165, 180)))
-                    table.setItem(row, col, item)
-
-            if len(matching_issues) > max_display_rows:
-                status_label.setText(
-                    f"Showing first {max_display_rows} of {len(matching_issues)} matching issues. "
-                    "Full report is saved to disk."
-                )
-            else:
-                reviewed_count = sum(1 for issue in issues if issue_key(issue) in reviewed_issue_keys)
-                status_label.setText(
-                    f"Showing {len(matching_issues)} of {len(issues)} issues. "
-                    f"Reviewed: {reviewed_count}."
-                )
-            if table.rowCount() > 0 and table.currentRow() < 0:
-                table.selectRow(0)
+            if selected_row >= 0:
+                table.selectRow(selected_row)
+            shown_text = (
+                f"Showing first {maximum_rows:,} of {len(matching):,} filtered findings"
+                if len(matching) > maximum_rows
+                else f"Showing {len(matching):,} of {len(issues):,} findings"
+            )
+            reviewed_count = sum(
+                1 for issue in issues if issue_key(issue) in reviewed_issue_keys
+            )
+            status_label.setText(f"{shown_text} · {reviewed_count:,} reviewed")
+            status_label.setToolTip(report_path)
+            update_review_button()
 
         def clear_filters():
             severity_filter.setCurrentIndex(0)
@@ -10003,89 +10205,9 @@ class ScanAnnotations(QObject):
             search_filter.clear()
             current_image_checkbox.setChecked(False)
 
-        def selected_issue():
-            row = table.currentRow()
-            if row < 0:
-                QMessageBox.information(
-                    self.parent,
-                    "Dataset Analysis",
-                    "Select an issue row first.",
-                )
-                return None
-
-            item = table.item(row, 0)
-            if item is None:
-                return None
-            return item.data(Qt.UserRole)
-
-        def display_selected_health_issue():
-            row = table.currentRow()
-            item = table.item(row, 0) if row >= 0 else None
-            issue = item.data(Qt.UserRole) if item is not None else None
-            if not isinstance(issue, dict):
-                health_detail_label.setText("Select an issue to preview it.")
-                return
-            adapted = self._health_issue_to_review_issue(issue, dataset_dir)
-            if adapted is not None:
-                health_preview.set_review_issue(adapted)
-            else:
-                health_preview.clear_review()
-            details = [
-                str(issue.get("issue_type", "Dataset health issue")).replace("_", " ").title(),
-                f"Severity: {str(issue.get('severity', '')).title()}",
-                f"File: {os.path.basename(str(issue.get('file', '') or ''))}",
-            ]
-            if issue.get("line") is not None:
-                details.append(f"Label line: {issue.get('line')}")
-            if issue.get("message"):
-                details.extend(["", str(issue.get("message"))])
-            if issue.get("suggestion"):
-                details.extend(["", "Suggested action:", str(issue.get("suggestion"))])
-            if adapted is None:
-                details.extend(["", "This finding has no matching image preview."])
-            health_detail_label.setText("\n".join(details))
-
-        def select_table_row(row):
-            if table.rowCount() <= 0:
-                return
-            row = max(0, min(row, table.rowCount() - 1))
-            table.selectRow(row)
-            table.setCurrentCell(row, 0)
-            item = table.item(row, 0)
-            if item is not None:
-                table.scrollToItem(item, QAbstractItemView.PositionAtCenter)
-
-        def go_to_selected_issue():
-            issue = selected_issue()
-            if not issue:
-                return
-            if self._go_to_issue_image(issue, dataset_dir):
-                status_label.setText("Opened selected issue in the main viewer.")
-
-        def go_to_issue_at_row(row):
-            select_table_row(row)
-
-        def go_to_next_issue():
-            if table.rowCount() <= 0:
-                status_label.setText("No visible issues to review.")
-                return
-            next_row = table.currentRow() + 1
-            if next_row >= table.rowCount():
-                next_row = 0
-            go_to_issue_at_row(next_row)
-
-        def go_to_previous_issue():
-            if table.rowCount() <= 0:
-                status_label.setText("No visible issues to review.")
-                return
-            previous_row = table.currentRow() - 1
-            if previous_row < 0:
-                previous_row = table.rowCount() - 1
-            go_to_issue_at_row(previous_row)
-
         def review_selected_issue_in_labeler():
             issue = selected_issue()
-            if not issue:
+            if not isinstance(issue, dict):
                 return
             self._open_health_review_queue(
                 issue,
@@ -10094,98 +10216,84 @@ class ScanAnnotations(QObject):
                 source_dialog=dialog,
             )
 
-        def save_review_state():
-            try:
-                self._save_reviewed_issue_keys(dataset_dir, reviewed_issue_keys)
-            except Exception as e:
-                QMessageBox.warning(dialog, "Review State", f"Could not save reviewed state:\n{e}")
-
         def reload_external_review_state():
+            selected = selected_issue()
+            selected_key = issue_key(selected) if isinstance(selected, dict) else ""
             reviewed_issue_keys.clear()
-            reviewed_issue_keys.update(self._load_reviewed_issue_keys(dataset_dir))
-            populate_table()
-
-        def mark_selected_reviewed():
-            issue = selected_issue()
-            if not issue:
-                return
-            reviewed_issue_keys.add(issue_key(issue))
-            save_review_state()
-            populate_table()
-            status_label.setText("Marked selected issue as reviewed.")
-
-        def mark_current_image_reviewed():
-            active_image = current_image_path()
-            if not active_image:
-                status_label.setText("No current image is open in the main viewer.")
-                return
-
-            added = 0
-            for issue in issues:
-                if self._issue_matches_image(issue, active_image, dataset_dir):
-                    key = issue_key(issue)
-                    if key not in reviewed_issue_keys:
-                        reviewed_issue_keys.add(key)
-                        added += 1
-
-            save_review_state()
-            populate_table()
-            status_label.setText(f"Marked {added} issue(s) for the current image as reviewed.")
+            reviewed_issue_keys.update(
+                self._load_reviewed_issue_keys(dataset_dir)
+            )
+            populate_table(selected_key)
 
         def sync_duplicate_iou(value):
-            try:
-                value = float(value)
-                QSettings("UltraDarkFusion", "HealthCheck").setValue("duplicate_iou_threshold", value)
-                parent_spin = getattr(self.parent, "dedupe_iou_spinbox", None)
-                if parent_spin is not None:
-                    blocked = parent_spin.blockSignals(True)
-                    parent_spin.setValue(value)
-                    parent_spin.blockSignals(blocked)
-            except Exception as e:
-                logger.warning(f"Could not save duplicate IoU threshold: {e}")
+            value = float(value)
+            QSettings("UltraDarkFusion", "HealthCheck").setValue(
+                "duplicate_iou_threshold", value
+            )
+            parent_spin = getattr(self.parent, "dedupe_iou_spinbox", None)
+            if parent_spin is not None:
+                blocked = parent_spin.blockSignals(True)
+                parent_spin.setValue(value)
+                parent_spin.blockSignals(blocked)
 
         def set_image_quality_metrics(enabled):
             enabled = bool(enabled)
-            if hasattr(self.parent, "image_quality_analysis_enabled"):
-                self.parent.image_quality_analysis_enabled = enabled
+            self.parent.image_quality_analysis_enabled = enabled
             parent_checkbox = getattr(self.parent, "image_quality_checkbox", None)
             if parent_checkbox is not None:
                 blocked = parent_checkbox.blockSignals(True)
                 parent_checkbox.setChecked(enabled)
                 parent_checkbox.blockSignals(blocked)
-            status_label.setText(
-                "Image quality metrics enabled for statistics."
+
+        def set_visual_outlier_scan(enabled):
+            QSettings("UltraDarkFusion", "HealthCheck").setValue(
+                "visual_outliers_enabled", bool(enabled)
+            )
+            visual_outlier_threshold.setEnabled(bool(enabled))
+            visual_outlier_note.setText(
+                "Enabled for the next folder scan"
                 if enabled
-                else "Image quality metrics disabled for statistics."
+                else "Disabled for the next folder scan"
+            )
+
+        def set_visual_outlier_threshold(value):
+            QSettings("UltraDarkFusion", "HealthCheck").setValue(
+                "visual_outlier_threshold", float(value)
             )
 
         def refresh_full_scan():
             sync_duplicate_iou(duplicate_iou_spin.value())
             dialog.close()
-            self.scan_annotations()
+            self.base_directory = dataset_dir
+            self.scan_annotations(dataset_dir)
 
         def remove_duplicates_from_report():
             if not hasattr(self.parent, "deduplicate_dataset"):
-                QMessageBox.warning(dialog, "Remove Duplicates", "Duplicate cleanup is not available.")
+                QMessageBox.warning(
+                    dialog,
+                    "Remove Duplicate Labels",
+                    "Duplicate cleanup is not available.",
+                )
                 return
-
             iou_threshold = float(duplicate_iou_spin.value())
             reply = QMessageBox.question(
                 dialog,
                 "Remove Duplicate Labels",
                 (
-                    f"Remove duplicate boxes, segmentations, and OBBs using IoU {iou_threshold:.2f}?\n\n"
-                    "The dataset will be rescanned afterward."
+                    f"Remove duplicate boxes, segmentations, and OBBs using "
+                    f"IoU {iou_threshold:.2f}?\n\n"
+                    "The selected dataset folder will be rescanned afterward."
                 ),
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No,
             )
             if reply != QMessageBox.Yes:
                 return
-
             sync_duplicate_iou(iou_threshold)
             sam_verify = bool(sam_verify_check.isChecked())
-            QSettings("UltraDarkFusion", "HealthCheck").setValue("sam_duplicate_verify", sam_verify)
+            QSettings("UltraDarkFusion", "HealthCheck").setValue(
+                "sam_duplicate_verify", sam_verify
+            )
             QApplication.setOverrideCursor(Qt.WaitCursor)
             try:
                 result = self.parent.deduplicate_dataset(
@@ -10195,22 +10303,14 @@ class ScanAnnotations(QObject):
                 )
             finally:
                 QApplication.restoreOverrideCursor()
-
-            if getattr(self.parent, "current_file", None) and os.path.exists(self.parent.current_file):
-                self.parent.display_image(self.parent.current_file, rebuild_preview=False)
-
             QMessageBox.information(
                 dialog,
-                "Remove Duplicate Labels",
+                "Duplicate Cleanup Complete",
                 (
-                    f"Cleanup complete.\n\n"
                     f"Files checked: {int(result.get('files_scanned', 0))}\n"
                     f"Files changed: {int(result.get('files_changed', 0))}\n"
-                    f"Duplicate labels removed: {int(result.get('labels_removed', 0))}\n"
-                    f"Duplicate IoU: {iou_threshold:.2f}\n\n"
-                    f"SAM verified pairs: {int(result.get('sam_pairs_checked', 0))}\n"
-                    f"SAM kept overlaps: {int(result.get('sam_pairs_kept', 0))}\n\n"
-                    "Refreshing the scan now."
+                    f"Duplicate labels removed: {int(result.get('labels_removed', 0))}\n\n"
+                    "Refreshing Dataset Analysis now."
                 ),
             )
             refresh_full_scan()
@@ -10219,221 +10319,48 @@ class ScanAnnotations(QObject):
             if hasattr(self.parent, "create_plot"):
                 self.parent.create_plot(plot_type)
 
-        def refresh_current_image_issues():
-            active_image = current_image_path()
-            if not active_image or not os.path.exists(active_image):
-                status_label.setText("No current image is open in the main viewer.")
-                return
-
-            try:
-                scene = getattr(self.parent, "screen_view", None).scene() if hasattr(self.parent, "screen_view") else None
-                if scene is not None and hasattr(self.parent, "save_bounding_boxes"):
-                    self.parent.save_bounding_boxes(active_image, scene.width(), scene.height(), log_save=False)
-            except Exception as e:
-                logger.warning(f"Could not save current image before refresh: {e}")
-
-            old_keys = {
-                issue_key(issue)
-                for issue in issues
-                if self._issue_matches_image(issue, active_image, dataset_dir)
-            }
-            new_issues = self._scan_single_image_issues(active_image, dataset_dir)
-
-            issues[:] = [
-                issue for issue in issues
-                if not self._issue_matches_image(issue, active_image, dataset_dir)
-            ] + new_issues
-            report["issues"] = issues
-            refresh_summary_ui()
-            refresh_issue_type_filter()
-
-            for key in old_keys:
-                if not any(issue_key(issue) == key for issue in issues):
-                    reviewed_issue_keys.discard(key)
-            save_review_state()
-
-            try:
-                write_json_file_atomic(report_path, report)
-                self.scan_report = report
-            except Exception as e:
-                QMessageBox.warning(dialog, "Refresh Failed", f"Could not save refreshed report:\n{e}")
-
-            populate_table()
-            status_label.setText(
-                f"Refreshed current image: {os.path.basename(active_image)} "
-                f"({len(new_issues)} issue row(s))."
-            )
-
-        def open_statistics():
-            if hasattr(self.parent, "display_stats"):
-                self.parent.display_stats()
-
-        def open_selected_issue_folder():
-            issue = selected_issue()
-            if issue:
-                self._open_issue_folder(issue, dataset_dir)
-
-        def move_selected_issue_to_review():
-            issue = selected_issue()
-            if not issue:
-                return
-
-            source_path = self._issue_source_path(issue, dataset_dir)
-            image_path = self._matching_image_for_issue(issue, dataset_dir)
-            target_name = os.path.basename(image_path or source_path or "selected file")
-            reply = QMessageBox.question(
-                dialog,
-                "Move to Review Folder",
-                f"Move {target_name} and its matching label file to .darkfusion/review?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
-            )
-            if reply != QMessageBox.Yes:
-                return
-
-            try:
-                moved_files, destination_dir = self._move_issue_to_review_folder(issue, dataset_dir)
-            except Exception as e:
-                QMessageBox.critical(dialog, "Move Failed", f"Could not move the selected issue:\n{e}")
-                return
-
-            if not moved_files:
-                QMessageBox.information(dialog, "Move to Review Folder", "No existing file was found to move.")
-                return
-
-            moved_sources = {self._normalize_path(source) for source, _destination in moved_files}
-            issues[:] = [
-                existing_issue for existing_issue in issues
-                if self._normalize_path(self._issue_source_path(existing_issue, dataset_dir)) not in moved_sources
-            ]
-            report["issues"] = issues
-            refresh_summary_ui()
-            refresh_issue_type_filter()
-            try:
-                write_json_file_atomic(report_path, report)
-                self.scan_report = report
-            except Exception as e:
-                logger.warning(f"Could not save report after moving issue to review: {e}")
-            populate_table()
-            status_label.setText(
-                f"Moved {len(moved_files)} file(s) to {destination_dir}. "
-                "Refresh Dataset Analysis when you want updated totals."
-            )
-
-        def delete_all_filtered_issues():
-            matching_issues = list(filtered_issues_for_bulk_delete)
-            files_to_delete = deletable_files_for_issues(matching_issues)
-            if not files_to_delete:
-                QMessageBox.information(
-                    dialog,
-                    "Delete All Filtered",
-                    "The current filters do not match any existing image or label files.",
-                )
-                return
-
-            image_count = sum(
-                1 for path in files_to_delete
-                if os.path.splitext(path)[1].lower() in self.valid_image_extensions
-            )
-            label_count = sum(
-                1 for path in files_to_delete
-                if os.path.splitext(path)[1].lower() == ".txt"
-            )
-            reply = QMessageBox.warning(
-                dialog,
-                "Delete All Filtered Files",
-                (
-                    f"Permanently delete every image and label matched by the current filters?\n\n"
-                    f"Matching issues: {len(matching_issues):,}\n"
-                    f"Images: {image_count:,}\n"
-                    f"Labels: {label_count:,}\n"
-                    f"Unique files: {len(files_to_delete):,}\n\n"
-                    "This uses all filtered results, including rows beyond the first 1,000 shown. "
-                    "This action cannot be undone."
-                ),
-                QMessageBox.Yes | QMessageBox.Cancel,
-                QMessageBox.Cancel,
-            )
-            if reply != QMessageBox.Yes:
-                return
-
-            deleted_files = []
-            failed_files = []
-            # Remove labels before images so a partially failed cleanup is
-            # less likely to leave a label without its image.
-            ordered_files = sorted(
-                files_to_delete,
-                key=lambda path: (
-                    os.path.splitext(path)[1].lower() in self.valid_image_extensions,
-                    path.lower(),
-                ),
-            )
-            for file_path in ordered_files:
-                try:
-                    os.remove(file_path)
-                    deleted_files.append(file_path)
-                except OSError as e:
-                    failed_files.append((file_path, str(e)))
-
-            if deleted_files:
-                self._refresh_parent_file_lists_after_move(deleted_files)
-
-            message = f"Deleted {len(deleted_files):,} file(s)."
-            if failed_files:
-                message += (
-                    f"\n\nCould not delete {len(failed_files):,} file(s). "
-                    "They will remain in the refreshed report."
-                )
-                QMessageBox.warning(dialog, "Filtered Cleanup Finished", message)
-            else:
-                QMessageBox.information(dialog, "Filtered Cleanup Finished", message)
-
-            refresh_full_scan()
-
-        severity_filter.currentIndexChanged.connect(lambda _index: populate_table())
+        severity_filter.currentIndexChanged.connect(
+            lambda _index: populate_table()
+        )
         issue_filter.currentIndexChanged.connect(lambda _index: populate_table())
         search_filter.textChanged.connect(lambda _text: populate_table())
-        hide_reviewed_checkbox.stateChanged.connect(lambda _state: populate_table())
-        current_image_checkbox.stateChanged.connect(lambda _state: populate_table())
+        hide_reviewed_checkbox.stateChanged.connect(
+            lambda _state: populate_table()
+        )
+        current_image_checkbox.stateChanged.connect(
+            lambda _state: populate_table()
+        )
         clear_filters_btn.clicked.connect(lambda _checked=False: clear_filters())
-        table.itemSelectionChanged.connect(display_selected_health_issue)
-        table.itemDoubleClicked.connect(lambda _item: review_selected_issue_in_labeler())
+        table.itemSelectionChanged.connect(update_review_button)
+        table.itemDoubleClicked.connect(
+            lambda _item: review_selected_issue_in_labeler()
+        )
         duplicate_iou_spin.valueChanged.connect(sync_duplicate_iou)
         image_quality_scan_check.toggled.connect(set_image_quality_metrics)
+        visual_outliers_check.toggled.connect(set_visual_outlier_scan)
+        visual_outlier_threshold.valueChanged.connect(
+            set_visual_outlier_threshold
+        )
         refresh_scan_btn.clicked.connect(refresh_full_scan)
         dedupe_btn.clicked.connect(remove_duplicates_from_report)
-        stats_btn.clicked.connect(open_statistics)
-        histogram_btn.clicked.connect(lambda _checked=False: open_plot("histogram"))
+        stats_btn.clicked.connect(
+            lambda _checked=False: self.parent.display_stats()
+            if hasattr(self.parent, "display_stats")
+            else None
+        )
+        histogram_btn.clicked.connect(
+            lambda _checked=False: open_plot("histogram")
+        )
         bar_btn.clicked.connect(lambda _checked=False: open_plot("bar"))
         scatter_btn.clicked.connect(lambda _checked=False: open_plot("scatter"))
-
-        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
-        previous_issue_btn = buttons.addButton("Previous Issue", QtWidgets.QDialogButtonBox.ActionRole)
-        next_issue_btn = buttons.addButton("Next Issue", QtWidgets.QDialogButtonBox.ActionRole)
-        go_to_image_btn = buttons.addButton("Go to Image", QtWidgets.QDialogButtonBox.ActionRole)
-        review_in_labeler_btn = buttons.addButton("Review in Labeler", QtWidgets.QDialogButtonBox.ActionRole)
-        refresh_current_btn = buttons.addButton("Refresh Current Image", QtWidgets.QDialogButtonBox.ActionRole)
-        mark_reviewed_btn = buttons.addButton("Mark Reviewed", QtWidgets.QDialogButtonBox.ActionRole)
-        mark_image_reviewed_btn = buttons.addButton("Mark Image Reviewed", QtWidgets.QDialogButtonBox.ActionRole)
-        open_file_folder_btn = buttons.addButton("Open File Folder", QtWidgets.QDialogButtonBox.ActionRole)
-        move_to_review_btn = buttons.addButton("Move to Review Folder", QtWidgets.QDialogButtonBox.ActionRole)
-        delete_all_filtered_btn = buttons.addButton("Delete All Filtered", QtWidgets.QDialogButtonBox.ActionRole)
-        delete_all_filtered_button_holder[0] = delete_all_filtered_btn
-        open_folder_btn = buttons.addButton("Open Report Folder", QtWidgets.QDialogButtonBox.ActionRole)
-        previous_issue_btn.clicked.connect(go_to_previous_issue)
-        next_issue_btn.clicked.connect(go_to_next_issue)
-        go_to_image_btn.clicked.connect(go_to_selected_issue)
         review_in_labeler_btn.clicked.connect(review_selected_issue_in_labeler)
-        refresh_current_btn.clicked.connect(refresh_current_image_issues)
-        mark_reviewed_btn.clicked.connect(mark_selected_reviewed)
-        mark_image_reviewed_btn.clicked.connect(mark_current_image_reviewed)
-        open_file_folder_btn.clicked.connect(open_selected_issue_folder)
-        move_to_review_btn.clicked.connect(move_selected_issue_to_review)
-        delete_all_filtered_btn.clicked.connect(delete_all_filtered_issues)
-        open_folder_btn.clicked.connect(lambda: self._open_report_folder(report_path))
+        open_folder_btn.clicked.connect(
+            lambda _checked=False: self._open_report_folder(report_path)
+        )
         buttons.rejected.connect(dialog.reject)
-        layout.addWidget(buttons)
+
         dialog._darkfusion_refresh_health_review = reload_external_review_state
+        set_visual_outlier_scan(visual_outliers_check.isChecked())
         populate_table()
         dialog.show()
         dialog.raise_()
@@ -10490,7 +10417,7 @@ class ScanAnnotations(QObject):
         self.valid_classes, _ = self._load_classes(dataset_dir)
         QMessageBox.information(self.parent, "Classes Loaded", f"Using:\n{canonical_classes}")
 
-    def scan_annotations(self):
+    def scan_annotations(self, dataset_dir=None):
         active_worker = getattr(self, "_analysis_worker", None)
         if active_worker is not None:
             try:
@@ -10501,7 +10428,16 @@ class ScanAnnotations(QObject):
             except RuntimeError:
                 self._analysis_worker = None
 
-        dataset_dir = self._dataset_directory()
+        requested_dataset_dir = (
+            os.fspath(dataset_dir)
+            if isinstance(dataset_dir, (str, bytes, os.PathLike))
+            else ""
+        )
+        dataset_dir = (
+            self._normalize_path(requested_dataset_dir)
+            if requested_dataset_dir and os.path.isdir(requested_dataset_dir)
+            else self._dataset_directory()
+        )
         if not dataset_dir:
             QMessageBox.information(self.parent, "Dataset Analysis", "No dataset folder selected.")
             return
@@ -10550,6 +10486,17 @@ class ScanAnnotations(QObject):
         elif expected_annotation_family == "obb":
             polygon_preference = "obb"
 
+        health_settings = QSettings("UltraDarkFusion", "HealthCheck")
+        visual_outliers_enabled = str(
+            health_settings.value("visual_outliers_enabled", "false")
+        ).lower() in ("1", "true", "yes")
+        try:
+            visual_outlier_threshold = float(
+                health_settings.value("visual_outlier_threshold", 0.45)
+            )
+        except (TypeError, ValueError):
+            visual_outlier_threshold = 0.45
+
         scan_context = {
             "valid_classes": self.valid_classes,
             "expected_keypoint_count": self.expected_keypoint_count,
@@ -10558,14 +10505,10 @@ class ScanAnnotations(QObject):
             "polygon_preference": polygon_preference,
             "expected_annotation_family": expected_annotation_family,
             "duplicate_iou_threshold": self._duplicate_iou_threshold(),
-            "current_image_directory": self._normalize_path(
-                getattr(self.parent, "image_directory", "") or ""
+            "visual_outliers_enabled": visual_outliers_enabled,
+            "visual_outlier_threshold": max(
+                0.20, min(0.90, visual_outlier_threshold)
             ),
-            "open_image_files": list(getattr(self.parent, "image_files", []) or []),
-            "placeholder_paths": {
-                self._normalize_path("styles/images/default.png"),
-                self._normalize_path("styles/images/default_temp.png"),
-            },
         }
 
         worker = DatasetAnalysisWorker(
@@ -10584,7 +10527,7 @@ class ScanAnnotations(QObject):
         worker.finished.connect(worker.deleteLater)
 
         self._set_scan_controls_running(True)
-        self._set_scan_status("Starting Dataset Analysis...")
+        self._set_scan_status(f"Scanning dataset folder: {dataset_dir}")
         worker.start()
 
     def _run_scan_background(
@@ -10607,6 +10550,12 @@ class ScanAnnotations(QObject):
         self._scan_polygon_preference_override = scan_context.get("polygon_preference")
         self._scan_expected_annotation_family_override = scan_context.get("expected_annotation_family")
         self._scan_duplicate_iou_override = scan_context.get("duplicate_iou_threshold")
+        self._scan_visual_outliers_override = bool(
+            scan_context.get("visual_outliers_enabled", False)
+        )
+        self._scan_visual_outlier_threshold_override = scan_context.get(
+            "visual_outlier_threshold", 0.45
+        )
         self._scan_context_active = True
 
         try:
@@ -10652,7 +10601,7 @@ class ScanAnnotations(QObject):
                         "Image has no matching label file.",
                         suggestion=(
                             "Create an empty label file for an intentional negative image, or open "
-                            "the image in Dataset Review and label its objects."
+                            "the image from Dataset Analysis in Label Maker and label its objects."
                         ),
                     ))
 
@@ -10673,6 +10622,14 @@ class ScanAnnotations(QObject):
                 return None
 
             self._add_dataset_annotation_type_issues()
+            if self._scan_visual_outliers_override:
+                progress_callback(
+                    0, max(1, len(image_files)),
+                    "Checking within-class visual consistency...",
+                )
+                self._scan_visual_outliers(should_cancel, progress_callback)
+                if should_cancel():
+                    return None
             self._scan_orphan_json_files(dataset_dir, image_map)
             progress_callback(scan_total, scan_total, "Writing analysis report...")
 
@@ -10689,30 +10646,14 @@ class ScanAnnotations(QObject):
             self._scan_polygon_preference_override = None
             self._scan_expected_annotation_family_override = None
             self._scan_duplicate_iou_override = None
+            self._scan_visual_outliers_override = None
+            self._scan_visual_outlier_threshold_override = None
             self._scan_context_active = False
 
     def _background_image_files(self, dataset_dir, scan_context):
         dataset_dir = self._normalize_path(dataset_dir)
-        current_dir = self._normalize_path(scan_context.get("current_image_directory", ""))
-        placeholder_paths = {
-            self._normalize_path(path)
-            for path in scan_context.get("placeholder_paths", set())
-            if path
-        }
-
-        if current_dir == dataset_dir:
-            open_files = []
-            for image_file in scan_context.get("open_image_files", []) or []:
-                if not image_file:
-                    continue
-                normalized = self._normalize_path(image_file)
-                if normalized in placeholder_paths:
-                    continue
-                if os.path.isfile(normalized) and self._normalize_path(os.path.dirname(normalized)) == dataset_dir:
-                    open_files.append(normalized)
-            if open_files:
-                return sorted(dict.fromkeys(open_files))
-
+        # Read the explicit dataset folder on every scan.  Cached/filtered
+        # labeler lists are navigation state, not a reliable dataset manifest.
         image_files = []
         with os.scandir(dataset_dir) as entries:
             for entry in entries:
@@ -12578,6 +12519,26 @@ class AdjacentPropagationWorker(QThread):
                 "message": f"Propagation failed: {e}",
                 "source_file": self.source_file,
                 "target_file": self.target_file,
+            }
+        self.completed.emit(result)
+
+
+class Sam3PropagationWarmupWorker(QThread):
+    """Load and prime the propagation-only SAM3 tracker off the UI thread."""
+    completed = pyqtSignal(object)
+
+    def __init__(self, owner, parent=None):
+        super().__init__(parent)
+        self.owner = owner
+
+    def run(self):
+        try:
+            result = self.owner._warm_sam3_propagation_runtime()
+        except Exception as e:
+            logger.exception("SAM3 propagation warm-up failed: %s", e)
+            result = {
+                "ready": False,
+                "message": f"SAM3 propagation tracker could not be prepared: {e}",
             }
         self.completed.emit(result)
 
@@ -15789,6 +15750,8 @@ class ReviewFilterWorker(QThread):
                         True,
                     )
                     return
+                if index == total or index % 500 == 0:
+                    self.progress.emit(self.request_id, index, total)
 
                 normalized_image = self._normalize_path(img_file)
                 if not normalized_image or normalized_image in self.placeholder_paths:
@@ -15804,9 +15767,6 @@ class ReviewFilterWorker(QThread):
                         filtered_files.append(normalized_image)
                 elif self.filter_index in label_info.get("classes", set()):
                     filtered_files.append(normalized_image)
-
-                if index == total or index % 500 == 0:
-                    self.progress.emit(self.request_id, index, total)
 
             self.completed.emit(
                 self.request_id,
@@ -15875,6 +15835,306 @@ class ReviewFilterWorker(QThread):
             return os.path.abspath(str(path)).replace("\\", "/")
         except Exception:
             return str(path).replace("\\", "/")
+
+
+class ReviewSimilarityWorker(QThread):
+    """CPU-only annotation/context matching for the normal Review filter."""
+
+    progress = pyqtSignal(int, int, int)
+    completed = pyqtSignal(int, object, object, bool)
+    failed = pyqtSignal(int, str)
+
+    def __init__(
+        self,
+        request_id,
+        image_files,
+        label_files,
+        reference,
+        threshold,
+        polygon_preference=None,
+        appearance_similarity=None,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.request_id = int(request_id)
+        self.image_files = list(image_files or [])
+        self.label_files = dict(label_files or {})
+        self.reference = dict(reference or {})
+        self.threshold = max(0.0, min(1.0, float(threshold)))
+        self.polygon_preference = polygon_preference
+        self.appearance_similarity = appearance_similarity
+        self._cancel_requested = False
+
+    def cancel(self):
+        self._cancel_requested = True
+
+    @staticmethod
+    def _normalize_path(path):
+        try:
+            return os.path.abspath(str(path or "")).replace("\\", "/")
+        except Exception:
+            return str(path or "").replace("\\", "/")
+
+    @staticmethod
+    def _bbox_bounds(bbox):
+        if bbox is None:
+            return None
+        values = list(getattr(bbox, "segmentation", []) or getattr(bbox, "obb", []) or [])
+        if len(values) >= 6 and len(values) % 2 == 0:
+            xs = [float(values[index]) for index in range(0, len(values), 2)]
+            ys = [float(values[index]) for index in range(1, len(values), 2)]
+            bounds = (min(xs), min(ys), max(xs), max(ys))
+        else:
+            x_center = float(getattr(bbox, "x_center", 0.0))
+            y_center = float(getattr(bbox, "y_center", 0.0))
+            width = float(getattr(bbox, "width", 0.0))
+            height = float(getattr(bbox, "height", 0.0))
+            bounds = (
+                x_center - width / 2.0,
+                y_center - height / 2.0,
+                x_center + width / 2.0,
+                y_center + height / 2.0,
+            )
+        x1, y1, x2, y2 = bounds
+        x1, x2 = sorted((max(0.0, min(1.0, x1)), max(0.0, min(1.0, x2))))
+        y1, y2 = sorted((max(0.0, min(1.0, y1)), max(0.0, min(1.0, y2))))
+        return (x1, y1, x2, y2) if x2 > x1 and y2 > y1 else None
+
+    @staticmethod
+    def _crop(image, bounds, scale, output_size=72):
+        height, width = image.shape[:2]
+        x1, y1, x2, y2 = bounds
+        cx = (x1 + x2) * 0.5 * width
+        cy = (y1 + y2) * 0.5 * height
+        crop_width = max(2.0, (x2 - x1) * width * float(scale))
+        crop_height = max(2.0, (y2 - y1) * height * float(scale))
+        px1 = max(0, int(math.floor(cx - crop_width / 2.0)))
+        py1 = max(0, int(math.floor(cy - crop_height / 2.0)))
+        px2 = min(width, int(math.ceil(cx + crop_width / 2.0)))
+        py2 = min(height, int(math.ceil(cy + crop_height / 2.0)))
+        if px2 <= px1 or py2 <= py1:
+            return None
+        crop = image[py1:py2, px1:px2]
+        return cv2.resize(crop, (output_size, output_size), interpolation=cv2.INTER_AREA)
+
+    def _pair_similarity(self, source, candidate):
+        if source is None or candidate is None:
+            return 0.0
+        try:
+            source = np.asarray(source)
+            candidate = np.asarray(candidate)
+            if source.shape != candidate.shape:
+                return 0.0
+            mask = np.ones(source.shape[:2], dtype=np.uint8)
+            histogram_score = (
+                float(self.appearance_similarity(source, candidate, mask, mask))
+                if callable(self.appearance_similarity)
+                else 0.0
+            )
+            source_gray = cv2.cvtColor(source, cv2.COLOR_BGR2GRAY)
+            candidate_gray = cv2.cvtColor(candidate, cv2.COLOR_BGR2GRAY)
+            if float(source_gray.std()) < 1.0 or float(candidate_gray.std()) < 1.0:
+                correlation = 1.0 - abs(float(source_gray.mean()) - float(candidate_gray.mean())) / 255.0
+            else:
+                correlation = float(
+                    cv2.matchTemplate(source_gray, candidate_gray, cv2.TM_CCOEFF_NORMED)[0, 0]
+                )
+                correlation = max(0.0, min(1.0, correlation))
+            layout_score = 1.0 - float(
+                np.mean(np.abs(source.astype(np.float32) - candidate.astype(np.float32)))
+            ) / 255.0
+            difference = np.max(
+                np.abs(source.astype(np.float32) - candidate.astype(np.float32)),
+                axis=2,
+            )
+            grid_height = max(1, difference.shape[0] // 8)
+            grid_width = max(1, difference.shape[1] // 8)
+            trimmed = difference[:grid_height * 8, :grid_width * 8]
+            difference_grid = trimmed.reshape(8, grid_height, 8, grid_width).max(axis=(1, 3))
+            strongest_cells = np.sort(difference_grid.reshape(-1))[-4:]
+            local_detail_score = 1.0 - float(np.mean(strongest_cells)) / 255.0
+            return max(
+                0.0,
+                min(
+                    1.0,
+                    histogram_score * 0.32
+                    + correlation * 0.28
+                    + layout_score * 0.20
+                    + local_detail_score * 0.20,
+                ),
+            )
+        except Exception:
+            return 0.0
+
+    def _descriptor(self, image, bounds):
+        tight = self._crop(image, bounds, 1.15, 72)
+        return {
+            "tight": tight,
+            "context": self._crop(image, bounds, 4.0, 96),
+            "aspect": max(0.01, (bounds[2] - bounds[0]) / max(0.00001, bounds[3] - bounds[1])),
+            "pixel_aspect": max(
+                0.01, (bounds[2] - bounds[0]) * image.shape[1]
+                / max(0.00001, (bounds[3] - bounds[1]) * image.shape[0])
+            ),
+            "area": max(0.000001, (bounds[2] - bounds[0]) * (bounds[3] - bounds[1])),
+            "shape": self._shape_descriptor(tight),
+        }
+
+    @staticmethod
+    def _shape_descriptor(crop):
+        """Describe actual crop edges, independent of absolute color/brightness."""
+        if crop is None:
+            return None
+        # Equal-luminance colors can still outline a visible object. Use the
+        # strongest contrast channel so grayscale conversion cannot erase it.
+        channels = [cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), *cv2.split(crop)]
+        gray = max(channels, key=lambda channel: float(np.ptp(np.percentile(channel, (2, 98)))))
+        gray = cv2.GaussianBlur(gray, (5, 5), 1.0)
+        if float(gray.std()) < 2.0:
+            return None  # Flat crops and matching box dimensions are not shapes.
+        low, high = np.percentile(gray, (2, 98))
+        if high - low < 4.0:
+            return None
+        normalized = np.clip(
+            (gray.astype(np.float32) - low) * (255.0 / (high - low)), 0, 255
+        ).astype(np.uint8)
+        edges = cv2.Canny(normalized, 60, 140, L2gradient=True)
+        edges[:2, :] = edges[-2:, :] = 0
+        edges[:, :2] = edges[:, -2:] = 0
+        edge_count = int(np.count_nonzero(edges))
+        if edge_count < 24 or edge_count > edges.size * 0.30:
+            return None
+        # HOG retains spatial edge directions; a symmetric edge-distance score
+        # below tolerates small translations/box differences without a GPU model.
+        hog = cv2.HOGDescriptor((72, 72), (24, 24), (12, 12), (12, 12), 9)
+        feature = hog.compute(normalized).reshape(-1)
+        norm = float(np.linalg.norm(feature))
+        if norm < 1e-6:
+            return None
+        return {
+            "hog": feature / norm,
+            "edges": edges > 0,
+            "distance": cv2.distanceTransform(255 - edges, cv2.DIST_L2, 3),
+        }
+
+    @staticmethod
+    def _shape_similarity(source, candidate):
+        if source is None or candidate is None:
+            return 0.0
+        orientation = float(np.clip(np.dot(source["hog"], candidate["hog"]), 0.0, 1.0))
+        distance = 0.5 * (
+            float(np.mean(source["distance"][candidate["edges"]]))
+            + float(np.mean(candidate["distance"][source["edges"]]))
+        )
+        edge_agreement = math.exp(-max(0.0, distance - 1.25) / 4.0)
+        # Both the edge layout and orientation must agree. Matching color or
+        # background alone cannot qualify for this additional search path.
+        return orientation * edge_agreement
+
+    def _descriptor_scores(self, source, candidate):
+        tight = self._pair_similarity(source["tight"], candidate["tight"])
+        context = self._pair_similarity(source["context"], candidate["context"])
+        aspect_ratio = min(source["aspect"], candidate["aspect"]) / max(
+            source["aspect"], candidate["aspect"]
+        )
+        area_ratio = min(source["area"], candidate["area"]) / max(
+            source["area"], candidate["area"]
+        )
+        geometry = aspect_ratio * 0.70 + math.sqrt(area_ratio) * 0.30
+        appearance = tight * 0.50 + context * 0.45 + geometry * 0.05
+        shape = self._shape_similarity(source["shape"], candidate["shape"])
+        pixel_aspect_ratio = min(source["pixel_aspect"], candidate["pixel_aspect"]) / max(
+            source["pixel_aspect"], candidate["pixel_aspect"]
+        )
+        # Shape can recover color/context/scale variants at lower thresholds.
+        # Keep high thresholds stricter by requiring appearance agreement too.
+        shape_match = shape * math.sqrt(pixel_aspect_ratio) * (0.80 + 0.20 * appearance)
+        return {
+            "appearance": max(0.0, min(1.0, appearance)),
+            "shape": max(0.0, min(1.0, shape_match)),
+        }
+
+    def _descriptor_similarity(self, source, candidate):
+        return max(self._descriptor_scores(source, candidate).values())
+
+    def _parse_bbox(self, line):
+        try:
+            return BoundingBox.from_str(
+                str(line or "").strip(),
+                preferred_polygon_type=self.polygon_preference,
+            )
+        except Exception:
+            return None
+
+    def run(self):
+        try:
+            source_image_path = self._normalize_path(self.reference.get("image_file", ""))
+            source_line = str(self.reference.get("label_text", "") or "").strip()
+            source_bbox = self._parse_bbox(source_line)
+            source_bounds = self._bbox_bounds(source_bbox)
+            source_image = cv2.imread(source_image_path, cv2.IMREAD_COLOR)
+            if source_image is None or source_bounds is None:
+                raise ValueError("The selected annotation could not be read for similarity matching.")
+            source_descriptor = self._descriptor(source_image, source_bounds)
+            source_class = int(getattr(source_bbox, "class_id", -1))
+
+            matches = []
+            total = len(self.image_files)
+            self.progress.emit(self.request_id, 0, total)
+            for image_number, image_file in enumerate(self.image_files, start=1):
+                if self._cancel_requested:
+                    self.completed.emit(self.request_id, [], [], True)
+                    return
+                if image_number == total or image_number % 50 == 0:
+                    self.progress.emit(self.request_id, image_number, total)
+                image_file = self._normalize_path(image_file)
+                label_file = self._normalize_path(
+                    self.label_files.get(image_file) or os.path.splitext(image_file)[0] + ".txt"
+                )
+                if not os.path.isfile(label_file):
+                    continue
+                try:
+                    with open(label_file, "r", encoding="utf-8", errors="ignore") as handle:
+                        lines = [line.strip() for line in handle if line.strip()]
+                except OSError:
+                    continue
+                candidate_rows = []
+                for line_index, line in enumerate(lines):
+                    bbox = self._parse_bbox(line)
+                    if bbox is not None and int(getattr(bbox, "class_id", -2)) == source_class:
+                        bounds = self._bbox_bounds(bbox)
+                        if bounds is not None:
+                            candidate_rows.append((line_index, line, bounds))
+                if candidate_rows:
+                    image = cv2.imread(image_file, cv2.IMREAD_COLOR)
+                    if image is not None:
+                        for line_index, line, bounds in candidate_rows:
+                            scores = self._descriptor_scores(
+                                source_descriptor,
+                                self._descriptor(image, bounds),
+                            )
+                            match_basis = max(scores, key=scores.get)
+                            score = scores[match_basis]
+                            if score + 1e-9 >= self.threshold:
+                                matches.append({
+                                    "image_file": image_file,
+                                    "label_file": label_file,
+                                    "line_index": int(line_index),
+                                    "label_text": line,
+                                    "class_id": source_class,
+                                    "score": float(score),
+                                    "match_basis": match_basis,
+                                })
+            matched_images = []
+            seen = set()
+            for record in matches:
+                image_file = record["image_file"]
+                if image_file not in seen:
+                    seen.add(image_file)
+                    matched_images.append(image_file)
+            self.completed.emit(self.request_id, matched_images, matches, False)
+        except Exception as error:
+            self.failed.emit(self.request_id, str(error))
 
 
 class BulkMoveWorker(QThread):
@@ -18008,27 +18268,34 @@ class QLabelInfoLogHandler(logging.Handler):
             logger.debug(f"Log handler error: {e}")
 
 
-class CudaMonitorDialog(QtWidgets.QDialog):
+class SystemMonitorDialog(QtWidgets.QDialog):
     def __init__(self, main_window):
         super().__init__(main_window)
         self.main_window = main_window
         self._closing_for_cleanup = False
         self.tiles = {}
 
-        self.setObjectName("cudaMonitorDialog")
-        self.setWindowTitle("CUDA Labeling Monitor")
+        self.setObjectName("systemMonitorDialog")
+        self.setWindowTitle("System Monitor")
         self.setWindowModality(Qt.NonModal)
-        self.resize(760, 520)
-        self.setMinimumSize(620, 420)
+        self.resize(780, 430)
+        self.setMinimumSize(680, 390)
         parent_style = main_window.styleSheet() if main_window is not None else ""
         extra = """
-QDialog#cudaMonitorDialog {
+QDialog#systemMonitorDialog {
     background-color: #0d1117;
+}
+QDialog#systemMonitorDialog QLabel {
+    background: transparent;
+    border: none;
+    padding: 0;
+    margin: 0;
+    min-height: 0;
 }
 QFrame#monitorTile {
     background-color: #111820;
     border: 1px solid #30363d;
-    border-radius: 8px;
+    border-radius: 6px;
 }
 QFrame#monitorTile[severity="warn"] {
     background-color: #1d1710;
@@ -18040,26 +18307,23 @@ QFrame#monitorTile[severity="danger"] {
 }
 QLabel#monitorHeader {
     color: #ffffff;
-    font-size: 15pt;
+    font-size: 12pt;
     font-weight: 700;
 }
-QLabel#monitorSubHeader {
-    color: #9aa4af;
-}
-QLabel#monitorAlert {
+QDialog#systemMonitorDialog QLabel#monitorAlert {
     border: 1px solid #30363d;
     border-radius: 6px;
-    padding: 8px 10px;
+    padding: 5px 7px;
     background-color: #111820;
     color: #c9d1d9;
     font-weight: 700;
 }
-QLabel#monitorAlert[severity="warn"] {
+QDialog#systemMonitorDialog QLabel#monitorAlert[severity="warn"] {
     background-color: #1d1710;
     border-color: #f0b45f;
     color: #f0b45f;
 }
-QLabel#monitorAlert[severity="danger"] {
+QDialog#systemMonitorDialog QLabel#monitorAlert[severity="danger"] {
     background-color: #241012;
     border-color: #f85149;
     color: #ffb3ad;
@@ -18070,17 +18334,19 @@ QLabel#tileTitle {
 }
 QLabel#tileValue {
     color: #ffffff;
-    font-size: 20pt;
+    font-size: 18pt;
     font-weight: 700;
 }
 QLabel#tileDetail {
     color: #c9d1d9;
+    font-size: 9pt;
 }
-QProgressBar {
+QDialog#systemMonitorDialog QProgressBar {
     background-color: #010409;
     border: 1px solid #30363d;
     border-radius: 5px;
-    height: 10px;
+    min-height: 5px;
+    max-height: 5px;
     text-align: center;
     color: transparent;
 }
@@ -18099,21 +18365,30 @@ QProgressBar[severity="danger"]::chunk {
 }
 """
         base = parent_style if parent_style else DARKFUSION_DIALOG_QSS
-        self.setStyleSheet(base + extra)
+        self._monitor_base_style = base + extra
+        self._monitor_font_scale = None
 
         main_layout = QtWidgets.QVBoxLayout(self)
-        main_layout.setContentsMargins(16, 14, 16, 14)
-        main_layout.setSpacing(12)
+        main_layout.setContentsMargins(10, 9, 10, 9)
+        main_layout.setSpacing(7)
 
         header_layout = QtWidgets.QHBoxLayout()
-        header_text = QtWidgets.QVBoxLayout()
-        title = QtWidgets.QLabel("CUDA Labeling Monitor")
+        title = QtWidgets.QLabel("System Monitor")
         title.setObjectName("monitorHeader")
-        subtitle = QtWidgets.QLabel("Live system load for labeling, auto-labeling, SAHI, and training.")
-        subtitle.setObjectName("monitorSubHeader")
-        subtitle.setWordWrap(True)
-        header_text.addWidget(title)
-        header_text.addWidget(subtitle)
+
+        text_size_label = QtWidgets.QLabel("Text size")
+        self.text_size_combo = QtWidgets.QComboBox()
+        self.text_size_combo.setObjectName("monitorTextSize")
+        self.text_size_combo.addItem("Auto", 0)
+        self.text_size_combo.addItem("Large", 125)
+        self.text_size_combo.addItem("Largest", 150)
+        saved_scale = getattr(main_window, "settings", {}).get("systemMonitorTextScale", 0)
+        saved_index = self.text_size_combo.findData(saved_scale)
+        self.text_size_combo.setCurrentIndex(max(0, saved_index))
+        self.text_size_combo.setToolTip(
+            "Auto enlarges text with the monitor window. Large and Largest use a fixed text size."
+        )
+        self.text_size_combo.currentIndexChanged.connect(self._save_text_size)
 
         self.keep_above_checkbox = QtWidgets.QCheckBox("Keep Above")
         self.keep_above_checkbox.setObjectName("keepMonitorAbove")
@@ -18124,7 +18399,9 @@ QProgressBar[severity="danger"]::chunk {
         close_button.setObjectName("monitorCloseButton")
         close_button.clicked.connect(self.close)
 
-        header_layout.addLayout(header_text, 1)
+        header_layout.addWidget(title, 1)
+        header_layout.addWidget(text_size_label)
+        header_layout.addWidget(self.text_size_combo)
         header_layout.addWidget(self.keep_above_checkbox)
         header_layout.addWidget(close_button)
         main_layout.addLayout(header_layout)
@@ -18136,48 +18413,88 @@ QProgressBar[severity="danger"]::chunk {
         main_layout.addWidget(self.alert_label)
 
         grid = QtWidgets.QGridLayout()
-        grid.setSpacing(10)
+        grid.setSpacing(7)
         main_layout.addLayout(grid, 1)
 
         tile_specs = [
-            ("cuda", "CUDA", 0, 0),
-            ("gpu", "GPU Load", 0, 1),
-            ("vram", "VRAM", 0, 2),
-            ("cpu", "CPU", 1, 0),
+            ("gpu", "GPU Load", 0, 0),
+            ("vram", "VRAM", 0, 1),
+            ("cpu", "CPU", 0, 2),
+            ("process", "DarkFusion RSS", 1, 0),
             ("ram", "RAM", 1, 1),
-            ("disk", "Dataset Drive", 1, 2),
-            ("process", "DarkFusion", 2, 0),
-            ("runtime", "Runtime", 2, 1),
-            ("logs", "Last Info", 2, 2),
+            ("disk", "Drive", 1, 2),
         ]
 
         for key, title_text, row, col in tile_specs:
             grid.addWidget(self._create_tile(key, title_text), row, col)
+            grid.setColumnStretch(col, 1)
 
         self.refresh_timer = QTimer(self)
         self.refresh_timer.timeout.connect(self.refresh)
-        self.refresh_timer.start(1000)
+        self._update_monitor_fonts()
         self._apply_window_flags()
         self.refresh()
+
+    def _save_text_size(self, _index):
+        settings = getattr(self.main_window, "settings", None)
+        if settings is not None:
+            settings["systemMonitorTextScale"] = self.text_size_combo.currentData()
+            save = getattr(self.main_window, "queue_settings_save", None)
+            if callable(save):
+                save(delay_ms=150)
+            else:
+                save = getattr(self.main_window, "saveSettings", None)
+                if callable(save):
+                    save()
+        self._update_monitor_fonts()
+
+    def _update_monitor_fonts(self):
+        if not hasattr(self, "text_size_combo"):
+            return
+        selected = self.text_size_combo.currentData()
+        if selected:
+            scale = selected / 100.0
+        else:
+            scale = max(1.0, min(1.5, self.width() / 780.0, self.height() / 430.0))
+            scale = round(scale * 20.0) / 20.0
+        if scale == self._monitor_font_scale:
+            return
+        self._monitor_font_scale = scale
+        fonts = f"""
+QDialog#systemMonitorDialog QLabel,
+QDialog#systemMonitorDialog QCheckBox,
+QDialog#systemMonitorDialog QPushButton,
+QDialog#systemMonitorDialog QComboBox {{ font-size: {11 * scale:.2f}pt; }}
+QDialog#systemMonitorDialog QLabel#monitorHeader {{ font-size: {14 * scale:.2f}pt; }}
+QDialog#systemMonitorDialog QLabel#tileTitle {{ font-size: {11 * scale:.2f}pt; }}
+QDialog#systemMonitorDialog QLabel#tileValue {{ font-size: {26 * scale:.2f}pt; }}
+QDialog#systemMonitorDialog QLabel#tileDetail {{ font-size: {11 * scale:.2f}pt; }}
+"""
+        self.setStyleSheet(self._monitor_base_style + fonts)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_monitor_fonts()
 
     def _create_tile(self, key, title_text):
         frame = QtWidgets.QFrame()
         frame.setObjectName("monitorTile")
         self._set_widget_severity(frame, "ok")
-        frame.setMinimumHeight(118)
+        frame.setMinimumHeight(98)
         layout = QtWidgets.QVBoxLayout(frame)
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(6)
+        layout.setContentsMargins(9, 7, 9, 7)
+        layout.setSpacing(3)
 
         title = QtWidgets.QLabel(title_text)
         title.setObjectName("tileTitle")
         value = QtWidgets.QLabel("--")
         value.setObjectName("tileValue")
-        value.setMinimumHeight(32)
-        value.setWordWrap(True)
         detail = QtWidgets.QLabel("")
         detail.setObjectName("tileDetail")
         detail.setWordWrap(True)
+        for label in (title, value, detail):
+            label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+            label.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Maximum)
 
         bar = QtWidgets.QProgressBar()
         bar.setRange(0, 100)
@@ -18187,7 +18504,8 @@ QProgressBar[severity="danger"]::chunk {
 
         layout.addWidget(title)
         layout.addWidget(value)
-        layout.addWidget(detail, 1)
+        layout.addWidget(detail)
+        layout.addStretch(1)
         layout.addWidget(bar)
         self.tiles[key] = {
             "frame": frame,
@@ -18198,13 +18516,14 @@ QProgressBar[severity="danger"]::chunk {
         return frame
 
     def _apply_window_flags(self):
+        was_visible = self.isVisible()
         flags = self.windowFlags()
         if self.keep_above_checkbox.isChecked():
             flags |= Qt.WindowStaysOnTopHint
         else:
             flags &= ~Qt.WindowStaysOnTopHint
         self.setWindowFlags(flags)
-        if self.isVisible():
+        if was_visible:
             self.show()
 
     def _set_widget_severity(self, widget, severity):
@@ -18249,6 +18568,7 @@ QProgressBar[severity="danger"]::chunk {
         bar = tile["bar"]
         value_label.setText(str(value))
         detail_label.setText(str(detail))
+        detail_label.setToolTip(str(detail))
         self._set_widget_severity(tile["frame"], severity)
 
         if percent is None:
@@ -18266,8 +18586,8 @@ QProgressBar[severity="danger"]::chunk {
     def _update_alert_banner(self, alerts):
         severity = self._max_severity(*(level for level, _text in alerts))
         if not alerts:
-            self.alert_label.setText("OK: CUDA and system resources look healthy.")
-            self.setWindowTitle("CUDA Labeling Monitor")
+            self.alert_label.setText(self._cuda_summary)
+            self.setWindowTitle("System Monitor")
         else:
             prefix = "DANGER" if severity == "danger" else "WARNING"
             text = " | ".join(message for _level, message in alerts[:4])
@@ -18275,7 +18595,7 @@ QProgressBar[severity="danger"]::chunk {
             if extra > 0:
                 text += f" | +{extra} more"
             self.alert_label.setText(f"{prefix}: {text}")
-            self.setWindowTitle(f"CUDA Labeling Monitor - {prefix}")
+            self.setWindowTitle(f"System Monitor - {prefix}")
         self._set_widget_severity(self.alert_label, severity)
 
     def refresh(self):
@@ -18283,10 +18603,11 @@ QProgressBar[severity="danger"]::chunk {
         metrics = getattr(parent, "system_metrics", None) or {}
         alerts = []
 
-        cuda_ready = bool(getattr(parent, "pytorch_cuda_available", torch.cuda.is_available()))
+        cuda_ready = bool(getattr(parent, "pytorch_cuda_available", metrics.get("torch_cuda_available", False)))
         opencv_ready = bool(getattr(parent, "opencv_cuda_available", False))
         cuda_state = "Ready" if cuda_ready else "Off"
         opencv_state = "Ready" if opencv_ready else "Off"
+        self._cuda_summary = f"CUDA {cuda_state}  |  OpenCV CUDA {opencv_state}"
 
         torch_percent = metrics.get("torch_cuda_memory_percent", 0.0)
         torch_detail = f"PyTorch {cuda_state} | OpenCV CUDA {opencv_state}"
@@ -18303,22 +18624,21 @@ QProgressBar[severity="danger"]::chunk {
                 cuda_severity,
                 f"CUDA memory {float(torch_percent):.0f}%"
             )
-        self._set_tile(
-            "cuda",
-            cuda_state,
-            torch_detail,
-            torch_percent if cuda_ready else None,
-            cuda_severity,
-        )
+        self.alert_label.setToolTip(f"{self._cuda_summary}\n{torch_detail}")
 
         gpu_metrics = metrics.get("gpu_metrics", [])
         if gpu_metrics:
             gpu = gpu_metrics[0]
             gpu_count = len(gpu_metrics)
             name = gpu.get("name", "GPU")
-            count_text = f" | {gpu_count} GPUs" if gpu_count > 1 else ""
+            count_text = f" | First of {gpu_count} GPUs" if gpu_count > 1 else ""
             temp = gpu.get("temperature")
-            temp_text = f" | {float(temp):.0f} C" if temp is not None else ""
+            details = []
+            if temp is not None:
+                details.append(f"{float(temp):.0f} °C")
+            power_watts = gpu.get("power_watts")
+            if power_watts is not None:
+                details.append(f"GPU power {float(power_watts):.0f} W")
             gpu_load = gpu.get("load_percent", 0.0)
             gpu_severity = self._severity_for_percent(gpu_load, warn=96.0, danger=101.0)
             temp_severity = self._severity_for_temperature(temp)
@@ -18329,9 +18649,12 @@ QProgressBar[severity="danger"]::chunk {
             self._set_tile(
                 "gpu",
                 f"{gpu_load:.0f}%",
-                f"{name}{count_text}{temp_text}",
+                " | ".join(details),
                 gpu_load,
                 gpu_tile_severity,
+            )
+            self.tiles["gpu"]["frame"].setToolTip(
+                f"{name}{count_text}\nGPU power is graphics-card draw, not PSU or whole-system power."
             )
             vram_percent = gpu.get("memory_percent", 0.0)
             vram_severity = self._severity_for_percent(vram_percent, warn=85.0, danger=95.0)
@@ -18347,18 +18670,28 @@ QProgressBar[severity="danger"]::chunk {
             no_gpu_severity = "warn" if cuda_ready else "ok"
             if cuda_ready:
                 self._add_alert(alerts, "warn", "GPU stats unavailable")
-            self._set_tile("gpu", "No GPU", "GPUtil did not report a GPU.", None, no_gpu_severity)
-            self._set_tile("vram", "--", "No VRAM data available.", None, no_gpu_severity)
+            self._set_tile("gpu", "--", "GPU stats unavailable", None, no_gpu_severity)
+            self._set_tile("vram", "--", "VRAM unavailable", None, no_gpu_severity)
+            self.tiles["gpu"]["frame"].setToolTip("")
 
         cpu_percent = metrics.get("cpu_percent", getattr(parent, "cpu_usage", 0.0))
         cpu_severity = self._severity_for_percent(cpu_percent, warn=90.0, danger=98.0)
         self._add_alert(alerts, cpu_severity, f"CPU {float(cpu_percent):.0f}%")
+        cpu_detail = "Overall system load"
+        if metrics.get("cpu_peak_percent") is not None:
+            cpu_detail += f"\nBusiest thread: {metrics['cpu_peak_percent']:.0f}%"
         self._set_tile(
             "cpu",
-            f"{cpu_percent:.0f}%",
-            "Whole system CPU load",
+            f"{cpu_percent:.1f}%",
+            cpu_detail,
             cpu_percent,
             cpu_severity,
+        )
+        threads = metrics.get("cpu_logical_count")
+        self.tiles["cpu"]["frame"].setToolTip(
+            (f"Average busy time across {threads} logical CPU threads.\n" if threads else "Overall CPU busy time.\n")
+            + "Busiest thread shows a single-thread bottleneck that the average can hide. "
+            "Task Manager can differ because Windows also reports frequency-adjusted CPU utility."
         )
         memory_percent = metrics.get("memory_percent", getattr(parent, "memory_usage", 0.0))
         ram_severity = self._severity_for_percent(memory_percent, warn=85.0, danger=93.0)
@@ -18376,7 +18709,7 @@ QProgressBar[severity="danger"]::chunk {
         self._set_tile(
             "disk",
             f"{disk_percent:.0f}%",
-            f"{metrics.get('disk_path', 'Current drive')} | {metrics.get('disk_used_gb', 0.0):.1f} / {metrics.get('disk_total_gb', 0.0):.1f} GB",
+            f"{metrics.get('disk_path', 'Current drive')}\n{metrics.get('disk_used_gb', 0.0):.0f} / {metrics.get('disk_total_gb', 0.0):.0f} GB",
             disk_percent,
             disk_severity,
         )
@@ -18385,23 +18718,23 @@ QProgressBar[severity="danger"]::chunk {
         self._set_tile(
             "process",
             f"{metrics.get('process_memory_gb', 0.0):.2f} GB",
-            f"CPU {process_cpu_percent:.1f}% | DarkFusion process only",
-            min(100, process_cpu_percent),
+            f"Process CPU {process_cpu_percent:.1f}%",
+            None,
             process_severity,
         )
-
-        started_at = globals().get("start_time")
-        if isinstance(started_at, datetime):
-            runtime = str(datetime.now() - started_at).split(".")[0]
-            started_text = started_at.strftime("%Y-%m-%d %H:%M:%S")
-        else:
-            runtime = "--"
-            started_text = "Unknown start time"
-        self._set_tile("runtime", runtime, f"Started {started_text}", None, "ok")
-
-        last_log = getattr(getattr(parent, "label_log_handler", None), "last_message", "")
-        self._set_tile("logs", "Live", last_log or "No recent info log.", None, "ok")
+        self.tiles["process"]["frame"].setToolTip(
+            "Physical RAM used by the DarkFusion process (RSS). Training subprocesses are included in system RAM."
+        )
         self._update_alert_banner(alerts)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.refresh()
+        self.refresh_timer.start(1000)
+
+    def hideEvent(self, event):
+        self.refresh_timer.stop()
+        super().hideEvent(event)
 
     def close_for_cleanup(self):
         self._closing_for_cleanup = True
@@ -18438,8 +18771,7 @@ class UiLoader:
             ])
 
             table.setColumnHidden(0, not show_images)
-            table.setColumnHidden(2, False)
-            table.setColumnWidth(2, 42)
+            table.setColumnHidden(2, True)
             table.setColumnHidden(3, True)
             table.setColumnHidden(4, True)
 
@@ -18741,7 +19073,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             self.img_index_search.setToolTip("Search the current image list by file name.")
         if hasattr(self, "console_output"):
             self.console_output.setToolTip(
-                "CUDA labeling status summary. Use CUDA Monitor for the full live tile view."
+                "System resource summary. Open System Monitor for resource usage and GPU power."
             )
 
         self._group_main_review_controls()
@@ -20995,6 +21327,18 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             return
 
         filter_box, review_button, move_button, clear_button, search_box, file_button = controls
+
+        annotation_button = getattr(self, "annotation_actions_button", None)
+        if annotation_button is None:
+            annotation_button = QtWidgets.QPushButton("Annotation...", frame)
+            annotation_button.setObjectName("annotation_actions_button")
+            annotation_button.setToolTip(
+                "Actions for the annotation last selected with left-click. "
+                "Right-click on a preview still deletes it immediately."
+            )
+            annotation_button.clicked.connect(self.show_selected_preview_annotation_actions)
+            self.annotation_actions_button = annotation_button
+
         filter_box.setMinimumWidth(180)
         filter_box.setToolTip("Show all images, blanks, or images containing a selected class.")
 
@@ -21007,7 +21351,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         file_button.setText("Reveal File")
         file_button.setToolTip("Open File Explorer and select the highlighted review file.")
 
-        for button in (review_button, move_button, clear_button, file_button):
+        for button in (review_button, move_button, clear_button, annotation_button, file_button):
             button.setMinimumHeight(28)
             button.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
 
@@ -21028,6 +21372,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             toolbar.addWidget(review_button)
             toolbar.addWidget(move_button)
             toolbar.addWidget(clear_button)
+            toolbar.addWidget(annotation_button)
             toolbar.addWidget(search_box, 1)
             toolbar.addWidget(file_button)
             layout.addLayout(toolbar, 0, 0, 1, 7)
@@ -22732,6 +23077,16 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self._review_filter_worker = None
         self._review_filter_request_id = 0
         self._review_filter_label_cache = {}
+        self._review_similarity_reference = None
+        self._review_similarity_matches = []
+        self._review_similarity_matches_by_image = {}
+        self._review_similarity_origin_file = ""
+        self._review_similarity_origin_index = -1
+        self._review_filter_restore_file = ""
+        self._review_filter_restore_index = -1
+        self.review_similarity_threshold = int(
+            getattr(self, "settings", {}).get("reviewSimilarityThreshold", 90) or 90
+        )
         self._bulk_move_worker = None
         self._filtered_export_worker = None
         self.logger = logging.getLogger("UltraDarkFusionLogger")
@@ -22820,8 +23175,16 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.settingsButton.triggered.connect(self.openSettingsDialog)
         self.settings = self.loadSettings()
         self._sam_model_load_lock = threading.RLock()
+        self._sam_video_inference_lock = threading.RLock()
         self._sam3_startup_warmup_active = False
         self._sam3_startup_warmup_thread = None
+        self._sam3_propagation_warmup_worker = None
+        self._sam3_video_propagation_ready = False
+        self._sam3_video_propagation_unavailable = False
+        self._sam3_propagation_batch_active = False
+        self._sam3_propagation_shutting_down = False
+        self._sam3_propagation_release_pending = False
+        self._sam3_propagation_last_message = ""
         if hasattr(self.screen_view, "pan_overlay"):
             self.screen_view.pan_overlay.apply_saved_settings()
         self.initialize_floating_point_mode_from_settings()
@@ -23690,7 +24053,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             "network_width": (None, "Network input width. Ultralytics receives imgsz as [H, W]."),
             "confidence_threshold_spinbox": (None, "Minimum detection confidence for OpenCV DNN labels."),
             "nms_threshold_spinbox": (None, "Overlap threshold used to suppress duplicate OpenCV DNN boxes."),
-            "box_size": (None, "Minimum label size in pixels for drawing, saving, and auto-labeling."),
+            "box_size": (None, "Minimum label width and height in image pixels, independent of zoom, for drawing, saving, and auto-labeling."),
             "max_label": (None, "Maximum label size as a percent of the image for drawing, saving, and auto-labeling."),
             "timmer_speed": (None, "Delay between images while Auto Scan is active."),
             "edge_slider_min": (None, "Lower Canny edge threshold for snap/edge preview."),
@@ -23865,13 +24228,15 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
     def _setup_cuda_monitor_button(self):
         button = getattr(self, "cuda_monitor_button", None)
         if button is None:
-            button = QtWidgets.QPushButton("CUDA Monitor", self)
+            button = QtWidgets.QPushButton("System Monitor", self)
             button.setObjectName("cuda_monitor_button")
-            button.setToolTip("Open the live CUDA labeling monitor.")
             layout = getattr(self, "gridLayout_16", None)
             if layout is not None:
                 layout.addWidget(button, 0, 0, 1, 2)
             self.cuda_monitor_button = button
+
+        button.setText("System Monitor")
+        button.setToolTip("Open the compact system resource monitor.")
 
         try:
             button.clicked.disconnect()
@@ -23882,7 +24247,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
     def open_cuda_monitor(self):
         dialog = getattr(self, "cuda_monitor_dialog", None)
         if dialog is None:
-            dialog = CudaMonitorDialog(self)
+            dialog = SystemMonitorDialog(self)
             self.cuda_monitor_dialog = dialog
 
         dialog.refresh()
@@ -23895,17 +24260,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if console is None or not console.isVisible():
             return
 
-        global start_time
-        now = datetime.now()
-        elapsed_time = now - start_time
-        elapsed_time_str = str(elapsed_time).split('.')[0]
-
         metrics = getattr(self, "system_metrics", None) or {}
         cpu_usage = metrics.get("cpu_percent", getattr(self, "cpu_usage", 0))
         memory_usage = metrics.get("memory_percent", getattr(self, "memory_usage", 0))
         memory_used_gb = metrics.get("memory_used_gb", 0.0)
         memory_total_gb = metrics.get("memory_total_gb", 0.0)
-        memory_available_gb = metrics.get("memory_available_gb", 0.0)
         disk_percent = metrics.get("disk_percent", None)
         disk_used_gb = metrics.get("disk_used_gb", 0.0)
         disk_total_gb = metrics.get("disk_total_gb", 0.0)
@@ -23920,35 +24279,26 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if disk_percent is not None:
             disk_line = f"Disk: {disk_percent:.0f}% ({disk_used_gb:.1f}/{disk_total_gb:.1f} GB)<br>"
 
-        # Compact status strip. The full tile view lives in CUDA Monitor.
+        # Compact status strip. The full tile view lives in System Monitor.
         text = (
             f'<span style="color:#e7edf5;">'
-            f'<b>CUDA Labeling Monitor</b><br>'
-            f'CUDA: {cuda_status} | OpenCV CUDA: {opencv_status} | Running: {elapsed_time_str}<br>'
+            f'<b>System Monitor</b> | CUDA {cuda_status} | OpenCV CUDA {opencv_status}<br>'
             f'CPU {float(cpu_usage):.0f}% | RAM {float(memory_usage):.0f}% '
-            f'({memory_used_gb:.1f}/{memory_total_gb:.1f} GB, {memory_available_gb:.1f} GB free)<br>'
+            f'({memory_used_gb:.1f}/{memory_total_gb:.1f} GB)<br>'
             f'{gpu_summary}<br>'
             f'{disk_line}'
-            f'<span style="color:#9aa4af;">DarkFusion process: CPU {float(process_cpu_percent):.1f}% | RAM {process_memory_gb:.2f} GB</span><br>'
+            f'<span style="color:#9aa4af;">DarkFusion RSS {process_memory_gb:.2f} GB | CPU {float(process_cpu_percent):.1f}%</span>'
             f'</span>'
         )
 
-        # QLabel rich text with clickable links.
-        console.setTextFormat(QtCore.Qt.RichText)
-        console.setOpenExternalLinks(True)
-        # Append the last info log below the status block.
-        last_log = getattr(self.label_log_handler, 'last_message', None)
-        if last_log:
-            text += (
-                "<br><b><span style='color:#f0b45f;'>Last Info:</span></b> "
-                f"<span style='color:#7ee787;'>{html.escape(str(last_log))}</span>"
-            )
         console.setText(text)
         console.setTextFormat(QtCore.Qt.RichText)
         console.setOpenExternalLinks(True)
 
     def gather_metrics(self):
         process = psutil.Process(os.getpid())
+        power_sampler = GpuPowerSampler()
+        logical_cpu_count = max(1, psutil.cpu_count() or 1)
         try:
             process.cpu_percent(interval=None)
         except Exception:
@@ -23956,7 +24306,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         while getattr(self, "metrics_thread_active", False):
             try:
-                cpu_percent = psutil.cpu_percent(interval=0.5)
+                cpu_samples = psutil.cpu_percent(interval=0.5, percpu=True)
+                cpu_percent = sum(cpu_samples) / len(cpu_samples) if cpu_samples else 0.0
+                cpu_peak_percent = max(cpu_samples, default=0.0)
                 memory_info = psutil.virtual_memory()
                 disk_info = psutil.disk_usage(os.path.abspath(os.sep))
 
@@ -23973,10 +24325,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                     gpu_mem_percent = (gpu_mem_used / gpu_mem_total * 100.0) if gpu_mem_total else 0.0
                     gpu_name = str(getattr(gpu, "name", f"GPU {index}"))
                     gpu_temp = getattr(gpu, "temperature", None)
+                    gpu_power_watts = power_sampler.read_watts(getattr(gpu, "uuid", None))
                     temp_text = f", {float(gpu_temp):.0f} C" if gpu_temp is not None else ""
+                    power_text = f" | GPU power {gpu_power_watts:.0f} W" if gpu_power_watts is not None else ""
                     gpu_lines.append(
                         f"GPU {index}: {gpu_load:.0f}% | VRAM {gpu_mem_percent:.0f}% "
-                        f"({gpu_mem_used / 1024.0:.1f}/{gpu_mem_total / 1024.0:.1f} GB{temp_text}) "
+                        f"({gpu_mem_used / 1024.0:.1f}/{gpu_mem_total / 1024.0:.1f} GB{temp_text}){power_text} "
                         f"<span style='color:#9aa4af;'>({html.escape(gpu_name)})</span>"
                     )
                     gpu_metrics.append({
@@ -23987,6 +24341,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                         "memory_used_gb": gpu_mem_used / 1024.0,
                         "memory_total_gb": gpu_mem_total / 1024.0,
                         "temperature": float(gpu_temp) if gpu_temp is not None else None,
+                        "power_watts": gpu_power_watts,
                     })
 
                 if not gpu_lines:
@@ -24024,7 +24379,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 process_cpu_percent = 0.0
                 try:
                     process_memory_gb = process.memory_info().rss / (1024 ** 3)
-                    process_cpu_percent = process.cpu_percent(interval=None)
+                    # psutil reports 100% per busy logical CPU. Use the same
+                    # 0-100% whole-machine scale as the system CPU card.
+                    process_cpu_percent = max(
+                        0.0, min(100.0, process.cpu_percent(interval=None) / logical_cpu_count)
+                    )
                 except Exception:
                     pass
 
@@ -24033,6 +24392,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 self.gpu_usage = gpu_lines[0] if gpu_lines else "No GPU found"
                 self.system_metrics = {
                     "cpu_percent": self.cpu_usage,
+                    "cpu_peak_percent": float(cpu_peak_percent),
+                    "cpu_logical_count": logical_cpu_count,
                     "memory_percent": self.memory_usage,
                     "memory_used_gb": (memory_info.total - memory_info.available) / (1024 ** 3),
                     "memory_total_gb": memory_info.total / (1024 ** 3),
@@ -24050,6 +24411,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             except Exception as e:
                 logger.debug(f"Could not gather system metrics: {e}")
             time.sleep(1)
+        power_sampler.close()
 
     def start_gathering_metrics(self):
         existing_thread = getattr(self, "metrics_thread", None)
@@ -24172,9 +24534,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.stop_prev_timer()
         self.scan_direction = "next" if direction_sign > 0 else "previous"
 
-        # Validation Review is a queue of issues, not merely a list of unique
-        # images. Keep the user's normal navigation keys useful in this mode so
-        # multiple issues on one image are not skipped.
+        # Review queues contain findings, not merely unique images. Keep the
+        # user's normal navigation keys useful so multiple findings on one
+        # image are not skipped.
         if isinstance(getattr(self, "_validation_review_restore_state", None), dict):
             moved = self.navigate_validation_review_issue(
                 direction_sign * max(1, int(amount))
@@ -24182,8 +24544,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             if moved and hasattr(self, "statusBar"):
                 current = int(getattr(self, "validation_review_index", 0) or 0) + 1
                 total = len(getattr(self, "validation_review_queue", []) or [])
+                issue = getattr(self, "validation_review_current_issue", {}) or {}
+                queue_name = (
+                    "Dataset finding"
+                    if str(issue.get("source", "")) == "dataset_health"
+                    else "Validation issue"
+                )
                 self.statusBar().showMessage(
-                    f"Validation issue {current}/{max(1, total)}", 1500
+                    f"{queue_name} {current}/{max(1, total)}", 1500
                 )
             return bool(moved)
 
@@ -24507,6 +24875,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             'labelPreviewVisible': True,
             'previewHoverZoomEnabled': True,
             'previewThumbnailSize': 128,
+            'reviewSimilarityThreshold': 90,
             'previewFlashTimeMs': 1000,
             'previewFlashColor': [255, 0, 0],
             'previewAlternateFlashColor': [0, 0, 255],
@@ -24536,6 +24905,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             'fpMode': 1 if torch.cuda.is_available() else 0,
             'sam3StartupWarmup': True,
             'showXYLines': False,
+            'showMeasurementOverlay': True,
+            'showBlankImageOverlay': True,
             'crosshairColor': [255, 255, 0],
             'augmentationPercent': 100,
             'mainTabIndex': 0,
@@ -24870,8 +25241,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             self.settings["globalClassVisibility"] = dict(self.settings["classVisibility"])
 
         if hasattr(self, "filter_class_spinbox"):
-            self.settings["reviewFilterIndex"] = int(self.filter_class_spinbox.currentIndex())
-            self.settings["reviewFilterText"] = self.filter_class_spinbox.currentText()
+            filter_text = self.filter_class_spinbox.currentText()
+            if filter_text.startswith("Similar to Selected"):
+                self.settings["reviewFilterIndex"] = 0
+                self.settings["reviewFilterText"] = "All (-1)"
+            else:
+                self.settings["reviewFilterIndex"] = int(self.filter_class_spinbox.currentIndex())
+                self.settings["reviewFilterText"] = filter_text
 
         if hasattr(self, "img_index_search"):
             self.settings["reviewSearchText"] = self.img_index_search.text()
@@ -25791,6 +26167,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             return
 
         target_text = str(self.settings.get("reviewFilterText", "") or "")
+        if target_text.startswith("Similar to Selected"):
+            target_text = "All (-1)"
         target_index = combo.findText(target_text) if target_text else -1
 
         if target_index < 0:
@@ -26300,6 +26678,25 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         Ensure annotations are saved safely before application closes.
         """
 
+        self._sam3_propagation_shutting_down = True
+        self._propagation_stop_requested = True
+        propagation_workers = (
+            getattr(self, "_sam3_propagation_warmup_worker", None),
+            getattr(self, "_adjacent_propagation_worker", None),
+        )
+        if any(self.qthread_is_running(worker) for worker in propagation_workers) or getattr(
+            self, "_sam3_propagation_batch_active", False
+        ):
+            # CUDA calls cannot be forcibly interrupted safely. Keep the event
+            # loop alive until they finish instead of blocking it in wait().
+            for worker in propagation_workers:
+                if self.qthread_is_running(worker):
+                    worker.requestInterruption()
+            self.statusBar().showMessage("Finishing propagation before closing...")
+            event.ignore()
+            QTimer.singleShot(100, self.close)
+            return
+
         try:
             if (
                 hasattr(self, "save_bounding_boxes")
@@ -26516,6 +26913,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self._release_capture()
         self._close_mss_resources()
         self.stop_existing_workers()
+
+        self._sam3_propagation_shutting_down = True
+        self._sam3_propagation_release_pending = True
+        self._release_sam_video_propagation_runtime()
 
         export_worker = getattr(self, "training_export_worker", None)
         if export_worker is not None:
@@ -30275,7 +30676,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             lock = threading.RLock()
             self._sam_model_load_lock = lock
 
-        with lock:
+        with self._sam_video_inference_lock, lock:
+            if getattr(self, "_sam3_video_propagation_unavailable", False) or getattr(
+                self, "_sam3_propagation_shutting_down", False
+            ):
+                return None
             sam_path = self._sam_model_path()
             if not os.path.isabs(sam_path):
                 sam_path = os.path.join(os.getcwd(), sam_path)
@@ -30324,8 +30729,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 predictor = DarkFusionEagerSAM3VideoPredictor(overrides=overrides)
                 self.sam_video_propagation_predictor = predictor
                 self._sam_video_propagation_model_path = sam_path
-                if getattr(self, "_sam_video_inference_lock", None) is None:
-                    self._sam_video_inference_lock = threading.RLock()
                 logger.info(
                     "Initialized eager SAM3 video tracker for label propagation (imgsz=%s).",
                     video_imgsz,
@@ -30336,6 +30739,204 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 self.sam_video_propagation_predictor = None
                 self._sam_video_propagation_model_path = None
                 return None
+
+    def _warm_sam3_propagation_runtime(self):
+        """Fully prime the separate SAM3 video predictor used by propagation."""
+        started = time.perf_counter()
+        # Instantiating SAM3VideoPredictor alone does not load all weights or
+        # initialize its first CUDA kernels. Run a tiny two-frame session now so
+        # the first real Prev/Next action does not pay that one-time cost.
+        dummy = np.zeros((96, 96, 3), dtype=np.uint8)
+        cv2.rectangle(dummy, (25, 20), (71, 78), (220, 220, 220), -1)
+        with self._sam_video_inference_lock:
+            if getattr(self, "_sam3_propagation_shutting_down", False):
+                return {"ready": False, "canceled": True, "message": "Propagation warm-up canceled during shutdown."}
+            if not getattr(self, "_image_navigation_propagation_enabled", False):
+                return {"ready": False, "canceled": True, "message": "Propagation warm-up canceled because propagation is off."}
+            try:
+                masks = self._sam3_video_pair_masks(
+                    dummy,
+                    dummy.copy(),
+                    [[22.0, 17.0, 74.0, 81.0]],
+                )
+            except Exception as e:
+                logger.warning("SAM3 propagation warm-up failed: %s", e)
+                masks = None
+            # Set this before a waiting propagation request takes the lock, so
+            # failed warm-up cannot turn into repeated loads on every Next.
+            self._sam3_video_propagation_unavailable = masks is None
+            self._sam3_video_propagation_ready = masks is not None
+            if masks is None:
+                return {
+                    "ready": False,
+                    "message": "SAM3 video tracking could not be warmed; propagation will use the normal Snap fallback. Toggle propagation off and on to retry.",
+                }
+
+        elapsed = time.perf_counter() - started
+        return {
+            "ready": True,
+            "message": f"SAM3 propagation tracker ready ({elapsed:.1f}s warm-up).",
+        }
+
+    def _set_navigation_propagation_button_state(self, state):
+        button = getattr(self, "propagate_labels_button", None)
+        if button is None:
+            return
+        state = str(state or "off").lower()
+        if state == "loading":
+            button.setText("Propagate: Loading...")
+            button.setToolTip(
+                "Propagation is enabled and its SAM3 video tracker is warming in the background. "
+                "Prev or Next can be used now; processing will wait for the tracker if necessary."
+            )
+            button.setStyleSheet(
+                "QPushButton { border: 1px solid #d6a84b; color: #ffe0a3; }"
+            )
+        elif state == "ready":
+            button.setText("Propagate: On")
+            button.setToolTip(
+                "Propagation is ON and its SAM3 tracker is ready. Prev or Next propagates all "
+                "current annotations to exactly one adjacent image."
+            )
+            button.setStyleSheet(
+                "QPushButton { border: 1px solid #39b86b; color: #b8f5cc; }"
+            )
+        elif state == "fallback":
+            button.setText("Propagate: On")
+            button.setToolTip(
+                "Propagation is ON. The temporal tracker was unavailable, so DarkFusion will "
+                "use its normal SAM3 Snap fallback."
+            )
+            button.setStyleSheet(
+                "QPushButton { border: 1px solid #d6a84b; color: #ffe0a3; }"
+            )
+        else:
+            button.setText("Propagate: Off")
+            button.setToolTip(
+                "Turn on frame-by-frame propagation. The propagation-only SAM3 tracker loads "
+                "in the background only while this feature is enabled."
+            )
+            button.setStyleSheet("")
+
+    def start_sam3_propagation_warmup(self):
+        """Start the propagation tracker warm-up when propagation is enabled."""
+        if not getattr(self, "_image_navigation_propagation_enabled", False) or getattr(
+            self, "_sam3_propagation_shutting_down", False
+        ):
+            return False
+        self._sam3_propagation_release_pending = False
+        worker = getattr(self, "_sam3_propagation_warmup_worker", None)
+        # Even a finished thread can have a queued completion signal. Let that
+        # signal settle this generation rather than starting a second warm-up.
+        if worker is not None:
+            self._set_navigation_propagation_button_state("loading")
+            return True
+        predictor = getattr(self, "sam_video_propagation_predictor", None)
+        if predictor is not None and bool(
+            getattr(self, "_sam3_video_propagation_ready", False)
+        ):
+            self._set_navigation_propagation_button_state("ready")
+            return True
+
+        self._sam3_video_propagation_unavailable = False
+        worker = Sam3PropagationWarmupWorker(self, parent=self)
+        worker.completed.connect(
+            lambda result, worker=worker: self._on_sam3_propagation_warmup_completed(result, worker)
+        )
+        worker.finished.connect(
+            lambda worker=worker: self._on_sam3_propagation_warmup_finished(worker)
+        )
+        self._sam3_propagation_warmup_worker = worker
+        self._set_navigation_propagation_button_state("loading")
+        worker.start()
+        logger.info("SAM3 propagation warm-up started after propagation was enabled.")
+        return True
+
+    def _on_sam3_propagation_warmup_completed(self, result, worker=None):
+        if worker is not None and worker is not getattr(
+            self, "_sam3_propagation_warmup_worker", None
+        ):
+            return
+        result = dict(result or {})
+        ready = bool(result.get("ready", False))
+        canceled = bool(result.get("canceled", False))
+        message = str(result.get("message", "") or "")
+        self._sam3_video_propagation_ready = ready
+        self._sam3_video_propagation_unavailable = not ready and not canceled
+        self._sam3_propagation_last_message = message
+
+        enabled = bool(getattr(self, "_image_navigation_propagation_enabled", False))
+        if enabled and not getattr(self, "_sam3_propagation_shutting_down", False):
+            self._set_navigation_propagation_button_state(
+                "loading" if canceled else ("ready" if ready else "fallback")
+            )
+            if hasattr(self, "statusBar"):
+                self.statusBar().showMessage(message, 5000)
+        else:
+            self._sam3_propagation_release_pending = True
+
+        if not ready and not canceled:
+            # A failed native warm-up should not occupy VRAM while the existing
+            # pairwise Snap fallback handles propagation.
+            self._sam3_propagation_release_pending = True
+
+    def _on_sam3_propagation_warmup_finished(self, worker):
+        if worker is not getattr(self, "_sam3_propagation_warmup_worker", None):
+            self._cleanup_worker_reference("_sam3_propagation_warmup_worker", worker)
+            return
+        self._cleanup_worker_reference("_sam3_propagation_warmup_worker", worker)
+        if (
+            getattr(self, "_image_navigation_propagation_enabled", False)
+            and not getattr(self, "_sam3_video_propagation_ready", False)
+            and not getattr(self, "_sam3_video_propagation_unavailable", False)
+            and not getattr(self, "_sam3_propagation_shutting_down", False)
+        ):
+            # Off may cancel a queued warm-up just before On is clicked again.
+            self.start_sam3_propagation_warmup()
+        if getattr(self, "_sam3_propagation_release_pending", False):
+            QTimer.singleShot(0, self._release_sam_video_propagation_runtime)
+
+    def _release_sam_video_propagation_runtime(self, force=False):
+        """Release only the temporal propagation predictor, preserving normal Snap."""
+        if (
+            getattr(self, "_image_navigation_propagation_enabled", False)
+            and not getattr(self, "_sam3_video_propagation_unavailable", False)
+            and not getattr(self, "_sam3_propagation_shutting_down", False)
+            and not force
+        ):
+            # A queued release from Off must not unload an On-again predictor.
+            return False
+        warmup = getattr(self, "_sam3_propagation_warmup_worker", None)
+        adjacent = getattr(self, "_adjacent_propagation_worker", None)
+        if (
+            self.qthread_is_running(warmup) or self.qthread_is_running(adjacent)
+            or getattr(self, "_sam3_propagation_batch_active", False)
+        ):
+            self._sam3_propagation_release_pending = True
+            return False
+        if not self._sam_video_inference_lock.acquire(blocking=False):
+            self._sam3_propagation_release_pending = True
+            QTimer.singleShot(100, self._release_sam_video_propagation_runtime)
+            return False
+        try:
+            predictor = getattr(self, "sam_video_propagation_predictor", None)
+            if predictor is not None:
+                try:
+                    self._reset_sam3_video_session(predictor)
+                except Exception as e:
+                    logger.debug("Could not reset released SAM3 tracker: %s", e)
+            self.sam_video_propagation_predictor = None
+            self._sam_video_propagation_model_path = None
+            self._sam3_video_propagation_ready = False
+            self._sam3_propagation_release_pending = False
+        finally:
+            self._sam_video_inference_lock.release()
+        if predictor is not None:
+            del predictor
+            gc.collect()
+            self._safe_empty_cache()
+            logger.info("Released the propagation-only SAM3 video tracker.")
+        return True
 
     def start_sam3_startup_warmup(self):
         """Preload and prime the reusable SAM3 runtimes without blocking the UI."""
@@ -34500,9 +35101,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.pixmap_item = None
 
         self.screen_view.resetTransform()
-        self.screen_view.zoom_scale = 1.0
-        self.screen_view.fitInView_scale = 1.0
         self.screen_view.setSceneRect(self.graphics_scene.sceneRect())
+        self.screen_view._refresh_zoom_metrics()
         self.screen_view.centerOn(self.graphics_scene.sceneRect().center())
 
         if current_text == "null":
@@ -38879,7 +39479,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                     180,
                     self.preview_list.viewport().width()
                     - self.preview_list.columnWidth(0)
-                    - self.preview_list.columnWidth(2)
                     - 28,
                 ),
             )
@@ -39081,6 +39680,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             return
 
         row = index.row()
+        self._selected_preview_annotation = None
         self._deletion_in_progress = True
         self.preview_list.setUpdatesEnabled(False)
 
@@ -39238,8 +39838,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             return
 
         # Remove the exact label line from file
+        removed_label_text = lines[true_line_index]
         lines.pop(true_line_index)
         self.save_label_lines(label_file, lines)
+        next_similarity_file = self._discard_deleted_review_similarity_match(
+            image_file,
+            true_line_index,
+            removed_label_text,
+        )
 
         # Recompute page against updated file
         current_page = getattr(self, "current_page", 0)
@@ -39280,6 +39886,75 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                     self.update_blank_overlay_state(scene)
 
             QTimer.singleShot(0, refresh_after_preview_delete)
+        if next_similarity_file:
+            QTimer.singleShot(
+                1,
+                lambda path=next_similarity_file: self._show_next_review_similarity_file(path),
+            )
+
+    def _discard_deleted_review_similarity_match(self, image_file, line_index, label_text):
+        if not self._review_similarity_is_active():
+            return ""
+        image_file = self.normalize_path(image_file)
+        updated = []
+        discarded = False
+        for record in list(getattr(self, "_review_similarity_matches", []) or []):
+            record_image = self.normalize_path(record.get("image_file", ""))
+            record_index = int(record.get("line_index", -1))
+            record_text = str(record.get("label_text", "") or "").strip()
+            if (
+                not discarded
+                and record_image == image_file
+                and record_index == int(line_index)
+                and record_text == str(label_text).strip()
+            ):
+                discarded = True
+                continue
+            item = dict(record)
+            if record_image == image_file and record_index > int(line_index):
+                item["line_index"] = record_index - 1
+            updated.append(item)
+        self._review_similarity_matches = updated
+        match_map = {}
+        for record in updated:
+            match_map.setdefault(self.normalize_path(record.get("image_file", "")), []).append(record)
+        self._review_similarity_matches_by_image = match_map
+        if image_file in match_map:
+            return ""
+
+        old_files = list(getattr(self, "filtered_image_files", []) or [])
+        try:
+            old_index = old_files.index(image_file)
+        except ValueError:
+            old_index = 0
+        self.filtered_image_files = [path for path in old_files if self.normalize_path(path) != image_file]
+        self.update_list_view(self.filtered_image_files)
+        if not self.filtered_image_files:
+            self.current_img_index = -1
+            self.current_image_index = -1
+            self.update_dataset_progress()
+            self.statusBar().showMessage(
+                "No similar annotations remain. Choose All to return to the full review list.",
+                5000,
+            )
+            return ""
+        next_index = min(old_index, len(self.filtered_image_files) - 1)
+        self.current_img_index = next_index
+        self.current_image_index = next_index
+        self.update_dataset_progress()
+        return self.filtered_image_files[next_index]
+
+    def _show_next_review_similarity_file(self, image_file):
+        image_file = self.normalize_path(image_file)
+        if image_file not in getattr(self, "filtered_image_files", []):
+            return
+        self.current_file = image_file
+        self.display_image(image_file)
+        self._run_debounced_thumbnail_page_now(image_file, 0)
+        if hasattr(self, "img_index_number"):
+            with blocked_signals(self.img_index_number):
+                self.img_index_number.setMaximum(max(0, len(self.filtered_image_files) - 1))
+                self.img_index_number.setValue(self.filtered_image_files.index(image_file))
 
     def _build_preview_pixmap_for_bbox(self, bbox, img_width, img_height, pixmap):
         """
@@ -39430,16 +40105,38 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
     def _current_preview_annotation_line(self, image_file, line_index, label_text):
         """Resolve a preview row without ever acting on a different label line."""
-        label_file = os.path.splitext(image_file)[0] + ".txt"
+        label_file = self.normalize_path(
+            self.get_label_file(image_file) or os.path.splitext(image_file)[0] + ".txt"
+        )
         lines = self.load_label_lines(label_file)
         expected = str(label_text or "").strip()
+        polygon_preference = self._polygon_label_parse_preference()
+
+        def canonical(line):
+            try:
+                bbox = BoundingBox.from_str(
+                    str(line or "").strip(),
+                    preferred_polygon_type=polygon_preference,
+                )
+                return bbox.to_str() if bbox is not None else str(line or "").strip()
+            except Exception:
+                return str(line or "").strip()
+
+        expected_canonical = canonical(expected)
         try:
             line_index = int(line_index)
         except (TypeError, ValueError):
             line_index = -1
-        if 0 <= line_index < len(lines) and lines[line_index] == expected:
+        if 0 <= line_index < len(lines) and (
+            lines[line_index] == expected or canonical(lines[line_index]) == expected_canonical
+        ):
             return label_file, lines, line_index
         matches = [index for index, line in enumerate(lines) if line == expected]
+        if not matches:
+            matches = [
+                index for index, line in enumerate(lines)
+                if canonical(line) == expected_canonical
+            ]
         if len(matches) == 1:
             return label_file, lines, matches[0]
         return label_file, lines, -1
@@ -39454,15 +40151,25 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 return row
         return max(0, self.preview_list.currentRow())
 
-    def save_preview_annotation_negative(self, image_file, line_index, label_text, delete_after=False):
+    def save_preview_annotation_negative(
+        self,
+        image_file,
+        line_index,
+        label_text,
+        delete_after=False,
+        quiet=False,
+    ):
         """Save one annotation-centered padded negative into the shared negative folder."""
+        def warn(title, message):
+            if not quiet:
+                QMessageBox.warning(self, title, message)
+
         image_file = self.normalize_path(image_file)
         label_file, lines, line_index = self._current_preview_annotation_line(
             image_file, line_index, label_text
         )
         if line_index < 0:
-            QMessageBox.warning(
-                self,
+            warn(
                 "Annotation Changed",
                 "This preview row no longer matches the saved label. Refresh the image and try again.",
             )
@@ -39470,13 +40177,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         image = cv2.imread(image_file, cv2.IMREAD_COLOR)
         if image is None:
-            QMessageBox.warning(self, "Negative Crop", f"Could not read:\n{image_file}")
+            warn("Negative Crop", f"Could not read:\n{image_file}")
             return False
         polygon_preference = self._polygon_label_parse_preference()
         selected_bbox = BoundingBox.from_str(lines[line_index], preferred_polygon_type=polygon_preference)
         selected_object = self._preview_bbox_review_object(selected_bbox)
         if selected_object is None:
-            QMessageBox.warning(self, "Negative Crop", "This annotation could not be converted into crop bounds.")
+            warn("Negative Crop", "This annotation could not be converted into crop bounds.")
             return False
 
         protected = []
@@ -39491,38 +40198,30 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         try:
             from darkfusion_negative_crops import (
                 dataset_root_for_image,
-                object_bounds,
                 pad_crop_for_training,
                 plan_negative_crop,
                 resolve_negative_folder,
             )
 
-            normalized_bounds = object_bounds(selected_object)
-            if normalized_bounds is None:
-                raise ValueError("The selected annotation has invalid bounds.")
-            pixel_width = max(1.0, (normalized_bounds[2] - normalized_bounds[0]) * image.shape[1])
-            pixel_height = max(1.0, (normalized_bounds[3] - normalized_bounds[1]) * image.shape[0])
             plan = plan_negative_crop(
                 image.shape[1],
                 image.shape[0],
                 selected_object,
                 protected,
-                aspect_ratio=pixel_width / pixel_height,
-                context_scale=1.4,
-                minimum_context=0,
+                aspect_ratio=None,
+                context_scale=4.0,
+                minimum_context=32,
                 safety_margin=3,
             )
             if not plan.get("rect"):
-                QMessageBox.warning(
-                    self,
+                warn(
                     "Unsafe Negative Crop",
                     str(plan.get("reason") or "Another annotation would be included in this negative."),
                 )
                 return False
             x1, y1, x2, y2 = plan["rect"]
             crop = image[y1:y2, x1:x2]
-            minimum_canvas = max(32, int(getattr(self, "_image_size_value", 128) or 128))
-            output_image_data, padding = pad_crop_for_training(crop, minimum_canvas, 32)
+            output_image_data, padding = pad_crop_for_training(crop, 32, 1)
             if output_image_data is None:
                 raise ValueError("The selected crop is empty.")
 
@@ -39533,7 +40232,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             )
             output_dir = self.normalize_path(resolve_negative_folder(dataset_root, create=True))
         except Exception as error:
-            QMessageBox.warning(self, "Negative Crop", f"Could not prepare the crop:\n{error}")
+            warn("Negative Crop", f"Could not prepare the crop:\n{error}")
             return False
 
         annotation_key = hashlib.sha256(
@@ -39546,9 +40245,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         output_label = self.normalize_path(os.path.join(output_dir, output_stem + ".txt"))
 
         if os.path.isfile(output_image) and os.path.isfile(output_label):
-            self.statusBar().showMessage(
-                f"Negative already exists: {os.path.basename(output_image)}", 4500
-            )
+            if not quiet:
+                self.statusBar().showMessage(
+                    f"Negative already exists: {os.path.basename(output_image)}", 4500
+                )
             if delete_after:
                 row = self._preview_row_for_annotation(image_file, line_index)
                 self.delete_item(row, image_file, line_index)
@@ -39582,16 +40282,17 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                         os.remove(created_path)
                 except OSError:
                     pass
-            QMessageBox.warning(self, "Negative Crop", f"Could not save the negative:\n{error}")
+            warn("Negative Crop", f"Could not save the negative:\n{error}")
             return False
 
         if delete_after:
             row = self._preview_row_for_annotation(image_file, line_index)
             self.delete_item(row, image_file, line_index)
         action_text = "Saved negative and removed annotation" if delete_after else "Saved negative crop"
-        self.statusBar().showMessage(
-            f"{action_text}: {os.path.basename(output_image)}", 5000
-        )
+        if not quiet:
+            self.statusBar().showMessage(
+                f"{action_text}: {os.path.basename(output_image)}", 5000
+            )
         return True
 
     def change_preview_annotation_class(self, image_file, line_index, label_text):
@@ -39626,42 +40327,290 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.statusBar().showMessage(f"Changed annotation class to {new_id}.", 3500)
         return True
 
-    def show_preview_annotation_actions(self, button, image_file, line_index, label_text):
-        """Show explicit per-row actions without changing preview left/right-click behavior."""
+    def _selected_preview_annotation_context(self):
+        """Return the annotation last chosen with the normal preview interaction."""
+        context = getattr(self, "_selected_preview_annotation", None)
+        if not isinstance(context, tuple) or len(context) != 3:
+            return None
+        return context
+
+    def show_selected_preview_annotation_actions(self):
+        """Open actions for the row selected by the existing left-click behavior."""
+        context = self._selected_preview_annotation_context()
+        if context is None:
+            QMessageBox.information(
+                self,
+                "Select an Annotation",
+                "Left-click an annotation preview first, then open Annotation actions.",
+            )
+            return
+        self.show_preview_annotation_actions(*context)
+
+    def find_similar_preview_annotations(self, image_file, line_index, label_text):
+        self._selected_preview_annotation = (
+            self.normalize_path(image_file),
+            int(line_index),
+            str(label_text),
+        )
+        combo = getattr(self, "filter_class_spinbox", None)
+        if combo is None:
+            return
+        similarity_index = combo.findText("Similar to Selected")
+        if similarity_index < 0:
+            return
+        if combo.currentIndex() == similarity_index:
+            self._start_review_similarity_filter()
+        else:
+            combo.setCurrentIndex(similarity_index)
+
+    @staticmethod
+    def _resolve_similarity_label_rows(records, lines):
+        """Resolve scan rows against disk without deleting a changed annotation.
+
+        Row numbers can shift after normal preview edits. Exact row text is the
+        identity fallback, including multiple identical rows when all remaining
+        occurrences were matched. Ambiguous partial duplicates are left alone.
+        """
+        resolved = []
+        used = set()
+        seen = set()
+        pending = {}
+        for record in records:
+            expected = str(record.get("label_text", "") or "").strip()
+            if not expected:
+                continue
+            try:
+                line_index = int(record.get("line_index", -1))
+            except (TypeError, ValueError):
+                line_index = -1
+            key = (line_index, expected)
+            if key in seen:
+                continue
+            seen.add(key)
+            if 0 <= line_index < len(lines) and lines[line_index] == expected and line_index not in used:
+                used.add(line_index)
+                item = dict(record)
+                item.update(line_index=line_index, label_text=expected)
+                resolved.append(item)
+            else:
+                pending.setdefault(expected, []).append(record)
+
+        available = {}
+        for index, line in enumerate(lines):
+            if index not in used and line in pending:
+                available.setdefault(line, []).append(index)
+        for expected, unresolved in pending.items():
+            candidates = available.get(expected, [])
+            if len(candidates) > len(unresolved):
+                continue
+            for record, line_index in zip(unresolved, candidates):
+                item = dict(record)
+                item.update(line_index=line_index, label_text=expected)
+                resolved.append(item)
+        return resolved
+
+    def _resolved_review_similarity_matches(self):
+        grouped = {}
+        for record in list(getattr(self, "_review_similarity_matches", []) or []):
+            if not record.get("image_file"):
+                continue
+            image_file = self.normalize_path(record.get("image_file", ""))
+            label_file = self.normalize_path(
+                record.get("label_file", "") or self.get_label_file(image_file)
+            )
+            item = dict(record)
+            item.update(image_file=image_file, label_file=label_file)
+            grouped.setdefault(label_file, []).append(item)
+        resolved = []
+        for label_file, records in grouped.items():
+            resolved.extend(self._resolve_similarity_label_rows(records, self.load_label_lines(label_file)))
+        return resolved
+
+    @staticmethod
+    def _representative_similarity_matches(matches, maximum=8):
+        representatives = []
+        seen_images = set()
+        for record in sorted(matches, key=lambda item: float(item.get("score", 0.0)), reverse=True):
+            image_file = str(record.get("image_file", ""))
+            if not image_file or image_file in seen_images:
+                continue
+            seen_images.add(image_file)
+            representatives.append(record)
+            if len(representatives) >= max(1, int(maximum)):
+                break
+        return representatives
+
+    def remove_review_similarity_matches(self, save_representatives=False):
+        worker = getattr(self, "_review_filter_worker", None)
+        if worker is not None:
+            try:
+                if worker.isRunning():
+                    self.statusBar().showMessage("Wait for the similarity search to finish before removing matches.", 5000)
+                    return False
+            except RuntimeError:
+                pass
+        scan_matches = list(getattr(self, "_review_similarity_matches", []) or [])
+        matches = self._resolved_review_similarity_matches()
+        stale_count = max(0, len(scan_matches) - len(matches))
+        if not matches:
+            QMessageBox.information(self, "Similar Annotations", "There are no unchanged matches to remove. Run Find Similar again if annotations have changed.")
+            return False
+        representatives = (
+            self._representative_similarity_matches(matches, maximum=8)
+            if save_representatives else []
+        )
+        file_count = len({record["label_file"] for record in matches})
+        if save_representatives:
+            detail = (
+                f"Save up to {len(representatives)} representative context crops in the dataset's blanks folder, "
+                f"then permanently remove {len(matches)} matching annotations from {file_count} image(s)?"
+            )
+            title = "Save Negatives and Remove Similar Matches"
+        else:
+            detail = (
+                f"Permanently remove {len(matches)} matching annotations from {file_count} image(s)?"
+            )
+            title = "Remove Similar Matches"
+        detail += "\n\nThis removes matching YOLO rows across the entire filtered list, including unloaded preview pages. Other annotations and image files are kept."
+        if stale_count:
+            detail += f"\n{stale_count} changed or unavailable match(es) will be skipped; run Find Similar again to refresh them."
+        answer = QMessageBox.question(
+            self,
+            title,
+            detail + "\n\nThere is no undo for this action.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return False
+
+        # The confirmation dialog runs a Qt event loop. Stop any search started
+        # there before writing, so its old results cannot restore deleted rows.
+        self._review_filter_request_id = int(getattr(self, "_review_filter_request_id", 0)) + 1
+        worker = getattr(self, "_review_filter_worker", None)
+        if worker is not None:
+            try:
+                worker.cancel()
+            except RuntimeError:
+                pass
+
+        saved_count = 0
+        if save_representatives:
+            for record in representatives:
+                if self.save_preview_annotation_negative(
+                    record["image_file"],
+                    record["line_index"],
+                    record["label_text"],
+                    delete_after=False,
+                    quiet=True,
+                ):
+                    saved_count += 1
+            if saved_count <= 0:
+                QMessageBox.warning(
+                    self,
+                    title,
+                    "No safe representative crop could be saved, so no annotations were removed.",
+                )
+                return False
+
+        grouped = {}
+        for record in matches:
+            grouped.setdefault(record["label_file"], []).append(record)
+        removed_count = 0
+        failed_files = []
+        remaining_matches = []
+        for label_file, records in grouped.items():
+            lines = self.load_label_lines(label_file)
+            current_records = self._resolve_similarity_label_rows(records, lines)
+            stale_count += len(records) - len(current_records)
+            indexes = {record["line_index"] for record in current_records}
+            if not indexes:
+                continue
+            remaining_lines = [line for index, line in enumerate(lines) if index not in indexes]
+            temporary_path = None
+            try:
+                # Stage in the same directory: a failed write must not truncate
+                # the original labels. An empty result intentionally keeps .txt.
+                descriptor, temporary_path = tempfile.mkstemp(
+                    prefix=".darkfusion-labels-", suffix=".tmp", dir=os.path.dirname(label_file)
+                )
+                os.close(descriptor)
+                if not self._write_label_lines(temporary_path, remaining_lines):
+                    raise OSError("Could not write updated annotations")
+                if self.load_label_lines(label_file) != lines:
+                    raise OSError("Annotations changed while preparing deletion; run Find Similar again")
+                os.replace(temporary_path, label_file)
+                temporary_path = None
+                removed_count += len(indexes)
+                getattr(self, "_review_filter_label_cache", {}).pop(
+                    self.normalize_path(label_file), None
+                )
+            except OSError as error:
+                logger.error("Could not remove similar labels from %s: %s", label_file, error)
+                failed_files.append(label_file)
+                remaining_matches.extend(current_records)
+            finally:
+                if temporary_path is not None:
+                    try:
+                        os.remove(temporary_path)
+                    except OSError:
+                        pass
+
+        remaining_files = list(dict.fromkeys(record["image_file"] for record in remaining_matches))
+        self._apply_review_similarity_results(
+            getattr(self, "_review_similarity_reference", None),
+            remaining_files,
+            remaining_matches,
+        )
+        message = f"Removed {removed_count} similar annotation(s)."
+        if save_representatives:
+            message += f" Saved {saved_count} representative negative crop(s) in blanks."
+        if failed_files:
+            message += f" {len(failed_files)} label file(s) could not be updated."
+        if stale_count:
+            message += f" Skipped {stale_count} changed or unavailable match(es); run Find Similar again."
+        self.statusBar().showMessage(message, 7000)
+        return removed_count > 0
+
+    def show_preview_annotation_actions(self, image_file, line_index, label_text):
+        """Show actions without placing controls inside preview rows."""
         self.hide_preview_hover_zoom()
         menu = QMenu(self)
         save_action = menu.addAction("Save Negative Crop")
         save_delete_action = menu.addAction("Save Negative Crop + Delete Annotation")
         menu.addSeparator()
+        similar_action = menu.addAction("Find Similar Annotations")
+        remove_similar_action = None
+        save_remove_similar_action = None
+        if self._review_similarity_is_active() and getattr(self, "_review_similarity_matches", None):
+            remove_similar_action = menu.addAction("Remove Similar Matches...")
+            save_remove_similar_action = menu.addAction(
+                "Save Representative Negatives + Remove Matches..."
+            )
+        menu.addSeparator()
         change_class_action = menu.addAction("Change Class...")
         copy_action = menu.addAction("Copy YOLO Label")
-        chosen = menu.exec_(button.mapToGlobal(QtCore.QPoint(0, button.height())))
+        button = getattr(self, "annotation_actions_button", None)
+        if button is not None:
+            position = button.mapToGlobal(QtCore.QPoint(0, button.height()))
+        else:
+            position = QtGui.QCursor.pos()
+        chosen = menu.exec_(position)
         if chosen is save_action:
             self.save_preview_annotation_negative(image_file, line_index, label_text, False)
         elif chosen is save_delete_action:
             self.save_preview_annotation_negative(image_file, line_index, label_text, True)
+        elif chosen is similar_action:
+            self.find_similar_preview_annotations(image_file, line_index, label_text)
+        elif remove_similar_action is not None and chosen is remove_similar_action:
+            self.remove_review_similarity_matches(False)
+        elif save_remove_similar_action is not None and chosen is save_remove_similar_action:
+            self.remove_review_similarity_matches(True)
         elif chosen is change_class_action:
             self.change_preview_annotation_class(image_file, line_index, label_text)
         elif chosen is copy_action:
             QApplication.clipboard().setText(str(label_text))
             self.statusBar().showMessage("Copied YOLO annotation row.", 2500)
-
-    def _create_preview_action_button(self, image_file, line_index, label_text):
-        button = QtWidgets.QToolButton(self.preview_list)
-        button.setText("⋮")
-        button.setFixedSize(30, 30)
-        button.setToolTip("Actions for this individual annotation")
-        button.setCursor(Qt.PointingHandCursor)
-        button.setStyleSheet(
-            "QToolButton { background: #202a34; color: #f2f5f8; border: 1px solid #3b4a59; "
-            "border-radius: 5px; font-size: 18px; font-weight: 700; }"
-            "QToolButton:hover { background: #2d4255; border-color: #7cc7ff; }"
-        )
-        button.clicked.connect(
-            lambda _checked=False, control=button, path=image_file, index=line_index, text=label_text:
-            self.show_preview_annotation_actions(control, path, index, text)
-        )
-        return button
 
     def _create_thumbnail_widget(self, image_file, bbox, idx, img_width, img_height, pixmap):
         resized_pixmap, bounds = self._build_preview_pixmap_for_bbox(bbox, img_width, img_height, pixmap)
@@ -39703,7 +40652,25 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         image_item = QTableWidgetItem("")
         image_item.setData(Qt.DisplayRole, "")
         image_item.setData(Qt.UserRole, image_file)
-        image_item.setToolTip(os.path.basename(image_file))
+        tooltip = os.path.basename(image_file)
+        if self._review_similarity_is_active():
+            records = getattr(self, "_review_similarity_matches_by_image", {}).get(
+                self.normalize_path(image_file), []
+            )
+            match = next(
+                (
+                    record for record in records
+                    if int(record.get("line_index", -1)) == int(idx)
+                    and str(record.get("label_text", "")).strip() == label_text.strip()
+                ),
+                None,
+            )
+            if match is not None:
+                tooltip += f"\nSimilarity: {float(match.get('score', 0.0)) * 100.0:.1f}%"
+                if match.get("match_basis"):
+                    tooltip += f"\nBest match: {str(match['match_basis']).title()}"
+                details_widget.setToolTip(tooltip)
+        image_item.setToolTip(tooltip)
         self.preview_list.setItem(row_count, 0, image_item)
         self.preview_list.setCellWidget(row_count, 0, thumbnail_label)
         self.preview_list.setRowHeight(row_count, self._image_size_value + 18)
@@ -39722,15 +40689,24 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.preview_list.setItem(row_count, 1, details_item)
         self.preview_list.setCellWidget(row_count, 1, details_widget)
         self.preview_list.setItem(row_count, 2, QTableWidgetItem(str(bbox.class_id)))
-        self.preview_list.setCellWidget(
-            row_count,
-            2,
-            self._create_preview_action_button(image_file, idx, label_text),
-        )
         self.preview_list.setItem(row_count, 3, QTableWidgetItem(size_text))
         self.preview_list.setItem(row_count, 4, bbox_item)
 
         return True
+
+    def _invalidate_preview_for_filter_change(self):
+        """Discard rows and lazy-load state owned by the previous filter."""
+        preview_list = getattr(self, "preview_list", None)
+        if preview_list is not None:
+            preview_list.clearContents()
+            preview_list.setRowCount(0)
+        self.current_preview_image = None
+        self._preview_filtered_entries = []
+        self._preview_loaded_count = 0
+        self._preview_batch_image_file = None
+        self._preview_batch_pixmap = None
+        self._preview_batch_image_width = 0
+        self._preview_batch_image_height = 0
 
     def _populate_preview_list_for_image(self, image_file, page=0):
         """
@@ -39750,6 +40726,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         self.current_preview_image = image_file
         self.hide_preview_hover_zoom()
+        self._highlighted_row = None
+        self._selected_preview_annotation = None
         self._preview_filtered_entries = []
         self._preview_loaded_count = 0
         self._preview_batch_image_file = image_file
@@ -39777,8 +40755,20 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         img_width, img_height = pixmap.width(), pixmap.height()
 
         filtered_entries = []
+        similarity_keys = None
+        if self._review_similarity_is_active():
+            records = getattr(self, "_review_similarity_matches_by_image", {}).get(
+                self.normalize_path(image_file),
+                [],
+            )
+            similarity_keys = {
+                (int(record.get("line_index", -1)), str(record.get("label_text", "")).strip())
+                for record in records
+            }
         polygon_parse_preference = self._polygon_label_parse_preference()
         for line_index, line in enumerate(lines):
+            if similarity_keys is not None and (line_index, line.strip()) not in similarity_keys:
+                continue
             bbox = BoundingBox.from_str(
                 line.strip(),
                 preferred_polygon_type=polygon_parse_preference,
@@ -40055,12 +41045,21 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         bounding_box_item = self.preview_list.item(row, 4)
         if bounding_box_item:
             bounding_box_index = bounding_box_item.data(Qt.UserRole)
+            true_line_index = bounding_box_item.data(Qt.UserRole + 2)
+            if true_line_index is None:
+                true_line_index = bounding_box_index
+            self._selected_preview_annotation = (
+                self.normalize_path(image_file),
+                true_line_index,
+                bounding_box_item.text(),
+            )
             logger.debug(f"Flashing annotation index {bounding_box_index} for file: {image_file}")
             if bounding_box_index is not None:
                 self.flash_bounding_box(bounding_box_index, image_file)
             else:
                 logger.debug("Preview row has no annotation index.")
         else:
+            self._selected_preview_annotation = None
             logger.debug("Preview row has no annotation item.")
 
         self.synchronize_list_view(image_file)
@@ -40150,6 +41149,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.flash_time_value = int(self.settings.get("previewFlashTimeMs", 1000))
         self._image_size_value = int(self.settings.get("previewThumbnailSize", 128))
         self._preview_hover_zoom_enabled = bool(self.settings.get("previewHoverZoomEnabled", True))
+        self.review_similarity_threshold = max(
+            50,
+            min(99, int(self.settings.get("reviewSimilarityThreshold", 90) or 90)),
+        )
 
         if hasattr(self, "preview_list"):
             self._perform_size_adjustment()
@@ -40173,6 +41176,21 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if save and hasattr(self, "settings"):
             self.settings["batchSize"] = value
             self.saveSettings()
+
+    def set_review_similarity_threshold(self, value, save=True):
+        value = max(50, min(99, int(value)))
+        self.review_similarity_threshold = value
+        if save and hasattr(self, "settings"):
+            self.settings["reviewSimilarityThreshold"] = value
+            self.saveSettings()
+
+    def refresh_active_review_similarity_filter(self):
+        combo = getattr(self, "filter_class_spinbox", None)
+        if combo is None or not combo.currentText().startswith("Similar to Selected"):
+            return
+        reference = getattr(self, "_review_similarity_reference", None)
+        if reference:
+            self._start_review_similarity_filter(reference)
 
     def set_preview_flash_time(self, value, save=True):
         value = max(100, min(10000, int(value)))
@@ -40422,10 +41440,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         image_col_width = max(100, int(getattr(self, "_image_size_value", 128)) + 20)
 
         table.setColumnWidth(0, image_col_width)
-        action_col_width = 42
-        table.setColumnWidth(1, max(180, table.viewport().width() - image_col_width - action_col_width - 28))
-        table.setColumnWidth(2, action_col_width)
-        table.setColumnHidden(2, False)
+        table.setColumnWidth(1, max(180, table.viewport().width() - image_col_width - 28))
+        table.setColumnHidden(2, True)
         table.setColumnHidden(3, True)
         table.setColumnHidden(4, True)
 
@@ -40506,12 +41522,21 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         if key_code == Qt.Key_Delete:
             event.accept()
+            if event.isAutoRepeat():
+                return
             self.stop_next_timer()
             self.stop_prev_timer()
             self.delete_current_image()
             return
 
         key = event.text()
+        normalized_key = normalize_keybind_value(key)
+        delete_binding = normalize_keybind_value(
+            getattr(self, "settings", {}).get("deleteButton", DEFAULT_KEYBINDS["deleteButton"])
+        )
+        if event.isAutoRepeat() and normalized_key and delete_binding.startswith(normalized_key):
+            event.accept()
+            return
         setting_key = self.keybind_setting_for_text(key, ("nextButton", "previousButton", "deleteButton"))
 
         if setting_key in ("nextButton", "previousButton"):
@@ -40524,7 +41549,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             return
 
         else:
-            normalized_key = normalize_keybind_value(key)
             if not normalized_key:
                 super().keyPressEvent(event)
                 return
@@ -42989,14 +44013,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         )
 
     def annotation_pixel_size_allowed(self, width, height, img_width, img_height):
-        try:
-            width = float(width)
-            height = float(height)
-        except Exception:
-            return False
-
-        min_w, max_w, min_h, max_h = self.get_annotation_size_limits(img_width, img_height)
-        return min_w <= width <= max_w and min_h <= height <= max_h
+        min_size_px, max_percent = self.current_prediction_size_filter_values()
+        return prediction_dimensions_allowed(
+            width, height, img_width, img_height,
+            min_size_px=min_size_px, max_percent=max_percent,
+        )
 
     def annotation_box_size_allowed(self, box_obj, img_width, img_height):
         return self.prediction_size_allowed(box_obj, img_width, img_height)
@@ -44171,6 +45192,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         self.filter_class_spinbox.addItem("All (-1)")
         self.filter_class_spinbox.addItem("Blanks (-2)")
+        self.filter_class_spinbox.addItem("Similar to Selected")
 
         for idx, class_name in enumerate(classes):
             self.filter_class_spinbox.addItem(f"{idx}: {class_name}")
@@ -44189,6 +45211,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             self.filter_class(-1)  # All
         elif current_text.startswith("Blanks"):
             self.filter_class(-2)  # Blanks
+        elif current_text.startswith("Similar to Selected"):
+            self._start_review_similarity_filter()
         else:
             try:
                 class_index = int(current_text.split(":")[0])
@@ -44230,7 +45254,251 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         Filter images based on class ID or blanks.
         Also syncs class checkbox visibility to match the active filter.
         """
+        try:
+            filter_index = int(filter_index)
+        except Exception:
+            return
+        if filter_index == -1 and getattr(self, "_review_similarity_origin_file", ""):
+            self._review_filter_restore_file = self.normalize_path(
+                self._review_similarity_origin_file
+            )
+            self._review_filter_restore_index = int(
+                getattr(self, "_review_similarity_origin_index", -1)
+            )
+        else:
+            self._review_filter_restore_file = ""
+            self._review_filter_restore_index = -1
+        self._clear_review_similarity_state()
         self._start_review_filter_worker(filter_index)
+
+    def _review_similarity_is_active(self):
+        combo = getattr(self, "filter_class_spinbox", None)
+        return bool(combo is not None and combo.currentText().startswith("Similar to Selected"))
+
+    def _clear_review_similarity_state(self):
+        self._review_similarity_reference = None
+        self._review_similarity_matches = []
+        self._review_similarity_matches_by_image = {}
+        self._review_similarity_origin_file = ""
+        self._review_similarity_origin_index = -1
+
+    def _cancel_review_filter_request(self):
+        """Invalidate workers whose snapshots may no longer match the dataset."""
+        self._review_filter_request_id = int(getattr(self, "_review_filter_request_id", 0)) + 1
+        worker = getattr(self, "_review_filter_worker", None)
+        if worker is not None:
+            try:
+                if worker.isRunning():
+                    worker.cancel()
+            except RuntimeError:
+                pass
+        self._review_filter_worker = None
+
+    def _start_review_similarity_filter(self, reference=None):
+        capture_origin = reference is None
+        if reference is None:
+            context = self._selected_preview_annotation_context()
+            if context is None:
+                QMessageBox.information(
+                    self,
+                    "Select an Annotation",
+                    "Left-click an annotation preview first, then choose Similar to Selected.",
+                )
+                combo = getattr(self, "filter_class_spinbox", None)
+                if combo is not None:
+                    with blocked_signals(combo):
+                        combo.setCurrentIndex(0)
+                self.filter_class(-1)
+                return
+            reference = {
+                "image_file": context[0],
+                "line_index": context[1],
+                "label_text": context[2],
+            }
+        else:
+            reference = dict(reference)
+
+        image_file = self.normalize_path(reference.get("image_file", ""))
+        label_file, lines, line_index = self._current_preview_annotation_line(
+            image_file,
+            reference.get("line_index", -1),
+            reference.get("label_text", ""),
+        )
+        if line_index < 0:
+            QMessageBox.warning(
+                self,
+                "Annotation Changed",
+                "The selected annotation changed on disk. Left-click it again before searching.",
+            )
+            return
+        reference.update({
+            "image_file": image_file,
+            "label_file": self.normalize_path(label_file),
+            "line_index": int(line_index),
+            "label_text": lines[line_index],
+        })
+        if capture_origin:
+            self._review_similarity_origin_file = image_file
+            try:
+                self._review_similarity_origin_index = list(
+                    getattr(self, "image_files", []) or []
+                ).index(image_file)
+            except ValueError:
+                normalized_files = [
+                    self.normalize_path(path)
+                    for path in list(getattr(self, "image_files", []) or [])
+                ]
+                try:
+                    self._review_similarity_origin_index = normalized_files.index(image_file)
+                except ValueError:
+                    self._review_similarity_origin_index = -1
+        self._review_similarity_reference = reference
+
+        current_worker = getattr(self, "_review_filter_worker", None)
+        if current_worker is not None:
+            try:
+                if current_worker.isRunning():
+                    current_worker.cancel()
+            except RuntimeError:
+                pass
+
+        image_files = [
+            self.normalize_path(path)
+            for path in list(getattr(self, "image_files", []) or [])
+            if path and not self.is_placeholder_file(path)
+        ]
+        if not image_files:
+            self._apply_review_similarity_results(reference, [], [])
+            return
+        label_files = {
+            path: self.normalize_path(self.get_label_file(path) or os.path.splitext(path)[0] + ".txt")
+            for path in image_files
+        }
+        self._review_filter_request_id = int(getattr(self, "_review_filter_request_id", 0)) + 1
+        request_id = self._review_filter_request_id
+        threshold_percent = max(
+            50,
+            min(99, int(self.settings.get("reviewSimilarityThreshold", 90) or 90)),
+        )
+        worker = ReviewSimilarityWorker(
+            request_id=request_id,
+            image_files=image_files,
+            label_files=label_files,
+            reference=reference,
+            threshold=threshold_percent / 100.0,
+            polygon_preference=self._polygon_label_parse_preference(),
+            appearance_similarity=self._propagation_mask_similarity,
+            parent=self,
+        )
+        self._review_filter_worker = worker
+        worker.progress.connect(self._on_review_similarity_progress)
+        worker.completed.connect(self._on_review_similarity_completed)
+        worker.failed.connect(self._on_review_filter_failed)
+        worker.finished.connect(worker.deleteLater)
+        self.set_label_progress(
+            0,
+            max(1, len(image_files)),
+            value=0,
+            progress_format="Finding similar annotations...",
+        )
+        self.statusBar().showMessage(
+            f"Finding similar annotations at {threshold_percent}% or higher...", 3500
+        )
+        worker.start()
+
+    def _on_review_similarity_progress(self, request_id, processed, total):
+        if request_id != getattr(self, "_review_filter_request_id", None):
+            return
+        self.set_label_progress(
+            0,
+            max(1, total),
+            value=min(processed, max(1, total)),
+            progress_format=f"Similarity {processed}/{total}",
+        )
+
+    def _on_review_similarity_completed(self, request_id, filtered_files, matches, canceled):
+        if request_id != getattr(self, "_review_filter_request_id", None):
+            return
+        if canceled:
+            if hasattr(self, "filter_class_spinbox"):
+                self.filter_class_spinbox.setEnabled(True)
+            self.reset_label_progress(0)
+            return
+        self._apply_review_similarity_results(
+            getattr(self, "_review_similarity_reference", None),
+            list(filtered_files or []),
+            list(matches or []),
+        )
+        if hasattr(self, "filter_class_spinbox"):
+            self.filter_class_spinbox.setEnabled(True)
+        self.reset_label_progress(100)
+        self.statusBar().showMessage(
+            f"Similarity filter: {len(matches or [])} annotation(s) in {len(filtered_files or [])} image(s).",
+            5000,
+        )
+        self._review_filter_worker = None
+
+    def _apply_review_similarity_results(self, reference, filtered_files, matches):
+        # Applying edits to the match set invalidates any scan started before
+        # those edits. A late worker must not repopulate rows just removed.
+        self._review_filter_request_id = int(getattr(self, "_review_filter_request_id", 0)) + 1
+        worker = getattr(self, "_review_filter_worker", None)
+        if worker is not None:
+            try:
+                if worker.isRunning():
+                    worker.cancel()
+            except RuntimeError:
+                pass
+        reference = dict(reference or {})
+        source_image = self.normalize_path(reference.get("image_file", ""))
+        ordered_files = [
+            self.normalize_path(path)
+            for path in list(filtered_files or [])
+            if path and not self.is_placeholder_file(path)
+        ]
+        if source_image in ordered_files:
+            ordered_files.remove(source_image)
+            ordered_files.insert(0, source_image)
+        self._review_similarity_reference = reference
+        self._review_similarity_matches = list(matches or [])
+        match_map = {}
+        for record in self._review_similarity_matches:
+            image_file = self.normalize_path(record.get("image_file", ""))
+            if image_file:
+                match_map.setdefault(image_file, []).append(record)
+        self._review_similarity_matches_by_image = match_map
+        self.filtered_image_files = list(dict.fromkeys(ordered_files))
+
+        try:
+            source_class = int(float(str(reference.get("label_text", "")).split()[0]))
+        except Exception:
+            source_class = -1
+        if source_class >= 0:
+            self.sync_class_checkboxes_with_filter(source_class)
+            self.sync_selected_class_with_filter(source_class)
+
+        self.update_list_view(self.filtered_image_files)
+        self._invalidate_preview_for_filter_change()
+        if self.filtered_image_files:
+            self.current_img_index = 0
+            self.current_file = self.filtered_image_files[0]
+            self.current_image_index = self._full_dataset_index_for_file(self.current_file)
+            self.display_image(self.current_file)
+            self._run_debounced_thumbnail_page_now(self.current_file, 0)
+            if hasattr(self, "img_index_number"):
+                with blocked_signals(self.img_index_number):
+                    self.img_index_number.setMaximum(max(0, len(self.filtered_image_files) - 1))
+                    self.img_index_number.setValue(0)
+        else:
+            # Keep the source visible so an empty result never throws the user
+            # onto the placeholder image.
+            self.current_img_index = -1
+            self.current_image_index = -1
+            self.current_file = source_image if source_image and os.path.isfile(source_image) else None
+            if self.current_file:
+                self.display_image(self.current_file)
+                self._run_debounced_thumbnail_page_now(self.current_file, 0)
+        self.update_dataset_progress()
 
     def _review_placeholder_paths(self):
         return {
@@ -44314,9 +45582,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.reset_label_progress(100)
         self.statusBar().showMessage(f"Filter complete: {len(self.filtered_image_files)} image(s)", 3500)
 
-        worker = getattr(self, "_review_filter_worker", None)
-        if worker is not None and not worker.isRunning():
-            self._review_filter_worker = None
+        # ``completed`` belongs to the current request, so the worker is done.
+        # It may already have been deleted by Qt's finished/deleteLater path.
+        self._review_filter_worker = None
 
     def _on_review_filter_failed(self, request_id, message):
         if request_id != getattr(self, "_review_filter_request_id", None):
@@ -44326,11 +45594,17 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             self.filter_class_spinbox.setEnabled(True)
 
         self.reset_label_progress(0)
+        self._review_filter_worker = None
         logger.error(f"Review filter failed: {message}")
         QMessageBox.warning(self, "Filter Images", f"Filter failed:\n{message}")
 
     def _apply_filtered_image_files(self, filter_index, filtered_files):
-        self.filtered_image_files = list(filtered_files or [])
+        # The placeholder is a display fallback, never a navigable dataset row.
+        self.filtered_image_files = [
+            image_file
+            for image_file in list(filtered_files or [])
+            if image_file and not self.is_placeholder_file(image_file)
+        ]
 
         logger.info(f"Filter index: {filter_index}")
         logger.info(f"Filtered images count: {len(self.filtered_image_files)}")
@@ -44339,33 +45613,66 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.sync_class_checkboxes_with_filter(filter_index)
         self.sync_selected_class_with_filter(filter_index)
 
-        # Add the placeholder entry when needed.
-        placeholder_abs = os.path.abspath('styles/images/default.png').replace("\\", "/")
-        filtered_normalized = {os.path.abspath(f).replace("\\", "/") for f in self.filtered_image_files}
-
-        if placeholder_abs not in filtered_normalized and os.path.exists(placeholder_abs):
-            self.filtered_image_files.insert(0, placeholder_abs)
-
         self.update_list_view(self.filtered_image_files)
+        self._invalidate_preview_for_filter_change()
 
-        real_files = [f for f in self.filtered_image_files if not self.is_placeholder_file(f)]
+        real_files = list(self.filtered_image_files)
 
         if real_files:
-            self.current_img_index = self.filtered_image_files.index(real_files[0])
-            self.current_file = real_files[0]
+            selected_file = real_files[0]
+            if int(filter_index) == -1:
+                restore_file = self.normalize_path(
+                    getattr(self, "_review_filter_restore_file", "")
+                )
+                normalized_real_files = {
+                    self.normalize_path(path): path for path in real_files
+                }
+                if restore_file in normalized_real_files:
+                    selected_file = normalized_real_files[restore_file]
+                elif restore_file:
+                    source_files = [
+                        self.normalize_path(path)
+                        for path in list(getattr(self, "image_files", []) or [])
+                    ]
+                    try:
+                        origin_index = int(getattr(self, "_review_filter_restore_index", -1))
+                    except Exception:
+                        origin_index = -1
+                    if source_files and origin_index >= 0:
+                        available = set(normalized_real_files)
+                        search_order = [
+                            *range(min(origin_index, len(source_files) - 1), len(source_files)),
+                            *range(min(origin_index - 1, len(source_files) - 1), -1, -1),
+                        ]
+                        for source_index in search_order:
+                            candidate = source_files[source_index]
+                            if candidate in available:
+                                selected_file = normalized_real_files[candidate]
+                                break
+            self._review_filter_restore_file = ""
+            self._review_filter_restore_index = -1
+            self.current_img_index = self.filtered_image_files.index(selected_file)
+            self.current_file = selected_file
+            self.current_image_index = self._full_dataset_index_for_file(selected_file)
             self.display_image(self.current_file)
 
             if self.current_file and not self.is_placeholder_file(self.current_file):
                 self._run_debounced_thumbnail_page_now(self.current_file, 0)
 
             if hasattr(self, 'img_index_number'):
+                self.img_index_number.blockSignals(True)
                 self.img_index_number.setMaximum(max(0, len(self.filtered_image_files) - 1))
                 self.img_index_number.setValue(self.current_img_index)
-        elif self.filtered_image_files:
-            self.current_img_index = 0
-            self.current_file = self.filtered_image_files[0]
-            self.display_image(self.current_file)
+                self.img_index_number.blockSignals(False)
+            if hasattr(self, "synchronize_list_view"):
+                self.synchronize_list_view(self.current_file)
         else:
+            self._review_filter_restore_file = ""
+            self._review_filter_restore_index = -1
+            self.current_img_index = -1
+            self.current_image_index = -1
+            self.current_file = None
+            self.display_placeholder()
             logger.info("No images matching the filter criteria.")
 
         self.update_dataset_progress()
@@ -44509,6 +45816,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         If 'All' (-1) is selected, it clears all bounding boxes.
         """
         current_text = self.filter_class_spinbox.currentText()
+        if self._review_similarity_is_active():
+            return self.remove_review_similarity_matches(False)
         self.img_index_number_changed(0)  # Reset the image index to 0
 
         if current_text.startswith("All"):
@@ -44774,7 +46083,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         # Remove empty entries. For large scanned datasets, avoid a blocking
         # exists() call per image; navigation/click paths still validate files.
-        image_files = [f for f in image_files if f]
+        image_files = [
+            f for f in image_files
+            if f and not self.is_placeholder_file(f)
+        ]
         if len(image_files) <= 5000:
             image_files = [f for f in image_files if os.path.exists(f)]
         logger.info(f"Updating ListView with {len(image_files)} files.")
@@ -44793,6 +46105,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             old_model.deleteLater()
         self.total_images.setText(f"Total: {len(image_files)}")
         logger.info("ListView updated successfully.")
+
+    def _full_dataset_index_for_file(self, image_file):
+        target = self.normalize_path(image_file)
+        for index, path in enumerate(list(getattr(self, "image_files", []) or [])):
+            if self.normalize_path(path) == target:
+                return index
+        return -1
 
     def on_list_view_clicked(self, index):
         model = self.List_view.model()
@@ -44836,7 +46155,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         row_index = index.row()
 
         self.current_img_index = row_index
-        self.current_image_index = row_index
+        self.current_image_index = self._full_dataset_index_for_file(image_file)
 
         self.display_image(self.current_file, rebuild_preview=True)
 
@@ -44869,9 +46188,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             if isinstance(value, int):
                 if 0 <= value < len(self.filtered_image_files):
                     self.current_img_index = value
-                    self.current_image_index = value
                     new_file = self.filtered_image_files[value]
                     self.current_file = new_file
+                    self.current_image_index = self._full_dataset_index_for_file(new_file)
                     self.display_image(new_file, rebuild_preview=True)
                     self.sync_list_view_selection(new_file)
                 else:
@@ -44890,7 +46209,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                     new_file = matching_files[0]
                     self.current_file = new_file
                     self.current_img_index = self.filtered_image_files.index(new_file)
-                    self.current_image_index = self.current_img_index
+                    self.current_image_index = self._full_dataset_index_for_file(new_file)
                     self.display_image(new_file, rebuild_preview=True)
                     self.sync_list_view_selection(new_file)
                 else:
@@ -46161,77 +47480,134 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         return inter_area / union_area if union_area else 0.0
 
     def delete_current_image(self):
-        if self.current_file is None:
-            return
+        """Delete exactly one real image and select a stable surviving image."""
+        if getattr(self, "_image_deletion_in_progress", False):
+            logger.debug("Image deletion already in progress; ignoring duplicate request.")
+            return False
 
-        if self.is_placeholder_file(self.current_file):
+        current_file = self.normalize_path(getattr(self, "current_file", "") or "")
+        if not current_file:
+            return False
+        if self.is_placeholder_file(current_file):
             logger.warning("Delete skipped for placeholder image.")
-            return
+            return False
 
-        video_context = self.video_annotation_context_for_image(self.current_file)
-        if video_context is not None:
-            deleted_file = self.normalize_path(self.current_file)
-            self.delete_files(deleted_file)
-            self.image_files = [
-                path for path in (self.image_files or [])
-                if self.normalize_path(path) != deleted_file
+        self._image_deletion_in_progress = True
+        try:
+            self._cancel_review_filter_request()
+            filtered_before = [
+                self.normalize_path(path)
+                for path in (getattr(self, "filtered_image_files", []) or [])
+                if path and not self.is_placeholder_file(path)
             ]
-            self.filtered_image_files = [
-                path for path in (self.filtered_image_files or [])
-                if self.normalize_path(path) != deleted_file
+            dataset_before = [
+                self.normalize_path(path)
+                for path in (getattr(self, "image_files", []) or [])
+                if path and not self.is_placeholder_file(path)
             ]
+            try:
+                filtered_index = filtered_before.index(current_file)
+            except ValueError:
+                filtered_index = max(0, int(getattr(self, "current_img_index", 0) or 0))
+            try:
+                dataset_index = dataset_before.index(current_file)
+            except ValueError:
+                dataset_index = filtered_index
 
-            current_frame = int(video_context["frame_index"])
-            total_frames = self._video_annotation_total_frame_count(video_context)
-            offset = 1 if total_frames <= 0 or current_frame + 1 < total_frames else -1
-            if current_frame + offset >= 0 and self._navigate_video_annotation_by_offset(
-                video_context,
-                offset,
-                deleted_file,
-                save_current=False,
-                allow_propagation=False,
-            ):
-                if hasattr(self, "statusBar"):
-                    self.statusBar().showMessage(
-                        f"Removed extracted video frame {current_frame + 1} and its label.",
-                        4000,
-                    )
-                return
+            video_context = self.video_annotation_context_for_image(current_file)
+            self.delete_files(current_file)
+            self.filtered_image_files = [path for path in filtered_before if path != current_file]
+            self.image_files = [path for path in dataset_before if path != current_file]
+            label_cache = getattr(self, "_review_filter_label_cache", {})
+            label_cache.pop(self.normalize_path(self.get_label_file(current_file)), None)
+            if self._review_similarity_matches:
+                self._review_similarity_matches = [
+                    record for record in self._review_similarity_matches
+                    if self.normalize_path(record.get("image_file", "")) != current_file
+                ]
+                self._review_similarity_matches_by_image.pop(current_file, None)
 
-            self.current_file = None
-            self.current_img_index = -1
-            self.update_list_view(self.filtered_image_files)
-            self.display_placeholder()
-            return
+            if video_context is not None:
+                current_frame = int(video_context["frame_index"])
+                total_frames = self._video_annotation_total_frame_count(video_context)
+                offset = 1 if total_frames <= 0 or current_frame + 1 < total_frames else -1
+                if current_frame + offset >= 0 and self._navigate_video_annotation_by_offset(
+                    video_context,
+                    offset,
+                    current_file,
+                    save_current=False,
+                    allow_propagation=False,
+                ):
+                    if hasattr(self, "statusBar"):
+                        self.statusBar().showMessage(
+                            f"Removed extracted video frame {current_frame + 1} and its label.",
+                            4000,
+                        )
+                    return True
 
+            candidates = list(self.filtered_image_files)
+            candidate_index = filtered_index
+            reset_filter = False
+            if not candidates and self.image_files:
+                # The last match for a class/blank filter was deleted. Continue
+                # with the real dataset instead of selecting the placeholder.
+                candidates = list(self.image_files)
+                candidate_index = dataset_index
+                reset_filter = True
 
-        if self.current_file in self.filtered_image_files:
-            current_filtered_index = self.filtered_image_files.index(self.current_file)
-            self.delete_files(self.current_file)
-            self.filtered_image_files.remove(self.current_file)
-
-            if self.current_file in self.image_files:
-                self.image_files.remove(self.current_file)
-
-            if len(self.filtered_image_files) > 0:
-                if current_filtered_index >= len(self.filtered_image_files):
-                    current_filtered_index = len(self.filtered_image_files) - 1
-                self.current_file = self.filtered_image_files[current_filtered_index]
-                self.display_image(self.current_file)
-                self.current_img_index = current_filtered_index
-                self.img_index_number.setValue(self.current_img_index)
-            else:
+            if not candidates:
+                self.filtered_image_files = []
                 self.current_file = None
                 self.current_img_index = -1
+                self.current_image_index = -1
+                self.update_list_view([])
+                if hasattr(self, "img_index_number"):
+                    self.img_index_number.blockSignals(True)
+                    self.img_index_number.setMaximum(0)
+                    self.img_index_number.setValue(0)
+                    self.img_index_number.blockSignals(False)
                 self.display_placeholder()
+                self.update_dataset_progress()
+                return True
 
-            self.update_list_view(self.filtered_image_files)
+            if reset_filter and hasattr(self, "filter_class_spinbox"):
+                all_index = self.filter_class_spinbox.findText("All (-1)", Qt.MatchStartsWith)
+                if all_index < 0:
+                    all_index = 0
+                self.filter_class_spinbox.blockSignals(True)
+                self.filter_class_spinbox.setCurrentIndex(all_index)
+                self.filter_class_spinbox.blockSignals(False)
+                self.sync_class_checkboxes_with_filter(-1)
+                self.sync_selected_class_with_filter(-1)
 
-        else:
-            if self.current_file in self.image_files:
-               logger.debug("Delete skipped: current file is outside the filtered list.")
-            else:
-                logger.warning("No image currently loaded.")
+            self.filtered_image_files = candidates
+            candidate_index = max(0, min(candidate_index, len(candidates) - 1))
+            next_file = candidates[candidate_index]
+            self.current_file = next_file
+            self.current_img_index = candidate_index
+            try:
+                self.current_image_index = self.image_files.index(next_file)
+            except ValueError:
+                self.current_image_index = candidate_index
+
+            # Rebuild the model before display_image tries to synchronize its selection.
+            self.update_list_view(candidates)
+            if hasattr(self, "img_index_number"):
+                self.img_index_number.blockSignals(True)
+                self.img_index_number.setMaximum(max(0, len(candidates) - 1))
+                self.img_index_number.setValue(candidate_index)
+                self.img_index_number.blockSignals(False)
+            self.display_image(next_file, rebuild_preview=True)
+            self.sync_list_view_selection(next_file)
+            self.update_dataset_progress()
+            if hasattr(self, "statusBar"):
+                message = f"Deleted {os.path.basename(current_file)}."
+                if reset_filter:
+                    message += " No filtered images remained, so Review returned to All."
+                self.statusBar().showMessage(message, 4000)
+            return True
+        finally:
+            self._image_deletion_in_progress = False
 
     def delete_files(self, file_path):
         # Never delete the protected placeholder asset.
@@ -46388,6 +47764,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
             scene = QGraphicsScene(0, 0, self.image.width(), self.image.height())
             pixmap_item = QGraphicsPixmapItem(self.image)
+            pixmap_item.setData(0, "annotation_image")
             pixmap_item.setTransformationMode(Qt.SmoothTransformation)
             pixmap_item.setZValue(-1000)
             scene.addItem(pixmap_item)
@@ -46518,15 +47895,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             restored = self.restore_zoom_lock_state()
 
             if not restored:
-                self.screen_view.resetTransform()
-                self.screen_view.fitInView(scene_rect, Qt.KeepAspectRatio)
-                self.screen_view.fitInView_scale = self.screen_view.transform().m11()
-                self.screen_view.zoom_scale = 1.0
+                self.screen_view._fit_image_in_view()
         else:
-            self.screen_view.resetTransform()
-            self.screen_view.fitInView(scene_rect, Qt.KeepAspectRatio)
-            self.screen_view.fitInView_scale = self.screen_view.transform().m11()
-            self.screen_view.zoom_scale = 1.0
+            self.screen_view._fit_image_in_view()
         if hasattr(self.screen_view, "pan_overlay"):
             self.screen_view.pan_overlay.update_visibility()
 
@@ -46555,18 +47926,21 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if view is None or scene is None:
             return
 
-        scene_rect = scene.sceneRect()
+        scene_rect = view.sceneRect()
 
         if scene_rect.width() <= 0 or scene_rect.height() <= 0:
             return
 
         center_scene = view.mapToScene(view.viewport().rect().center())
-        current_scale = max(float(view.transform().m11()), 0.0001)
+        current_scale = float(view.transform().m11())
+        if not math.isfinite(current_scale) or current_scale <= 0:
+            return
 
         center_x_ratio = (center_scene.x() - scene_rect.left()) / scene_rect.width()
         center_y_ratio = (center_scene.y() - scene_rect.top()) / scene_rect.height()
 
         self.zoom_lock_state["scale"] = current_scale
+        view._refresh_zoom_metrics()
         self.zoom_lock_state["center_x_ratio"] = max(0.0, min(1.0, center_x_ratio))
         self.zoom_lock_state["center_y_ratio"] = max(0.0, min(1.0, center_y_ratio))
 
@@ -46577,7 +47951,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if view is None or scene is None:
             return False
 
-        scene_rect = scene.sceneRect()
+        scene_rect = view.sceneRect()
 
         if scene_rect.width() <= 0 or scene_rect.height() <= 0:
             return False
@@ -46586,7 +47960,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         center_x_ratio = float(self.zoom_lock_state.get("center_x_ratio", 0.5))
         center_y_ratio = float(self.zoom_lock_state.get("center_y_ratio", 0.5))
 
-        if scale <= 0:
+        if not all(math.isfinite(value) for value in (scale, center_x_ratio, center_y_ratio)) or scale <= 0:
             return False
 
         view.resetTransform()
@@ -46597,10 +47971,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         view.centerOn(QPointF(center_x, center_y))
 
-        view.zoom_scale = scale
-
-        if hasattr(view, "fitInView_scale"):
-            view.fitInView_scale = min(view.fitInView_scale, scale)
+        view._refresh_zoom_metrics()
 
         return True
 
@@ -46703,7 +48074,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
     def clear_blank_overlay(self, scene=None):
         """
-        Remove BLANK overlay items from the current scene.
+        Hide the BLANK badge and remove legacy scene overlays.
         Used when the user starts drawing on a blank image.
         """
         if scene is None:
@@ -46712,7 +48083,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if scene is None:
             return
 
-        removed = False
+        removed = getattr(scene, "_blank_overlay_image_item", None) is not None
+        scene._blank_overlay_image_item = None
 
         for item in list(scene.items()):
             try:
@@ -46862,76 +48234,31 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if scene is None:
             return
 
-        if self.scene_has_annotations(scene):
-            self.clear_blank_overlay(scene)
-        else:
-            if hasattr(self, "image") and self.image is not None and not self.image.isNull():
-                self.display_image_with_text(scene, self.image)
+        self.display_image_with_text(scene, getattr(self, "image", None))
 
     def display_image_with_text(self, scene, pixmap):
-        """
-        Overlay a clear BLANK marker on the current scene without rebuilding the scene.
-        Removes old blank overlays first so they do not stack.
-        """
-        if scene is None or pixmap is None:
+        """Mark the image for a viewport-sized badge, without altering its pixels."""
+        if scene is None:
             return
-
-        # Remove existing blank overlays.
-        for item in list(scene.items()):
-            try:
-                if item.data(0) == "blank_overlay_item":
-                    scene.removeItem(item)
-            except RuntimeError:
-                pass
-
-        scene.setBackgroundBrush(QBrush(QColor(50, 50, 50)))
-
-        border_thickness = 5
-
-        border_item = QGraphicsRectItem(
-            -border_thickness / 2,
-            -border_thickness / 2,
-            pixmap.width() + border_thickness,
-            pixmap.height() + border_thickness
-        )
-        border_item.setData(0, "blank_overlay_item")
-        border_item.setPen(QPen(QColor(0, 255, 0, 255), border_thickness))
-        border_item.setZValue(1)
-        scene.addItem(border_item)
-
-        overlay = QGraphicsRectItem(0, 0, pixmap.width(), pixmap.height())
-        overlay.setData(0, "blank_overlay_item")
-        overlay.setBrush(QColor(0, 0, 0, 90))
-        overlay.setPen(QPen(Qt.NoPen))
-        overlay.setZValue(2)
-        scene.addItem(overlay)
-
-        empty_text_item = QGraphicsTextItem("BLANK")
-        empty_text_item.setData(0, "blank_overlay_item")
-        empty_text_item.setDefaultTextColor(QColor(255, 0, 0))
-
-        font = QFont("Arial", 24, QFont.Bold)
-        empty_text_item.setFont(font)
-
-        text_width = empty_text_item.boundingRect().width()
-        text_height = empty_text_item.boundingRect().height()
-
-        empty_text_item.setPos(
-            (pixmap.width() - text_width) / 2,
-            pixmap.height() - text_height - 10
-        )
-
-        effect = QGraphicsDropShadowEffect()
-        effect.setOffset(5, 5)
-        effect.setBlurRadius(35)
-        effect.setColor(QColor(255, 0, 0, 200))
-        empty_text_item.setGraphicsEffect(effect)
-
-        empty_text_item.setZValue(3)
-        scene.addItem(empty_text_item)
-
-        scene.setSceneRect(0, 0, pixmap.width(), pixmap.height())
-        scene.update()
+        self.clear_blank_overlay(scene)
+        if (
+            not self.settings.get("showBlankImageOverlay", True)
+            or not getattr(self, "annotation_scene_active", False)
+            or getattr(self, "train_view_active", False)
+            or scene is not self.screen_view.scene()
+            or pixmap is None
+            or pixmap.isNull()
+            or self.scene_has_annotations(scene)
+        ):
+            return
+        # Only the actual annotation image can carry this badge. A cleared scene
+        # may still have a cached self.image, and other views use the same canvas.
+        for item in scene.items():
+            if isinstance(item, QGraphicsPixmapItem) and item.data(0) == "annotation_image":
+                if not item.pixmap().isNull():
+                    scene._blank_overlay_image_item = item
+                    self.screen_view.viewport().update()
+                break
 
     def get_head_class_id(self):
         """
@@ -50058,26 +51385,22 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             self.stop_next_timer()
             self.stop_prev_timer()
 
-        if button is not None:
-            button.setText("Propagate: On" if enabled else "Propagate: Off")
-            button.setToolTip(
-                "Propagation is ON. Prev or Next will propagate all current annotations "
-                "to exactly one adjacent image. Correct them there before moving again."
-                if enabled
-                else "Turn on frame-by-frame propagation. Each Prev or Next move copies all "
-                "current annotations to that one adjacent image and corrects them with SAM3."
-            )
-            button.setStyleSheet(
-                "QPushButton { border: 1px solid #39b86b; color: #b8f5cc; }"
-                if enabled
-                else ""
-            )
+        if enabled:
+            self.start_sam3_propagation_warmup()
+        else:
+            self._set_navigation_propagation_button_state("off")
+            self._sam3_propagation_release_pending = True
+            released = self._release_sam_video_propagation_runtime()
 
         if hasattr(self, "statusBar"):
             self.statusBar().showMessage(
-                "Frame-by-frame propagation enabled. Use Prev or Next to move one image."
+                "Frame-by-frame propagation enabled; preparing its SAM3 tracker in the background."
                 if enabled
-                else "Frame-by-frame propagation disabled.",
+                else (
+                    "Frame-by-frame propagation disabled; its SAM3 tracker was released."
+                    if released
+                    else "Frame-by-frame propagation disabled; its SAM3 tracker will release when current work finishes."
+                ),
                 4000,
             )
 
@@ -50203,6 +51526,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         )
 
     def _start_adjacent_propagation(self, source_file, target_file):
+        if getattr(self, "_sam3_propagation_shutting_down", False):
+            return False
         worker = getattr(self, "_adjacent_propagation_worker", None)
         if self.qthread_is_running(worker):
             return False
@@ -50221,9 +51546,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 result, generation
             )
         )
-        worker.finished.connect(lambda worker=worker: self._cleanup_worker_reference(
-            "_adjacent_propagation_worker", worker
-        ))
+        worker.finished.connect(
+            lambda worker=worker: self._on_adjacent_propagation_worker_finished(worker)
+        )
         self._adjacent_propagation_worker = worker
         if hasattr(self, "statusBar"):
             self.statusBar().showMessage(
@@ -50232,7 +51557,16 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         worker.start()
         return True
 
+    def _on_adjacent_propagation_worker_finished(self, worker):
+        self._cleanup_worker_reference("_adjacent_propagation_worker", worker)
+        if (
+            getattr(self, "_sam3_propagation_release_pending", False)
+        ):
+            QTimer.singleShot(0, self._release_sam_video_propagation_runtime)
+
     def _on_adjacent_propagation_completed(self, result, generation=None):
+        if getattr(self, "_sam3_propagation_shutting_down", False):
+            return
         if generation is not None and int(generation) != int(
             getattr(self, "_adjacent_propagation_generation", 0) or 0
         ):
@@ -50342,6 +51676,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         undo_button.clicked.connect(undo_from_dialog)
 
         def run():
+            if any(self.qthread_is_running(worker) for worker in (
+                getattr(self, "_sam3_propagation_warmup_worker", None),
+                getattr(self, "_adjacent_propagation_worker", None),
+            )) or getattr(self, "_sam3_propagation_batch_active", False):
+                status.setText("The propagation tracker is busy preparing or processing a frame. Try Propagate again when it is ready.")
+                return
             run_button.setEnabled(False)
             stop_button.setEnabled(True)
             self._propagation_stop_requested = False
@@ -50669,8 +52009,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         """Track prompt boxes across one adjacent pair with native SAM3 video memory."""
         if not prompt_bboxes:
             return []
-        predictor = self.ensure_sam_video_predictor_loaded(imgsz=self._sam_imgsz())
-        if predictor is None:
+        if getattr(self, "_sam3_video_propagation_unavailable", False) or getattr(
+            self, "_sam3_propagation_shutting_down", False
+        ):
             return None
 
         target_h, target_w = target_image.shape[:2]
@@ -50709,22 +52050,23 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             finally:
                 writer.release()
 
-            inference_lock = getattr(self, "_sam_video_inference_lock", None)
-            if inference_lock is None:
-                inference_lock = threading.RLock()
-                self._sam_video_inference_lock = inference_lock
-            with inference_lock:
-                predictor.inference_state.clear()
-                predictor.im = None
-                predictor.features = None
-                predictor.prompts = {}
-                results = list(
-                    predictor(
-                        source=video_path,
-                        bboxes=scaled_prompts,
-                        stream=True,
+            with self._sam_video_inference_lock:
+                predictor = self.ensure_sam_video_predictor_loaded(imgsz=self._sam_imgsz())
+                if predictor is None:
+                    return None
+                try:
+                    self._reset_sam3_video_session(predictor)
+                    results = list(
+                        predictor(
+                            source=video_path,
+                            bboxes=scaled_prompts,
+                            stream=True,
+                        )
                     )
-                )
+                finally:
+                    # Reset/capture release must finish before another pair or
+                    # the warm-up worker can start using this same predictor.
+                    self._reset_sam3_video_session(predictor)
             if len(results) < 2:
                 return []
             result_masks = getattr(getattr(results[-1], "masks", None), "data", None)
@@ -50746,12 +52088,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             logger.warning("Native SAM3 video propagation failed; using safe Snap fallback: %s", e)
             return None
         finally:
-            try:
-                capture = getattr(getattr(predictor, "dataset", None), "cap", None)
-                if capture is not None:
-                    capture.release()
-            except Exception:
-                pass
             try:
                 os.remove(video_path)
             except OSError:
@@ -52123,11 +53459,20 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
     def _run_propagation_frames(
         self, frame_records, seed_image, seed_lines, options, manifest, status_label
     ):
-        self._active_propagation_preprocessing_state = self._preprocessing_state_snapshot()
-        processed_seed = self._apply_propagation_preprocessing(
-            seed_image, self._active_propagation_preprocessing_state
-        )
+        if getattr(self, "_sam3_propagation_shutting_down", False):
+            return 0
+        if any(self.qthread_is_running(worker) for worker in (
+            getattr(self, "_sam3_propagation_warmup_worker", None),
+            getattr(self, "_adjacent_propagation_worker", None),
+        )) or getattr(self, "_sam3_propagation_batch_active", False):
+            status_label.setText("The propagation tracker is busy preparing or processing a frame. Try Propagate again when it is ready.")
+            return 0
+        self._sam3_propagation_batch_active = True
         try:
+            self._active_propagation_preprocessing_state = self._preprocessing_state_snapshot()
+            processed_seed = self._apply_propagation_preprocessing(
+                seed_image, self._active_propagation_preprocessing_state
+            )
             predictor = self.ensure_sam_video_predictor_loaded(imgsz=self._sam_imgsz())
             if predictor is not None:
                 changed_count = self._run_propagation_frames_native_session(
@@ -52149,6 +53494,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             )
         finally:
             self._active_propagation_preprocessing_state = None
+            self._sam3_propagation_batch_active = False
+            if not getattr(self, "_image_navigation_propagation_enabled", False) or getattr(
+                self, "_sam3_propagation_release_pending", False
+            ):
+                self._sam3_propagation_release_pending = True
+                self._release_sam_video_propagation_runtime()
 
     def propagate_image_sequence_labels(self, options, status_label):
         self._propagation_stop_requested = False
@@ -52398,12 +53749,16 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         all_images = [
             self.normalize_path(path)
             for path in (self.image_files or [])
-            if os.path.exists(path)
+            if os.path.exists(path) and not self.is_placeholder_file(path)
         ]
         if normalized_target not in all_images:
             all_images.append(normalized_target)
         self.image_files = sorted(all_images, key=video_frame_sort_key)
-        filtered = [self.normalize_path(path) for path in (self.filtered_image_files or []) if os.path.exists(path)]
+        filtered = [
+            self.normalize_path(path)
+            for path in (self.filtered_image_files or [])
+            if os.path.exists(path) and not self.is_placeholder_file(path)
+        ]
         if normalized_target not in filtered:
             filtered.append(normalized_target)
         self.filtered_image_files = sorted(filtered, key=video_frame_sort_key)
@@ -52506,7 +53861,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                     video_context, offset, current_file
                 )
 
-            files = list(getattr(self, "filtered_image_files", []) or [])
+            files = [
+                path
+                for path in list(getattr(self, "filtered_image_files", []) or [])
+                if path and not self.is_placeholder_file(path)
+            ]
             if not files:
                 return False
 
@@ -55650,6 +57009,24 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             image_files = self._training_eval_image_files_from_directory(dataset_dir)
         image_files = [self.normalize_path(path) for path in image_files or [] if path]
         image_files = sorted(dict.fromkeys(image_files))
+        try:
+            from darkfusion_negative_crops import resolve_negative_folder
+
+            blanks_dir = resolve_negative_folder(dataset_dir, create=False)
+            blank_files = (
+                self._training_eval_image_files_from_directory(blanks_dir)
+                if os.path.isdir(blanks_dir)
+                else []
+            )
+        except Exception:
+            blank_files = []
+        blank_files = sorted(dict.fromkeys(
+            self.normalize_path(path) for path in blank_files if path
+        ))
+        if blank_files:
+            image_files = sorted(dict.fromkeys([*image_files, *blank_files]))
+            logger.info("Included %s image(s) from the shared blanks folder.", len(blank_files))
+        blank_set = set(blank_files)
         if not image_files:
             raise ValueError("No dataset images were found for training YAML creation.")
 
@@ -55715,12 +57092,22 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             valid_files = list(image_files)
             note = "Validation uses the training list. Metrics are for smoke-checking only."
         else:
-            train_files, valid_files = self._training_eval_train_val_split(image_files, split_percent)
+            split_source = [path for path in image_files if path not in blank_set]
+            train_files, valid_files = self._training_eval_train_val_split(
+                split_source or image_files,
+                split_percent,
+            )
             if not valid_files:
                 valid_files = list(train_files)
                 note = "Dataset is too small for a holdout split; validation uses the training list."
             else:
                 note = f"Validation auto-split uses {len(valid_files)} image(s) ({split_percent:g}%)."
+
+        # Background-only examples belong in training.  Keeping the shared
+        # blanks folder out of validation avoids diluting validation metrics.
+        if blank_set:
+            train_files = list(dict.fromkeys([*train_files, *blank_files]))
+            valid_files = [path for path in valid_files if path not in blank_set]
 
         train_files = [path for path in train_files if path]
         valid_files = [path for path in valid_files if path]
@@ -59091,6 +60478,47 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             return "success", "Ready"
         return "idle", "Idle"
 
+    def _training_eval_update_eta(self, widgets, run_dir, resume_info, rows, csv_signature, message=""):
+        from training_eta import training_eta
+
+        eta_label = widgets.get("eta_label")
+        eta_detail_label = widgets.get("eta_detail_label")
+        if eta_label is None or sip.isdeleted(eta_label):
+            return
+        context = widgets.get("_eta_context", {})
+        if context.get("run_dir") != run_dir:
+            context = {}
+        args = dict(context.get("args", {}))
+        args.update(resume_info.get("args", {}) or {})
+        mode = str(args.get("mode", "train") or "train").lower()
+        status = str(resume_info.get("status", "none"))
+        exit_match = re.search(r"finished with exit code (-?\d+)", message, flags=re.IGNORECASE)
+        if exit_match:
+            status = "complete" if int(exit_match.group(1)) == 0 else "failed"
+            context["final_status"] = status
+        elif context.get("final_status"):
+            status = context["final_status"]
+        elif "running" in message.lower():
+            status = "running"
+        elif resume_info.get("exit_code") not in (None, 0):
+            status = "failed"
+        elif resume_info.get("exit_code") == 0:
+            status = "complete"
+        if context.get("stopped"):
+            status = "stopped"
+        estimate = training_eta(
+            rows,
+            args.get("epochs", resume_info.get("target_epochs", 0)),
+            status=status,
+            now=time.time(),
+            last_epoch_at=(csv_signature[1] / 1_000_000_000) if csv_signature else None,
+            starting_epoch=context.get("starting_epoch"),
+            mode=mode,
+        )
+        eta_label.setText(estimate["text"])
+        if eta_detail_label is not None and not sip.isdeleted(eta_detail_label):
+            eta_detail_label.setText(estimate["detail"])
+
     def _training_eval_refresh_run_widgets(
         self,
         widgets,
@@ -59102,7 +60530,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         widgets = widgets or {}
         run_dir = self.normalize_path(run_dir)
         log_path = self.normalize_path(log_path or self._training_eval_log_path(run_dir))
-        resume_info = self._training_eval_resume_info({"run_dir": run_dir, "log_path": log_path})
+        record = {"run_dir": run_dir, "log_path": log_path}
+        active_record = getattr(self, "training_evaluator_active_run", None)
+        if isinstance(active_record, dict) and self.normalize_path(active_record.get("run_dir", "")) == run_dir:
+            record.update(active_record)
+            if active_record.get("_eta_context"):
+                widgets["_eta_context"] = active_record["_eta_context"]
+        resume_info = self._training_eval_resume_info(record)
 
         state_label = widgets.get("run_state_label")
         if state_label is not None and not sip.isdeleted(state_label):
@@ -59151,6 +60585,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             else:
                 metrics_label.setText("Waiting for results.csv. Validation runs may only write plots/log output.")
         self._training_eval_update_baseline_widget(widgets)
+        self._training_eval_update_eta(widgets, run_dir, resume_info, rows, csv_signature, message)
 
         resume_note_label = widgets.get("resume_note_label")
         if resume_note_label is not None and not sip.isdeleted(resume_note_label):
@@ -59196,7 +60631,26 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if process is None:
             return
 
-        self._training_eval_record_run(title, run_dir, log_path, command=command, process=process)
+        record = self._training_eval_record_run(title, run_dir, log_path, command=command, process=process)
+        if widgets is not None:
+            command_args = {}
+            for part in command or []:
+                token = str(part).strip()
+                if "=" in token:
+                    key, value = token.split("=", 1)
+                    command_args[key.strip().lower()] = value.strip()
+                elif token.lower() in {"train", "val", "tune", "predict", "export"}:
+                    command_args["mode"] = token.lower()
+            _headers, starting_rows, _csv_path = self._training_eval_read_results_csv(run_dir)
+            widgets["_eta_context"] = {
+                "run_dir": self.normalize_path(run_dir),
+                "args": command_args,
+                "starting_epoch": self._training_eval_last_completed_epoch(starting_rows),
+            }
+            record["_eta_context"] = widgets["_eta_context"]
+            # A newly launched/resumed run must not inherit cached metrics or
+            # a completed estimate from the previously watched process.
+            widgets.pop("_csv_signature", None)
         timer = QTimer(self)
         timer.setInterval(2500)
         if not isinstance(getattr(self, "training_evaluator_run_timers", None), list):
@@ -59216,6 +60670,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 if widget_alive(status_label):
                     status_label.setText(f"{title} monitor failed: {e}")
                 self._training_eval_set_activity_indicator(widgets, "error", "Error", f"{title} monitor failed")
+                if widgets is not None:
+                    widgets.get("_eta_context", {})["final_status"] = "failed"
+                    _headers, rows, _csv_path = widgets.get("_metrics_cache", ([], [], ""))
+                    self._training_eval_update_eta(
+                        widgets, self.normalize_path(run_dir), {"status": "failed"}, rows, None,
+                    )
                 return
 
             running = exit_code is None
@@ -59432,7 +60892,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         task = str(task or "detect").strip().lower()
 
         lines = [
-            "DarkFusion Training Health Check",
+            "DarkFusion Training Setup Check",
             f"Python: {sys.executable}",
             f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             "",
@@ -59534,7 +60994,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if dock is not None and not sip.isdeleted(dock):
             return dock
 
-        dock = QtWidgets.QDockWidget("Dataset Review", self)
+        dock = QtWidgets.QDockWidget("Review Queue", self)
         dock.setObjectName("validationReviewDock")
         dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
         dock.setFeatures(
@@ -59547,9 +61007,16 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         panel_layout.setContentsMargins(10, 10, 10, 10)
         panel_layout.setSpacing(8)
 
+        self.validation_review_source_label = QtWidgets.QLabel("REVIEW QUEUE")
+        self.validation_review_source_label.setAlignment(Qt.AlignCenter)
+        self.validation_review_source_label.setStyleSheet(
+            "QLabel { background: #263443; border: 1px solid #49627a; border-radius: 4px; "
+            "padding: 5px; color: #dce6f0; font-weight: 800; }"
+        )
+        panel_layout.addWidget(self.validation_review_source_label)
         self.validation_review_position_label = QtWidgets.QLabel("0 / 0")
         self.validation_review_position_label.setStyleSheet("font-weight: 800;")
-        self.validation_review_detail_label = QtWidgets.QLabel("No validation issue selected.")
+        self.validation_review_detail_label = QtWidgets.QLabel("No review finding selected.")
         self.validation_review_detail_label.setWordWrap(True)
         self.validation_review_detail_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         panel_layout.addWidget(self.validation_review_position_label)
@@ -59566,6 +61033,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         missed_label.setStyleSheet("color: #ff9f43; font-weight: 700;")
         weak_label = QtWidgets.QLabel("■  Weak match")
         weak_label.setStyleSheet("color: #f0d264; font-weight: 700;")
+        self.validation_review_missed_label = missed_label
+        self.validation_review_weak_label = weak_label
         panel_layout.addWidget(self.validation_review_gt_checkbox)
         panel_layout.addWidget(self.validation_review_pred_checkbox)
         panel_layout.addWidget(missed_label)
@@ -59591,6 +61060,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         accept_prediction_button.setEnabled(False)
         self.validation_review_accept_prediction_button = accept_prediction_button
         quarantine_button = QtWidgets.QPushButton("Quarantine Image")
+        self.validation_review_quarantine_button = quarantine_button
         negative_crop_button = QtWidgets.QPushButton("Save False Detection as Negative Crop")
         negative_crop_button.setToolTip(
             "Center a crop on this rejected false detection, exclude every saved ground-truth "
@@ -59601,6 +61071,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.validation_review_negative_crop_button = negative_crop_button
         ignore_button = QtWidgets.QPushButton("Ignore Issue")
         back_button = QtWidgets.QPushButton("Back to Dataset")
+        self.validation_review_ignore_button = ignore_button
+        self.validation_review_back_button = back_button
         panel_layout.addWidget(keep_button)
         panel_layout.addWidget(accept_prediction_button)
         panel_layout.addWidget(negative_crop_button)
@@ -59613,11 +61085,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.validation_review_dock = dock
         self.register_dock_context_help(
             dock,
-            "Dataset Review dock",
+            "Review Queue dock",
             (
-                "Explains the currently selected validation problem and lets you compare "
-                "ground truth with predictions, navigate issues, edit or keep labels, "
-                "quarantine images, and return to the dataset."
+                "Uses the normal Label Maker to clean either folder-based Dataset Analysis "
+                "findings or model-based Validation Review findings. The source badge identifies "
+                "which queue is active."
             ),
             "11-review-the-trained-model",
         )
@@ -60114,7 +61586,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             return None
 
         try:
-            from darkfusion_negative_crops import plan_negative_crop
+            from darkfusion_negative_crops import pad_crop_for_training, plan_negative_crop
             from darkfusion_validation_review import parse_ground_truth
 
             task = str(issue.get("task", "detect") or "detect")
@@ -60124,26 +61596,15 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 or []
             )
             ground_truth = parse_ground_truth(image_path, task, class_names)
-            network_width_widget = getattr(self, "network_width", None)
-            network_height_widget = getattr(self, "network_height", None)
-            network_width = (
-                int(network_width_widget.value())
-                if network_width_widget is not None and hasattr(network_width_widget, "value")
-                else image.shape[1]
-            )
-            network_height = (
-                int(network_height_widget.value())
-                if network_height_widget is not None and hasattr(network_height_widget, "value")
-                else image.shape[0]
-            )
-            network_width = max(1, network_width)
-            network_height = max(1, network_height)
             plan = plan_negative_crop(
                 image.shape[1],
                 image.shape[0],
                 prediction,
                 ground_truth,
-                aspect_ratio=network_width / float(network_height),
+                aspect_ratio=None,
+                context_scale=4.0,
+                minimum_context=32,
+                safety_margin=3,
             )
         except Exception as error:
             QMessageBox.warning(parent, "Negative Crop", f"Could not plan the crop:\n{error}")
@@ -60158,6 +61619,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         x1, y1, x2, y2 = plan["rect"]
         crop = image[y1:y2, x1:x2]
+        crop, padding = pad_crop_for_training(crop, 32, 1)
+        if crop is None:
+            QMessageBox.warning(parent, "Negative Crop", "The selected crop is empty.")
+            return None
         output_image, output_label, issue_key = self._validation_negative_crop_paths(
             issue, image_path, label_path
         )
@@ -60193,6 +61658,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                     "image_path": output_image,
                     "label_path": output_label,
                     "crop_xyxy": list(plan["rect"]),
+                    "padding_ltrb": list(padding),
                     "prediction": prediction,
                     "excluded_ground_truth_count": int(plan.get("protected_count", 0)),
                 }, ensure_ascii=False) + "\n")
@@ -60224,267 +61690,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             return self.set_current_validation_review_status("negative_crop_saved")
         return False
 
-    def remove_current_teammate_ground_truth(self):
-        """Remove one reviewed teammate row while keeping a recovery record."""
-        issue = getattr(self, "validation_review_current_issue", None)
-        if not isinstance(issue, dict) or str(issue.get("type", "")) != "teammate_marker":
-            return False
-
-        self._save_active_validation_review_edits()
-        self._refresh_active_validation_ground_truth(redraw=False, persist=False)
-        ground_truth = issue.get("ground_truth")
-        line_index = ground_truth.get("label_line") if isinstance(ground_truth, dict) else None
-        image_path = self.normalize_path(issue.get("image_path", ""))
-        label_path = self.normalize_path(issue.get("label_path", "")) or self.get_label_file(image_path)
-        lines = self.load_label_lines(label_path) if label_path and os.path.isfile(label_path) else []
-        if not isinstance(line_index, int) or not (0 <= line_index < len(lines)):
-            QMessageBox.warning(
-                self,
-                "Remove Teammate Label",
-                "That annotation row is no longer present. Reload the teammate scan if the label was edited elsewhere.",
-            )
-            return False
-
-        removed_line = str(lines[line_index]).strip()
-        metadata_dir = self.normalize_path(os.path.join(os.path.dirname(label_path), PROJECT_SETTINGS_DIR))
-        os.makedirs(metadata_dir, exist_ok=True)
-        recovery_path = self.normalize_path(os.path.join(metadata_dir, "removed_teammate_labels.jsonl"))
-        recovery = {
-            "removed_at": datetime.now().isoformat(timespec="seconds"),
-            "image_path": image_path,
-            "label_path": label_path,
-            "line_index": line_index,
-            "label_line": removed_line,
-            "issue_id": issue.get("id"),
-            "confidence": issue.get("confidence"),
-        }
-        try:
-            with open(recovery_path, "a", encoding="utf-8") as handle:
-                handle.write(json.dumps(recovery, ensure_ascii=False) + "\n")
-        except Exception as error:
-            QMessageBox.warning(
-                self,
-                "Remove Teammate Label",
-                f"Could not create the recovery log, so no label was removed:\n{error}",
-            )
-            return False
-
-        del lines[line_index]
-        if not self._write_label_lines(label_path, lines):
-            QMessageBox.warning(
-                self,
-                "Remove Teammate Label",
-                f"Could not update {os.path.basename(label_path)}. The recovery log was retained.",
-            )
-            return False
-
-        issue["ground_truth"] = None
-        self.display_image(image_path, rebuild_preview=True)
-        self._draw_validation_review_overlay_on_main()
-        self.statusBar().showMessage(
-            f"Removed teammate label; recovery saved to {os.path.basename(recovery_path)}.", 4500
-        )
-        return self.set_current_validation_review_status("teammate_label_removed")
-
-    def _sync_teammate_review_history(self, report):
-        """Merge saved teammate decisions into a report, including rewritten scan keys."""
-        if not isinstance(report, dict):
-            return 0
-        history_path = self.normalize_path(report.get("review_history_path", ""))
-        if not history_path or not os.path.isfile(history_path):
-            return 0
-        try:
-            with open(history_path, "r", encoding="utf-8", errors="replace") as handle:
-                decisions = dict((json.load(handle) or {}).get("decisions", {}) or {})
-        except Exception as error:
-            logger.warning("Could not read teammate confirmation history %s: %s", history_path, error)
-            return 0
-
-        valid_statuses = {"teammate_confirmed", "teammate_label_removed"}
-        restored = 0
-        matched_decisions = set()
-        unresolved = []
-        for issue in list(report.get("issues", []) or []):
-            if str(issue.get("type", "")) != "teammate_marker":
-                continue
-            issue_key = str(issue.get("issue_key", "") or "")
-            decision = decisions.get(issue_key, {})
-            status = str(decision.get("status", "") or "") if isinstance(decision, dict) else ""
-            if status in valid_statuses:
-                matched_decisions.add(issue_key)
-                if str(issue.get("review_status", "")) != status:
-                    issue["review_status"] = status
-                    restored += 1
-            else:
-                unresolved.append(issue)
-
-        # A running/repeated scan can recreate an issue after the label line number
-        # changed, which changes its hash.  Recover only unambiguous identity groups.
-        def identity(item):
-            try:
-                class_id = int(item.get("class_id", -1))
-            except (TypeError, ValueError):
-                class_id = -1
-            return (
-                os.path.normcase(self.normalize_path(item.get("image_path", ""))),
-                str(item.get("task", "")),
-                str(item.get("type", "")),
-                class_id,
-            )
-
-        issues_by_identity = {}
-        for issue in unresolved:
-            issues_by_identity.setdefault(identity(issue), []).append(issue)
-        decisions_by_identity = {}
-        for decision_key, decision in decisions.items():
-            if decision_key in matched_decisions or not isinstance(decision, dict):
-                continue
-            status = str(decision.get("status", "") or "")
-            if status not in valid_statuses or str(decision.get("type", "")) != "teammate_marker":
-                continue
-            decisions_by_identity.setdefault(identity(decision), []).append(decision)
-        for group_key, issue_group in issues_by_identity.items():
-            decision_group = decisions_by_identity.get(group_key, [])
-            # Multiple saved keys can refer to the same candidate after repeated
-            # scans changed its label-line hash.  If there are at least as many
-            # confirmed decisions as current candidates, every current candidate
-            # in this identity group has been accounted for.
-            if not decision_group or len(decision_group) < len(issue_group):
-                continue
-            statuses = {str(decision.get("status", "") or "") for decision in decision_group}
-            if len(statuses) != 1:
-                continue
-            status = statuses.pop()
-            for issue in issue_group:
-                if str(issue.get("review_status", "")) != status:
-                    issue["review_status"] = status
-                    restored += 1
-        return restored
-
-    def remove_confirmed_teammate_ground_truths(self, report, progress_callback=None):
-        """Remove every teammate candidate explicitly confirmed in a review report."""
-        if not isinstance(report, dict):
-            return {"removed": 0, "skipped": 0, "files": 0, "recovery_path": ""}
-        history_path = self.normalize_path(report.get("review_history_path", ""))
-        self._sync_teammate_review_history(report)
-        confirmed = [
-            issue for issue in list(report.get("issues", []) or [])
-            if str(issue.get("type", "")) == "teammate_marker"
-            and str(issue.get("review_status", "")) == "teammate_confirmed"
-            and isinstance(issue.get("ground_truth"), dict)
-        ]
-        if not confirmed:
-            return {"removed": 0, "skipped": 0, "files": 0, "recovery_path": ""}
-
-        try:
-            from darkfusion_validation_review import object_iou, parse_ground_truth
-        except Exception as error:
-            logger.warning("Could not load teammate removal helpers: %s", error)
-            return {"removed": 0, "skipped": len(confirmed), "files": 0, "recovery_path": ""}
-
-        grouped = OrderedDict()
-        for issue in confirmed:
-            image_path = self.normalize_path(issue.get("image_path", ""))
-            label_path = self.normalize_path(issue.get("label_path", "")) or self.get_label_file(image_path)
-            if image_path and label_path:
-                grouped.setdefault((image_path, label_path), []).append(issue)
-
-        data_path = self.normalize_path(report.get("data", ""))
-        metadata_dir = os.path.dirname(data_path) if data_path else ""
-        if not metadata_dir:
-            first_label = next((key[1] for key in grouped), "")
-            metadata_dir = os.path.join(os.path.dirname(first_label), PROJECT_SETTINGS_DIR)
-        os.makedirs(metadata_dir, exist_ok=True)
-        recovery_path = self.normalize_path(os.path.join(metadata_dir, "removed_teammate_labels.jsonl"))
-        removed_count = 0
-        skipped_count = 0
-        changed_files = 0
-
-        total_files = len(grouped)
-        for file_number, ((image_path, label_path), issues) in enumerate(grouped.items()):
-            if callable(progress_callback):
-                progress_callback(file_number, total_files, os.path.basename(label_path))
-            if not os.path.isfile(label_path):
-                skipped_count += len(issues)
-                continue
-            lines = self.load_label_lines(label_path)
-            task = str(issues[0].get("task", "detect") or "detect")
-            class_names = list(report.get("class_names", []) or getattr(self, "class_names", []) or [])
-            try:
-                current_objects = parse_ground_truth(image_path, task, class_names)
-            except Exception:
-                current_objects = []
-            claimed_lines = set()
-            removals = []
-            for issue in issues:
-                reference = issue.get("ground_truth") or {}
-                class_id = reference.get("class_id")
-                candidates = [
-                    item for item in current_objects
-                    if item.get("label_line") not in claimed_lines
-                    and (class_id is None or item.get("class_id") == class_id)
-                ]
-                if not candidates:
-                    skipped_count += 1
-                    continue
-                scored = [(object_iou(item, reference, task), item) for item in candidates]
-                overlap, matched = max(scored, key=lambda pair: pair[0])
-                line_index = matched.get("label_line")
-                if overlap < 0.25 or not isinstance(line_index, int) or not (0 <= line_index < len(lines)):
-                    skipped_count += 1
-                    continue
-                claimed_lines.add(line_index)
-                removals.append((line_index, issue, overlap))
-
-            if not removals:
-                continue
-            recovery_rows = []
-            for line_index, issue, overlap in removals:
-                recovery_rows.append({
-                    "removed_at": datetime.now().isoformat(timespec="seconds"),
-                    "batch": True,
-                    "image_path": image_path,
-                    "label_path": label_path,
-                    "line_index": line_index,
-                    "label_line": str(lines[line_index]).strip(),
-                    "issue_id": issue.get("id"),
-                    "confidence": issue.get("confidence"),
-                    "matched_iou": round(float(overlap), 6),
-                })
-            try:
-                with open(recovery_path, "a", encoding="utf-8") as handle:
-                    for row in recovery_rows:
-                        handle.write(json.dumps(row, ensure_ascii=False) + "\n")
-            except Exception as error:
-                logger.warning("Could not write teammate recovery log: %s", error)
-                skipped_count += len(removals)
-                continue
-
-            updated_lines = list(lines)
-            for line_index, _issue, _overlap in sorted(removals, key=lambda item: item[0], reverse=True):
-                del updated_lines[line_index]
-            if not self._write_label_lines(label_path, updated_lines):
-                skipped_count += len(removals)
-                continue
-            changed_files += 1
-            removed_count += len(removals)
-            for _line_index, issue, _overlap in removals:
-                issue["review_status"] = "teammate_label_removed"
-                issue["ground_truth"] = None
-                self._record_validation_review_decision(
-                    issue, "teammate_label_removed", history_path
-                )
-
-        if callable(progress_callback):
-            progress_callback(total_files, total_files, "Finishing review report...")
-
-        return {
-            "removed": removed_count,
-            "skipped": skipped_count,
-            "files": changed_files,
-            "recovery_path": recovery_path,
-        }
-
     def _show_validation_review_issue(self, index):
         issues = list(getattr(self, "validation_review_queue", []) or [])
         if not issues:
@@ -60498,22 +61703,56 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             return False
         self.validation_review_index = index
         self.validation_review_current_issue = issue
+        is_dataset_analysis = str(issue.get("source", "")) == "dataset_health"
+        dock = self._ensure_validation_review_dock()
+        dock.setWindowTitle("Dataset Cleanup" if is_dataset_analysis else "Validation Cleanup")
+        source_label = getattr(self, "validation_review_source_label", None)
+        if source_label is not None and not sip.isdeleted(source_label):
+            source_label.setText("DATASET ANALYSIS" if is_dataset_analysis else "MODEL VALIDATION")
+            source_label.setStyleSheet(
+                "QLabel { background: %s; border: 1px solid %s; border-radius: 4px; "
+                "padding: 5px; color: #ffffff; font-weight: 800; }"
+                % (("#234532", "#3b7a55") if is_dataset_analysis else ("#263d55", "#4779a7"))
+            )
+        ground_truth_checkbox = getattr(self, "validation_review_gt_checkbox", None)
+        if ground_truth_checkbox is not None and not sip.isdeleted(ground_truth_checkbox):
+            ground_truth_checkbox.setText(
+                "■  Affected annotation" if is_dataset_analysis else "■  Ground truth"
+            )
+        prediction_checkbox = getattr(self, "validation_review_pred_checkbox", None)
+        if prediction_checkbox is not None and not sip.isdeleted(prediction_checkbox):
+            prediction_checkbox.setVisible(not is_dataset_analysis)
+        for legend_name in ("validation_review_missed_label", "validation_review_weak_label"):
+            legend = getattr(self, legend_name, None)
+            if legend is not None and not sip.isdeleted(legend):
+                legend.setVisible(not is_dataset_analysis)
         accept_button = getattr(self, "validation_review_accept_prediction_button", None)
         if accept_button is not None and not sip.isdeleted(accept_button):
+            accept_button.setVisible(not is_dataset_analysis)
             accept_button.setEnabled(
+                not is_dataset_analysis
+                and
                 isinstance(issue.get("prediction"), dict)
                 and str(issue.get("task", "detect")) != "classify"
                 and str(issue.get("type", "")) != "duplicate_prediction"
             )
         negative_crop_button = getattr(self, "validation_review_negative_crop_button", None)
         if negative_crop_button is not None and not sip.isdeleted(negative_crop_button):
+            negative_crop_button.setVisible(not is_dataset_analysis)
             negative_crop_button.setEnabled(
+                not is_dataset_analysis
+                and
                 str(issue.get("type", "")) in {"false_positive", "hard_negative"}
                 and isinstance(issue.get("prediction"), dict)
             )
         keep_button = getattr(self, "validation_review_keep_button", None)
         if keep_button is not None and not sip.isdeleted(keep_button):
-            if str(issue.get("type", "")) == "hard_negative":
+            if is_dataset_analysis:
+                keep_button.setText("Mark Finding Reviewed")
+                keep_button.setToolTip(
+                    "Keep the saved dataset annotation as it is, mark this finding reviewed, and continue."
+                )
+            elif str(issue.get("type", "")) == "hard_negative":
                 keep_button.setText("Keep Image Blank (Hard Negative)")
                 keep_button.setToolTip(
                     "Confirm that this prediction should be ignored, keep the original label file empty, and continue."
@@ -60523,6 +61762,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 keep_button.setToolTip(
                     "Keep the saved dataset label unchanged, mark this issue reviewed, and continue."
                 )
+        ignore_button = getattr(self, "validation_review_ignore_button", None)
+        if ignore_button is not None and not sip.isdeleted(ignore_button):
+            ignore_button.setText("Skip Finding" if is_dataset_analysis else "Ignore Issue")
+        back_button = getattr(self, "validation_review_back_button", None)
+        if back_button is not None and not sip.isdeleted(back_button):
+            back_button.setText(
+                "Back to Dataset Analysis" if is_dataset_analysis else "Back to Validation Review"
+            )
         self.current_file = image_path
         queue_images = list(getattr(self, "validation_review_image_files", []) or [])
         try:
@@ -60539,18 +61786,27 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             image_path
         )
         self._draw_validation_review_overlay_on_main()
-        dock = self._ensure_validation_review_dock()
         dock.show()
         issue_name = str(issue.get("type", "") or "").replace("_", " ").title()
         confidence = issue.get("confidence")
         overlap = issue.get("iou")
         details = [
             issue_name,
+            "Source: Dataset Analysis" if is_dataset_analysis else "Source: Model Validation",
             f"Task: {issue.get('task', '')}",
-            f"Class: {issue.get('class_name', '')}",
-            f"Image: {os.path.basename(image_path)}",
-            f"Label: {os.path.basename(str(issue.get('label_path', '') or ''))}",
         ]
+        class_id = issue.get("class_id", -1)
+        if issue.get("class_name") or (isinstance(class_id, int) and class_id >= 0):
+            details.append(f"Class: {issue.get('class_name', '') or issue.get('class_id', '')}")
+        details.append(f"Image: {os.path.basename(image_path)}")
+        label_name = os.path.basename(str(issue.get("label_path", "") or ""))
+        if label_name:
+            details.append(f"Label: {label_name}")
+        report_dataset = self.normalize_path(
+            (getattr(self, "validation_review_report", {}) or {}).get("dataset_dir", "")
+        )
+        if report_dataset:
+            details.append(f"Dataset folder: {report_dataset}")
         if confidence is not None:
             details.append(f"Confidence: {float(confidence):.3f}")
         if overlap is not None:
@@ -60560,27 +61816,36 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         guidance = (
             "Inspect the highlighted saved annotation with the normal Label Maker tools. "
             "Correct it when needed, then keep or ignore the finding to advance through the health queue."
-            if str(issue.get("source", "")) == "dataset_health"
+            if is_dataset_analysis
             else self._validation_review_issue_guidance(issue.get("type"))
         )
         details.extend(["", guidance])
-        self.validation_review_position_label.setText(f"Issue {index + 1} / {len(issues)}")
+        item_word = "Finding" if is_dataset_analysis else "Issue"
+        self.validation_review_position_label.setText(
+            f"{item_word} {index + 1} / {len(issues)}"
+        )
         self.validation_review_detail_label.setText("\n".join(details))
-        self.statusBar().showMessage(f"Validation review: {issue_name}", 3000)
+        queue_name = "Dataset analysis" if is_dataset_analysis else "Validation review"
+        self.statusBar().showMessage(f"{queue_name}: {issue_name}", 3000)
         return True
 
     def open_validation_review_issue_in_labeler(self, issue, report_path="", queue=None):
         if not isinstance(issue, dict):
             return False
+        is_dataset_analysis = str(issue.get("source", "")) == "dataset_health"
         requested_image_path = self.normalize_path(issue.get("image_path", ""))
         if not requested_image_path or not os.path.isfile(requested_image_path):
             QMessageBox.warning(
                 getattr(self, "training_evaluator_dialog", None) or self,
-                "Validation Review Image Missing",
+                "Review Image Missing",
                 (
-                    "This report does not contain a usable dataset image path:\n\n"
+                    "This review does not contain a usable original dataset image path:\n\n"
                     f"{requested_image_path or '(empty path)'}\n\n"
-                    "Run Analyze Errors again to rebuild the report with real dataset paths."
+                    + (
+                        "Refresh Dataset Analysis after confirming that the dataset folder is still available."
+                        if is_dataset_analysis
+                        else "Run Find Validation Problems again to rebuild the report with real dataset paths."
+                    )
                 ),
             )
             return False
@@ -60624,6 +61889,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         # Move it out of the way and explicitly focus the labeler so opening an
         # issue has an immediate, visible result.
         training_dialog = getattr(self, "training_evaluator_dialog", None)
+        if not is_dataset_analysis and training_dialog is not None and not sip.isdeleted(training_dialog):
+            self._validation_review_source_dialog = training_dialog
         if training_dialog is not None and not sip.isdeleted(training_dialog):
             training_dialog.hide()
         if self.isMinimized():
@@ -60657,7 +61924,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 saved_issue["review_status"] = str(status)
                 break
         saved = self._write_active_validation_review_report()
-        self.statusBar().showMessage(f"Validation issue marked {status}.", 2500)
+        queue_name = (
+            "Dataset finding"
+            if str(issue.get("source", "")) == "dataset_health"
+            else "Validation issue"
+        )
+        self.statusBar().showMessage(f"{queue_name} marked {status}.", 2500)
         if saved:
             self.navigate_validation_review_issue(1)
         return saved
@@ -60718,6 +61990,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         return True
 
     def close_validation_review_mode(self):
+        closing_issue = getattr(self, "validation_review_current_issue", None) or {}
+        was_dataset_analysis = str(closing_issue.get("source", "")) == "dataset_health"
         self._save_active_validation_review_edits()
         self._clear_validation_review_overlay_on_main()
         dock = getattr(self, "validation_review_dock", None)
@@ -60746,7 +62020,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             source_dialog.show()
             source_dialog.raise_()
             source_dialog.activateWindow()
-        self.statusBar().showMessage("Returned to the previous dataset view.", 2500)
+        destination = "Dataset Analysis" if was_dataset_analysis else "Validation Review"
+        self.statusBar().showMessage(f"Returned to {destination}.", 2500)
 
     def open_training_evaluator_dialog(self):
         existing = getattr(self, "training_evaluator_dialog", None)
@@ -61227,6 +62502,29 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         status_row.addWidget(activity_indicator)
         status_row.addWidget(run_state_label, 1)
         metrics_layout.addLayout(status_row)
+        eta_panel = QtWidgets.QFrame()
+        eta_panel.setObjectName("trainingEtaPanel")
+        eta_panel.setStyleSheet(
+            "QFrame#trainingEtaPanel { background: #142839; border: 1px solid #4fa3ff; "
+            "border-radius: 6px; }"
+        )
+        eta_layout = QtWidgets.QVBoxLayout(eta_panel)
+        eta_layout.setContentsMargins(12, 8, 12, 8)
+        eta_layout.setSpacing(3)
+        eta_label = QtWidgets.QLabel("Estimated completion: waiting for training")
+        eta_label.setObjectName("trainingEtaLabel")
+        eta_label.setWordWrap(True)
+        eta_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #8dccff; border: none;")
+        eta_detail_label = QtWidgets.QLabel("An estimate appears after the first completed epoch.")
+        eta_detail_label.setWordWrap(True)
+        eta_detail_label.setStyleSheet("color: #dce6f0; border: none;")
+        eta_panel.setToolTip(
+            "Estimated from the last five completed epoch timings, including validation. "
+            "The finish time updates as training progresses; early stopping and final saving can change it."
+        )
+        eta_layout.addWidget(eta_label)
+        eta_layout.addWidget(eta_detail_label)
+        metrics_layout.addWidget(eta_panel)
         run_dir_label = QtWidgets.QLabel("Run: none")
         run_dir_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         run_dir_label.setStyleSheet("color: #9aa4af;")
@@ -61312,17 +62610,16 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         validation_review_layout.setSpacing(8)
 
         review_workflow_help = QtWidgets.QLabel(
-            "<b>Review and fix the original dataset</b><br>"
-            "1. Choose <b>Entire Dataset</b>, then click <b>Find Problem Images</b> to compare the "
+            "<b>Model Validation Review</b><br>"
+            "1. Choose <b>Entire Dataset</b>, then click <b>Find Validation Problems</b> to compare the "
             "selected checkpoint with every unique original image and saved label. Limited runs "
             "continue in batches.<br>"
-            "2. Select an issue to compare the saved annotation with the model prediction.<br>"
-            "3. Click <b>Open Original in Labeler</b>. Use the normal drawing tools, choose "
+            "2. Select a finding and open it in <b>Label Maker</b>. Use the normal drawing tools, choose "
             "<b>Use Prediction as Ground Truth</b>, or keep the current label. Your normal "
             "Previous/Next controls advance through the issue queue and save the original labels.<br>"
             "Predictions on intentionally blank images are separated as <b>Hard Negatives</b>; "
             "keep those images blank when the detected object should be ignored.<br>"
-            "4. Run this analysis again after cleanup, then retrain on the corrected dataset.<br>"
+            "3. Run this analysis again after cleanup, then retrain on the corrected dataset.<br>"
             "<i>Metrics Only</i> calculates mAP/precision/recall; it does not create an editable image queue."
         )
         review_workflow_help.setWordWrap(True)
@@ -61331,6 +62628,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             "border-radius: 6px; padding: 9px; color: #dce6f0; }"
         )
         validation_review_layout.addWidget(review_workflow_help)
+
+        model_review_source_label = QtWidgets.QLabel()
+        model_review_source_label.setWordWrap(True)
+        model_review_source_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        model_review_source_label.setStyleSheet("color: #9aa4af; padding: 2px 0;")
+        validation_review_layout.addWidget(model_review_source_label)
 
         review_controls = QtWidgets.QGridLayout()
         review_split_combo = QtWidgets.QComboBox()
@@ -61363,7 +62666,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             "Use All to scan the complete selected dataset split. Limited runs automatically "
             "continue with the next batch instead of rescanning the first images."
         )
-        review_analyze_btn = QtWidgets.QPushButton("1. Find Problem Images")
+        review_analyze_btn = QtWidgets.QPushButton("1. Find Validation Problems")
         review_analyze_btn.setToolTip(
             "Run the trained model on original dataset images and compare every prediction "
             "with the matching saved annotation. Predictions on blank images become hard negatives."
@@ -61373,11 +62676,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             "Calculate aggregate validation scores. This does not build the editable problem-image queue."
         )
         review_load_btn = QtWidgets.QPushButton("Open Saved Review")
-        review_health_scan_btn = QtWidgets.QPushButton("Dataset Health Scan")
-        review_health_scan_btn.setToolTip(
-            "Scan labels and images for malformed annotations, duplicates, tiny objects, "
-            "missing files, and other dataset-health findings, then review them in the shared viewer."
-        )
         review_compare_btn = QtWidgets.QPushButton("Compare Report")
         review_export_btn = QtWidgets.QPushButton("Export CSV")
         review_reset_history_btn = QtWidgets.QPushButton("Reset Reviewed")
@@ -61397,7 +62695,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         review_controls.addWidget(review_limit_spin, 1, 1)
         review_action_row = self._row_layout(8)
         review_action_row.addWidget(review_validate_metrics_btn)
-        review_action_row.addWidget(review_health_scan_btn)
         review_action_row.addWidget(review_analyze_btn)
         review_action_row.addWidget(review_stop_btn)
         review_action_row.addWidget(review_load_btn)
@@ -61410,8 +62707,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         validation_review_layout.addLayout(review_controls)
 
         review_status_label = QtWidgets.QLabel(
-            "Ready to find fixable problems in the original dataset. "
-            "The trained checkpoint and dataset are taken from Train Setup above."
+            "Ready to compare the selected checkpoint against the validation source shown above."
         )
         review_status_label.setWordWrap(True)
         review_status_label.setStyleSheet("color: #9aa4af; font-weight: 700;")
@@ -61456,7 +62752,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         review_filter_row.addWidget(review_search_edit, 1)
         validation_review_layout.addLayout(review_filter_row)
 
-        review_splitter = QtWidgets.QSplitter(Qt.Horizontal)
         review_issue_table = QtWidgets.QTableWidget()
         review_issue_table.setColumnCount(5)
         review_issue_table.setHorizontalHeaderLabels(["Type", "Class", "Conf", "IoU", "Image"])
@@ -61469,71 +62764,26 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         review_issue_table.setColumnWidth(1, 90)
         review_issue_table.setColumnWidth(2, 64)
         review_issue_table.setColumnWidth(3, 64)
-        review_issue_table.setMinimumWidth(310)
-        review_splitter.addWidget(review_issue_table)
+        review_issue_table.setMinimumWidth(420)
+        validation_review_layout.addWidget(review_issue_table, 1)
 
-        review_image_view = ValidationReviewImageView()
-        review_splitter.addWidget(review_image_view)
-
-        review_side_panel = QtWidgets.QFrame()
-        review_side_panel.setFrameShape(QtWidgets.QFrame.StyledPanel)
-        review_side_layout = QtWidgets.QVBoxLayout(review_side_panel)
-        review_side_layout.setContentsMargins(10, 10, 10, 10)
-        review_side_title = QtWidgets.QLabel("Dataset Review")
-        review_side_title.setStyleSheet("font-weight: 800; font-size: 13px;")
-        review_side_layout.addWidget(review_side_title)
-        review_position_label = QtWidgets.QLabel("0 / 0")
-        review_side_layout.addWidget(review_position_label)
-        review_detail_label = QtWidgets.QLabel("Select an issue to inspect it.")
-        review_detail_label.setWordWrap(True)
-        review_detail_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        review_side_layout.addWidget(review_detail_label)
-
-        review_side_layout.addWidget(QtWidgets.QLabel("Legend"))
-        review_gt_checkbox = QtWidgets.QCheckBox("■  Ground truth")
-        review_gt_checkbox.setChecked(True)
-        review_gt_checkbox.setStyleSheet("color: #45d483; font-weight: 700;")
-        review_pred_checkbox = QtWidgets.QCheckBox("■  Prediction")
-        review_pred_checkbox.setChecked(True)
-        review_pred_checkbox.setStyleSheet("color: #ff5968; font-weight: 700;")
-        review_missed_label = QtWidgets.QLabel("■  Missed label")
-        review_missed_label.setStyleSheet("color: #ff9f43; font-weight: 700;")
-        review_weak_label = QtWidgets.QLabel("■  Weak match")
-        review_weak_label.setStyleSheet("color: #f0d264; font-weight: 700;")
-        review_side_layout.addWidget(review_gt_checkbox)
-        review_side_layout.addWidget(review_pred_checkbox)
-        review_side_layout.addWidget(review_missed_label)
-        review_side_layout.addWidget(review_weak_label)
-        review_side_layout.addStretch(1)
-
-        review_nav_row = self._row_layout(6)
-        review_previous_btn = QtWidgets.QPushButton("Previous")
-        review_next_btn = QtWidgets.QPushButton("Next")
-        review_nav_row.addWidget(review_previous_btn)
-        review_nav_row.addWidget(review_next_btn)
-        review_side_layout.addLayout(review_nav_row)
-        review_open_labeler_btn = QtWidgets.QPushButton("2. Open Original in Labeler")
-        review_negative_crop_btn = QtWidgets.QPushButton("Save False Detection as Negative Crop")
-        review_negative_crop_btn.setToolTip(
-            "For a selected false positive, save a centered background crop with an empty label. "
-            "The action is blocked if any saved ground-truth object would enter the crop."
+        review_queue_row = self._row_layout(8)
+        review_queue_hint = QtWidgets.QLabel(
+            "Select a finding and open it in Label Maker to edit the original dataset. "
+            "Double-clicking a row does the same thing."
         )
-        review_mark_btn = QtWidgets.QPushButton("Mark Reviewed")
-        review_ignore_btn = QtWidgets.QPushButton("Ignore Issue")
+        review_queue_hint.setWordWrap(True)
+        review_queue_hint.setStyleSheet("color: #9aa4af;")
+        review_open_labeler_btn = QtWidgets.QPushButton("2. Review Problems in Label Maker")
+        review_open_labeler_btn.setToolTip(
+            "Open the filtered model findings as a cleanup queue in the normal Label Maker."
+        )
+        review_open_labeler_btn.setDefault(True)
         review_open_labeler_btn.setEnabled(False)
-        review_negative_crop_btn.setEnabled(False)
-        review_mark_btn.setEnabled(False)
-        review_ignore_btn.setEnabled(False)
-        review_side_layout.addWidget(review_open_labeler_btn)
-        review_side_layout.addWidget(review_negative_crop_btn)
-        review_side_layout.addWidget(review_mark_btn)
-        review_side_layout.addWidget(review_ignore_btn)
-        review_splitter.addWidget(review_side_panel)
-        review_splitter.setStretchFactor(0, 2)
-        review_splitter.setStretchFactor(1, 5)
-        review_splitter.setStretchFactor(2, 2)
-        validation_review_layout.addWidget(review_splitter, 1)
-        evaluator_tabs.addTab(validation_review_tab, "Dataset Review")
+        review_queue_row.addWidget(review_queue_hint, 1)
+        review_queue_row.addWidget(review_open_labeler_btn)
+        validation_review_layout.addLayout(review_queue_row)
+        evaluator_tabs.addTab(validation_review_tab, "Validation Review")
 
         export_tab = QtWidgets.QWidget()
         export_layout = QtWidgets.QVBoxLayout(export_tab)
@@ -62041,6 +63291,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             "charts_tab": charts_tab,
             "activity_indicator": activity_indicator,
             "run_state_label": run_state_label,
+            "eta_label": eta_label,
+            "eta_detail_label": eta_detail_label,
             "run_dir_label": run_dir_label,
             "metrics_label": metrics_label,
             "baseline_label": baseline_label,
@@ -62073,10 +63325,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         health_text = QtWidgets.QTextEdit()
         health_text.setReadOnly(True)
         health_text.setLineWrapMode(QtWidgets.QTextEdit.NoWrap)
-        health_text.setPlaceholderText("Click Health Check to run CUDA, Ultralytics, file, dataset, and TensorRT checks.")
-        health_text.setText("Click Health Check to run yolo checks plus DarkFusion training setup checks.")
+        health_text.setPlaceholderText("Click Setup Check to verify CUDA, Ultralytics, files, dataset access, and TensorRT.")
+        health_text.setText("Setup Check verifies the training environment and selected paths; it does not inspect annotation quality.")
         health_layout.addWidget(health_text, 1)
-        evaluator_tabs.addTab(health_tab, "Health")
+        evaluator_tabs.addTab(health_tab, "Setup Check")
 
         status_label = QtWidgets.QLabel("")
         status_label.setStyleSheet("color: #9aa4af;")
@@ -62111,6 +63363,22 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                     return candidate
             return ""
 
+        def refresh_model_review_source(*_args):
+            checkpoint = active_review_checkpoint()
+            data_yaml = self.normalize_path(data_yaml_edit.text().strip())
+            model_review_source_label.setText(
+                f"<b>Checkpoint:</b> {html.escape(checkpoint or '(not selected)')}<br>"
+                f"<b>Validation dataset YAML:</b> {html.escape(data_yaml or '(not selected)')}<br>"
+                "Validation Review intentionally uses this YAML to resolve the selected split. "
+                "Folder-based Dataset Analysis is a separate tool and never uses this YAML."
+            )
+
+        use_training_weights.toggled.connect(refresh_model_review_source)
+        eval_weights_edit.textChanged.connect(refresh_model_review_source)
+        train_model_edit.textChanged.connect(refresh_model_review_source)
+        data_yaml_edit.textChanged.connect(refresh_model_review_source)
+        refresh_model_review_source()
+
         def review_report_path_for(checkpoint, split):
             checkpoint = self.normalize_path(checkpoint)
             checkpoint_parent = os.path.dirname(checkpoint)
@@ -62120,6 +63388,35 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 base_dir = self._training_eval_project_dir()
             folder_name = f"{Path(checkpoint).stem}_{str(split or 'val')}"
             return self.normalize_path(os.path.join(base_dir, "darkfusion_review", folder_name, "error_report.json"))
+
+        def validation_review_history_path(data_yaml):
+            """Keep review decisions with the active dataset, not beside an arbitrary YAML."""
+            data_yaml = self.normalize_path(data_yaml or "")
+            dataset_dir = self._training_eval_dataset_dir()
+            if dataset_dir and data_yaml and not self._training_eval_yaml_matches_dataset(
+                data_yaml, dataset_dir
+            ):
+                dataset_dir = ""
+            if not dataset_dir and data_yaml and os.path.isfile(data_yaml):
+                yaml_data, yaml_dir = self._training_health_parse_data_yaml(data_yaml)
+                dataset_dir = self._training_health_dataset_dir(
+                    data_yaml, yaml_data, yaml_dir
+                )
+            if dataset_dir:
+                return self.normalize_path(
+                    dataset_metadata_path(
+                        dataset_dir,
+                        "validation_review_history.json",
+                        create_parent=True,
+                    )
+                )
+            return self.normalize_path(
+                os.path.join(
+                    os.path.dirname(data_yaml),
+                    PROJECT_SETTINGS_DIR,
+                    "validation_review_history.json",
+                )
+            )
 
         def review_issue_type_text(issue_type):
             return {
@@ -62132,22 +63429,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 "poor_keypoints": "Poor keypoints",
             }.get(str(issue_type or ""), str(issue_type or "").replace("_", " ").title())
 
-        def save_review_report():
-            report_path = self.normalize_path(review_state.get("report_path", ""))
-            report = review_state.get("report")
-            if not report_path or not isinstance(report, dict):
-                return False
-            temporary_path = f"{report_path}.{os.getpid()}.{time.time_ns()}.tmp"
-            try:
-                with open(temporary_path, "w", encoding="utf-8") as handle:
-                    json.dump(report, handle, indent=2)
-                os.replace(temporary_path, report_path)
-                review_state["report_signature"] = None
-                return True
-            except Exception as e:
-                logger.warning("Could not save validation review report %s: %s", report_path, e)
-                return False
-
         def selected_review_issue():
             row = review_issue_table.currentRow()
             if row < 0:
@@ -62159,37 +63440,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             issue = selected_review_issue()
             enabled = isinstance(issue, dict)
             review_open_labeler_btn.setEnabled(enabled)
-            review_negative_crop_btn.setEnabled(
-                enabled
-                and str(issue.get("type", "")) in {"false_positive", "hard_negative"}
-                and isinstance(issue.get("prediction"), dict)
-            )
-            review_mark_btn.setEnabled(enabled)
-            review_ignore_btn.setEnabled(enabled)
             if not enabled:
-                review_detail_label.setText("Select an issue to inspect it.")
-                review_position_label.setText(f"0 / {review_issue_table.rowCount()}")
+                review_open_labeler_btn.setText("2. Review Problems in Label Maker")
                 return
-            review_image_view.set_review_issue(issue)
             current_row = review_issue_table.currentRow()
-            review_position_label.setText(f"{current_row + 1} / {review_issue_table.rowCount()}")
-            confidence = issue.get("confidence")
-            overlap = issue.get("iou")
-            details = [
-                review_issue_type_text(issue.get("type")),
-                f"Task: {issue.get('task', '')}",
-                f"Class: {issue.get('class_name', '')}",
-            ]
-            if confidence is not None:
-                details.append(f"Confidence: {float(confidence):.3f}")
-            if overlap is not None:
-                details.append(f"Overlap: {float(overlap):.3f}")
-            if issue.get("review_status") and issue.get("review_status") != "unreviewed":
-                details.append(f"Status: {issue.get('review_status')}")
-            if issue.get("detail"):
-                details.extend(["", str(issue.get("detail"))])
-            details.extend(["", self._validation_review_issue_guidance(issue.get("type"))])
-            review_detail_label.setText("\n".join(details))
+            review_open_labeler_btn.setText(
+                f"2. Review from Finding {current_row + 1:,} in Label Maker"
+            )
 
         def refresh_review_issue_table(select_issue_id=""):
             report = review_state.get("report", {}) or {}
@@ -62293,9 +63550,15 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                     report = json.load(handle)
                 if not isinstance(report, dict):
                     raise ValueError("The report root is not an object.")
+                if str(report.get("source", "")) in {"dataset_folder", "dataset_health"}:
+                    review_status_label.setText(
+                        "That is a Dataset Analysis report. Open it from Dataset Analysis; "
+                        "Validation Review accepts model-comparison reports only."
+                    )
+                    return False
                 if str(report.get("scanner", "")) == "clip_teammate_marker":
                     review_status_label.setText(
-                        "The separate teammate review has been retired. Run Find Problem Images "
+                        "The separate teammate review has been retired. Run Find Validation Problems "
                         "to review model-driven hard negatives instead."
                     )
                     return False
@@ -62451,7 +63714,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             if exit_code == 0:
                 review_status_label.setText(
                     review_status_label.text()
-                    + " · Ready: select an issue, then click Open Original in Labeler."
+                    + " · Ready: select a finding, then open it in Label Maker."
                 )
             else:
                 review_status_label.setText(
@@ -62494,11 +63757,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             batch_state_path = self.normalize_path(
                 os.path.join(review_dir, "validation_batch_state.json")
             )
-            history_dir = self.normalize_path(os.path.join(os.path.dirname(data_yaml), ".darkfusion"))
-            os.makedirs(history_dir, exist_ok=True)
-            history_path = self.normalize_path(
-                os.path.join(history_dir, "validation_review_history.json")
-            )
+            history_path = validation_review_history_path(data_yaml)
+            os.makedirs(os.path.dirname(history_path), exist_ok=True)
             scan_limit = int(review_limit_spin.value())
             scan_start = 0
             cursor_source = batch_state_path if os.path.isfile(batch_state_path) else report_path
@@ -62574,119 +63834,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             timer.start()
             QTimer.singleShot(300, poll_review_analysis)
 
-        def analyze_teammate_labels():
-            data_yaml = self.normalize_path(data_yaml_edit.text().strip())
-            task = str(task_setup_combo.currentText() or "detect").strip().lower()
-            split = str(review_split_combo.currentData() or "all")
-            if not data_yaml or not os.path.isfile(data_yaml):
-                QMessageBox.warning(dialog, "Teammate Review", "Select an existing dataset YAML in Train Setup first.")
-                return
-            if task == "classify":
-                QMessageBox.warning(dialog, "Teammate Review", "Teammate scanning requires object boxes, segments, OBBs, or pose labels.")
-                return
-            script_path = os.path.join(APP_DIR, "darkfusion_teammate_review.py")
-            if not os.path.isfile(script_path):
-                QMessageBox.warning(dialog, "Teammate Review", f"Scanner not found:\n{script_path}")
-                return
-            active_record = self._training_eval_latest_saved_run()
-            if self._training_eval_run_is_active(active_record or {}):
-                reply = QMessageBox.question(
-                    dialog,
-                    "Training Is Active",
-                    "The teammate scan uses the GPU and can slow active training.\n\nStart it anyway?",
-                    QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.No,
-                )
-                if reply != QMessageBox.Yes:
-                    return
-
-            review_dir = self.normalize_path(
-                os.path.join(os.path.dirname(data_yaml), "teammate_review", split)
-            )
-            os.makedirs(review_dir, exist_ok=True)
-            report_path = self.normalize_path(os.path.join(review_dir, "error_report.json"))
-            batch_state_path = self.normalize_path(os.path.join(review_dir, "teammate_batch_state.json"))
-            history_path = self.normalize_path(
-                os.path.join(os.path.dirname(data_yaml), "validation_review_history.json")
-            )
-            scan_limit = int(review_limit_spin.value())
-            scan_start = 0
-            cursor_source = batch_state_path if os.path.isfile(batch_state_path) else report_path
-            if scan_limit > 0 and os.path.isfile(cursor_source):
-                try:
-                    with open(cursor_source, "r", encoding="utf-8", errors="replace") as handle:
-                        previous = json.load(handle) or {}
-                    same_scan = (
-                        str(previous.get("scanner", "")) == "clip_teammate_marker"
-                        and self.normalize_path(previous.get("data", "")) == data_yaml
-                        and str(previous.get("split", "")) == split
-                        and str(previous.get("task", "")) == task
-                        and int(previous.get("scan_limit", 0) or 0) == scan_limit
-                    )
-                    completed_state = cursor_source == batch_state_path
-                    if same_scan and (completed_state or str(previous.get("status", "")) == "complete"):
-                        scan_start = max(0, int(previous.get("next_start_index", 0) or 0))
-                except Exception as error:
-                    logger.debug("Could not continue prior teammate review batch: %s", error)
-
-            threshold = float(review_teammate_threshold_spin.value())
-            command = [
-                sys.executable,
-                script_path,
-                f"--data={data_yaml}",
-                f"--task={task}",
-                f"--split={split}",
-                f"--output={report_path}",
-                f"--threshold={threshold}",
-                f"--device={'cuda' if torch.cuda.is_available() else 'cpu'}",
-                f"--max-images={scan_limit}",
-                f"--start-index={scan_start}",
-                f"--review-history={history_path}",
-                f"--batch-state={batch_state_path}",
-            ]
-            try:
-                process, _run_dir, _log_path = self.launch_training_evaluator_logged_command(
-                    command,
-                    "Teammate Label Review",
-                    run_dir=review_dir,
-                )
-            except Exception as error:
-                QMessageBox.warning(dialog, "Teammate Review", str(error))
-                return
-
-            review_state["process"] = process
-            review_state["report_path"] = report_path
-            review_state["report_signature"] = None
-            self.settings["trainingTeammateReviewThreshold"] = threshold
-            self.settings["trainingValidationReviewLimit"] = scan_limit
-            self.settings["trainingValidationReviewSplit"] = split
-            self.queue_settings_save()
-            review_analyze_btn.setEnabled(False)
-            review_teammate_btn.setEnabled(False)
-            review_stop_btn.setEnabled(True)
-            evaluator_tabs.setCurrentWidget(validation_review_tab)
-            scope = "every original image" if scan_limit == 0 else (
-                f"the next {scan_limit:,} images starting at {scan_start + 1:,}"
-            )
-            review_status_label.setText(
-                f"Finding labeled teammates across {scope}; certainty threshold {threshold:.3f}..."
-            )
-            timer = review_state.get("timer")
-            if timer is None:
-                timer = QTimer(dialog)
-                timer.setInterval(1500)
-                timer.timeout.connect(poll_review_analysis)
-                review_state["timer"] = timer
-            timer.start()
-            QTimer.singleShot(300, poll_review_analysis)
-
         def reset_review_history():
             data_yaml = self.normalize_path(data_yaml_edit.text().strip())
             if not data_yaml:
                 return
-            history_path = self.normalize_path(
-                os.path.join(os.path.dirname(data_yaml), ".darkfusion", "validation_review_history.json")
-            )
+            history_path = validation_review_history_path(data_yaml)
             if not os.path.isfile(history_path):
                 review_status_label.setText("No saved validation review decisions were found.")
                 return
@@ -62708,122 +63860,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             except Exception as e:
                 QMessageBox.warning(dialog, "Reset Reviewed", str(e))
 
-        def move_review_selection(offset):
-            row_count = review_issue_table.rowCount()
-            if row_count <= 0:
-                return
-            current = max(0, review_issue_table.currentRow())
-            review_issue_table.selectRow(max(0, min(row_count - 1, current + int(offset))))
-
-        def set_review_issue_status(status):
-            issue = selected_review_issue()
-            if not isinstance(issue, dict):
-                return
-            issue["review_status"] = str(status)
-            self._record_validation_review_decision(
-                issue,
-                status,
-                (review_state.get("report", {}) or {}).get("review_history_path", ""),
-            )
-            selected_id = str(issue.get("id", ""))
-            if save_review_report():
-                update_review_summary()
-                refresh_review_issue_table(selected_id)
-
-        def confirm_selected_teammate():
-            issue = selected_review_issue()
-            if not isinstance(issue, dict) or str(issue.get("type", "")) != "teammate_marker":
-                return
-            hides_confirmed = str(review_filter_combo.currentData() or "all") == "unreviewed"
-            set_review_issue_status("teammate_confirmed")
-            if not hides_confirmed:
-                move_review_selection(1)
-
-        def remove_all_confirmed_teammates():
-            report = review_state.get("report", {}) or {}
-            sync_teammate_review_history(report)
-            confirmed_count = sum(
-                1 for issue in list(report.get("issues", []) or [])
-                if str(issue.get("type", "")) == "teammate_marker"
-                and str(issue.get("review_status", "")) == "teammate_confirmed"
-            )
-            if not confirmed_count:
-                QMessageBox.information(dialog, "Remove Confirmed Teammates", "No teammate candidates are confirmed.")
-                return
-            reply = QMessageBox.question(
-                dialog,
-                "Remove Confirmed Teammates",
-                (
-                    f"Remove {confirmed_count:,} confirmed teammate label(s) from the original dataset?\n\n"
-                    "Only candidates explicitly marked Confirmed Teammate will be removed. "
-                    "Every removed annotation row will be written to the recovery log first."
-                ),
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
-            )
-            if reply != QMessageBox.Yes:
-                return
-            progress = QtWidgets.QProgressDialog(
-                "Preparing confirmed teammate cleanup...",
-                "",
-                0,
-                max(1, confirmed_count),
-                dialog,
-            )
-            progress.setWindowTitle("Removing Confirmed Teammate Labels")
-            progress.setCancelButton(None)
-            progress.setWindowModality(Qt.WindowModal)
-            progress.setMinimumDuration(0)
-            progress.setValue(0)
-            progress.show()
-
-            def update_cleanup_progress(current, total, filename):
-                progress.setMaximum(max(1, int(total)))
-                progress.setValue(max(0, min(int(current), max(1, int(total)))))
-                if int(current) >= int(total):
-                    progress.setLabelText("Finishing and saving the review report...")
-                else:
-                    progress.setLabelText(
-                        f"Removing confirmed labels: file {int(current) + 1:,} of {int(total):,}\n{filename}"
-                    )
-                QApplication.processEvents()
-
-            cleanup_error = None
-            try:
-                result = self.remove_confirmed_teammate_ground_truths(
-                    report, progress_callback=update_cleanup_progress
-                )
-            except Exception as error:
-                cleanup_error = error
-                logger.exception("Confirmed teammate cleanup failed")
-            finally:
-                progress.close()
-            if cleanup_error is not None:
-                QMessageBox.critical(
-                    dialog,
-                    "Confirmed Teammate Cleanup Failed",
-                    (
-                        "The cleanup stopped before it could finish. Confirmations were kept.\n\n"
-                        f"{cleanup_error}"
-                    ),
-                )
-                return
-            save_review_report()
-            update_review_summary()
-            refresh_review_issue_table()
-            removed = int(result.get("removed", 0) or 0)
-            skipped = int(result.get("skipped", 0) or 0)
-            recovery_path = str(result.get("recovery_path", "") or "")
-            QMessageBox.information(
-                dialog,
-                "Confirmed Teammate Cleanup",
-                (
-                    f"Removed {removed:,} label(s) from {int(result.get('files', 0) or 0):,} label file(s).\n"
-                    f"Skipped {skipped:,} label(s) that could not be matched safely.\n\n"
-                    f"Recovery log:\n{recovery_path or '(not created)'}"
-                ),
-            )
-
         def open_selected_review_in_labeler():
             issue = selected_review_issue()
             if not isinstance(issue, dict):
@@ -62834,45 +63870,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 list(review_state.get("visible_issues", []) or []),
             )
 
-        def save_selected_false_detection_crop():
-            issue = selected_review_issue()
-            if not isinstance(issue, dict):
-                return
-            result = self.save_validation_false_positive_crop(
-                issue,
-                review_state.get("report", {}) or {},
-                dialog,
-            )
-            if not result:
-                return
-            issue["review_status"] = "negative_crop_saved"
-            issue["negative_crop_image"] = result["image_path"]
-            issue["negative_crop_label"] = result["label_path"]
-            self._record_validation_review_decision(
-                issue,
-                "negative_crop_saved",
-                (review_state.get("report", {}) or {}).get("review_history_path", ""),
-            )
-            selected_id = str(issue.get("id", ""))
-            save_review_report()
-            update_review_summary()
-            refresh_review_issue_table(selected_id)
-            review_status_label.setText(
-                f"Added one empty-label negative crop: {os.path.basename(result['image_path'])}"
-            )
-
-        def run_dataset_health_review():
-            review_status_label.setText(
-                "Running the read-only dataset health scan. Its Dataset Review window will open when complete..."
-            )
-            scanner = getattr(self, "scan_annotations", None)
-            if scanner is None or not hasattr(scanner, "scan_annotations"):
-                QMessageBox.warning(dialog, "Dataset Health Scan", "The dataset health checker is unavailable.")
-                return
-            scanner.scan_annotations()
-
         review_analyze_btn.clicked.connect(analyze_review_errors)
-        review_health_scan_btn.clicked.connect(run_dataset_health_review)
         review_stop_btn.clicked.connect(stop_review_analysis)
         review_load_btn.clicked.connect(browse_review_report)
         review_compare_btn.clicked.connect(compare_review_report)
@@ -62882,18 +63880,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         review_search_edit.textChanged.connect(lambda _text: refresh_review_issue_table())
         review_issue_table.itemSelectionChanged.connect(display_selected_review_issue)
         review_issue_table.itemDoubleClicked.connect(lambda _item: open_selected_review_in_labeler())
-        review_gt_checkbox.toggled.connect(
-            lambda checked: review_image_view.set_layer_visibility(ground_truth=checked)
-        )
-        review_pred_checkbox.toggled.connect(
-            lambda checked: review_image_view.set_layer_visibility(prediction=checked)
-        )
-        review_previous_btn.clicked.connect(lambda: move_review_selection(-1))
-        review_next_btn.clicked.connect(lambda: move_review_selection(1))
         review_open_labeler_btn.clicked.connect(open_selected_review_in_labeler)
-        review_negative_crop_btn.clicked.connect(save_selected_false_detection_crop)
-        review_mark_btn.clicked.connect(lambda: set_review_issue_status("reviewed"))
-        review_ignore_btn.clicked.connect(lambda: set_review_issue_status("ignored"))
 
         def autoload_validation_review_report():
             candidates = [
@@ -63244,15 +64231,17 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         def refresh_latest_run_from_disk():
             update_training_control_buttons()
+            record = None
             active_record = getattr(self, "training_evaluator_active_run", None)
             active_process = (active_record or {}).get("process") if isinstance(active_record, dict) else None
             if active_process is not None:
                 try:
                     if active_process.poll() is None:
-                        return
+                        record = active_record
                 except Exception:
                     pass
-            record = self._training_eval_latest_saved_run()
+            if record is None:
+                record = self._training_eval_latest_saved_run()
             if not record:
                 return
             title_text = str(record.get("title") or "Training")
@@ -63278,7 +64267,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             "Rescan the loaded dataset, overwrite train/valid metadata files, rebuild obj.yaml, "
             "and calculate current training parameters."
         )
-        health_check_btn = buttons.addButton("Health Check", QtWidgets.QDialogButtonBox.ActionRole)
+        health_check_btn = buttons.addButton("Setup Check", QtWidgets.QDialogButtonBox.ActionRole)
         preview_cmd_btn = buttons.addButton("Commands", QtWidgets.QDialogButtonBox.ActionRole)
         validate_btn = buttons.addButton("Validate Weights", QtWidgets.QDialogButtonBox.ActionRole)
         validate_cpu_btn = buttons.addButton("Validate CPU", QtWidgets.QDialogButtonBox.ActionRole)
@@ -63430,14 +64419,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 )
                 health_text.setText(report)
                 evaluator_tabs.setCurrentWidget(health_tab)
-                status_label.setText("Health check complete.")
-                self._training_eval_set_activity_indicator(run_widgets, "success", "Ready", "Health check complete")
+                status_label.setText("Training setup check complete.")
+                self._training_eval_set_activity_indicator(run_widgets, "success", "Ready", "Training setup check complete")
             except Exception as e:
                 evaluator_tabs.setCurrentWidget(health_tab)
-                health_text.setText(f"Health check failed:\n{e}")
-                QMessageBox.warning(dialog, "Training Health Check", str(e))
-                status_label.setText(f"Health check failed: {e}")
-                self._training_eval_set_activity_indicator(run_widgets, "error", "Error", "Health check failed")
+                health_text.setText(f"Training setup check failed:\n{e}")
+                QMessageBox.warning(dialog, "Training Setup Check", str(e))
+                status_label.setText(f"Training setup check failed: {e}")
+                self._training_eval_set_activity_indicator(run_widgets, "error", "Error", "Training setup check failed")
             finally:
                 QApplication.restoreOverrideCursor()
 
@@ -63898,6 +64887,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 except Exception:
                     pass
             logger.warning("%s: terminated DarkFusion training process tree for %s", reason, record.get("run_dir", ""))
+            eta_context = run_widgets.get("_eta_context", {})
+            if eta_context.get("run_dir") == self.normalize_path(record.get("run_dir", "")):
+                eta_context["stopped"] = True
             return True, ""
 
         def update_training_control_buttons():

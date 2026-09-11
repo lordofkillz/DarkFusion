@@ -575,6 +575,8 @@ def main():
     report = {
         "version": 2,
         "status": "running",
+        "source": "model_validation",
+        "source_title": "Model Validation",
         "task": args.task,
         "model": normalized(args.model),
         "data": normalized(args.data),
@@ -640,6 +642,8 @@ def main():
                 max(0.0, min(1.0, args.match_iou)),
                 max(0.0, min(1.0, args.good_iou)),
             )
+            for issue in issues:
+                issue["source"] = "model_validation"
             suppressed = [
                 issue for issue in issues
                 if issue.get("issue_key") in review_decisions

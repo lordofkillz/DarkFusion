@@ -34,6 +34,13 @@ Analysis, training, tuning, and validation review.
 
 ## Current capabilities
 
+- Compact **System Monitor** with GPU load, temperature and board power,
+  VRAM, system and busiest-thread CPU load, RAM, drive usage, and DarkFusion
+  memory usage. Text size is adjustable.
+- Prominent training time remaining and estimated finish time in Live Metrics.
+- Optional hover/drawing measurements in image pixels and a small blank-image
+  status badge that scales with the displayed image. Both have separate
+  controls under **Settings → General → Display**.
 - Bounding-box, polygon segmentation, pose/keypoint, and oriented-box labeling.
 - Zoom, pan, snap-assisted editing, configurable frame skipping, and batch
   dataset workflows.
@@ -51,12 +58,16 @@ Analysis, training, tuning, and validation review.
 - Validation Review for false positives, missed ground truth, wrong classes,
   weak localization, duplicates, and poor keypoints across detect, segment,
   pose, OBB, and classify tasks.
-- Safe per-annotation and false-detection negative crops that center the
-  selected region, exclude other saved annotations, pad small native crops,
-  and reuse the dataset's existing negative-output folder.
+- Per-annotation and false-detection negative crops that retain available
+  context, exclude other saved annotations, preserve native resolution, and
+  share the dataset's `blanks` folder. Short dimensions are padded to at least
+  32 pixels without forcing square crops.
+- Similar-annotation review with an adjustable match threshold, shape-aware
+  comparisons, and removal of selected matching labels.
 - Dataset analysis for mixed annotations, invalid labels, small targets,
   class balance, model stride, candidate image sizes, and task-aware
-  segmentation mask resolution.
+  segmentation mask resolution, plus visual annotation outliers. Analysis
+  stays within the selected dataset.
 - PyTorch `.pt`, standalone ONNX Runtime `.onnx`, TensorRT `.engine`, and
   legacy Darknet model workflows, with selectable ONNX Runtime execution
   providers and shared thresholds, colors, resizing, and TXT output.

@@ -129,6 +129,20 @@ Use Next and Previous to move through images. The configurable skip control is
 useful for moving quickly through videos while single navigation still moves
 one image at a time.
 
+Under **Settings → General → Display**, **Show annotation measurements**
+shows width and height in image pixels while hovering over annotations or
+drawing. Turning it off hides measurements in both cases.
+
+**Show blank-image overlay** controls the small **BLANK** badge on images
+without annotations. The badge scales with the visible image, stays in a
+corner, and does not dim the frame. It hides while drawing and returns if the
+drawing is canceled without adding a label. At extreme zoom-out it is omitted
+if there is too little space to display it without covering the image.
+
+The **Drawing** settings control outline thickness, hover emphasis, label
+text, pose markers, and edit handles. Minimum and maximum annotation sizes
+are checked in image pixels, including when zoomed in.
+
 ### Auto-label with model weights
 
 Open **Auto Label**, load the image folder, then select the model and settings.
@@ -213,6 +227,16 @@ If a category of object should always be ignored, include enough representative
 images where it is present but unlabeled so the model learns it as background.
 Keep the labeling rule consistent across the entire dataset.
 
+Use an annotation preview's context menu to find similar annotations. Adjust
+the similarity threshold to narrow or broaden the matches, inspect the
+results, and remove matching labels when appropriate. Shape-aware matching
+helps distinguish annotations with similar colors but different outlines.
+
+Negative-crop actions retain the selected region and available surrounding
+context while excluding saved objects. Output goes into the dataset's
+**blanks** folder with empty labels. Crops retain native resolution; only
+dimensions shorter than 32 pixels are padded, without forcing a square.
+
 ## 7. Run Dataset Analysis
 
 After labeling and manual review, open **Dataset Analysis** and select the
@@ -223,6 +247,7 @@ dataset root. It can identify problems such as:
 - mixed detect/segment/pose/OBB annotation rows;
 - out-of-range class IDs or coordinates;
 - unusually small annotations;
+- visual annotation outliers;
 - class imbalance and rare classes;
 - image-size, stride, and task compatibility concerns.
 
@@ -270,6 +295,18 @@ it does not replace sufficient image resolution.
 Use the evaluator recommendations as a starting point, select the epoch count,
 and start training. Watch loss, precision, recall, and per-class validation
 metrics rather than relying on one overall number.
+
+The **Live Metrics** banner shows estimated time remaining, an approximate
+finish time, and epoch progress once completed-epoch timings are available.
+It uses recent epoch durations and updates when a run resumes or stops. The
+estimate is based on the configured epoch target; early stopping can finish
+sooner, and final validation or checkpoint saving can add time.
+
+Open **System Monitor** to see GPU load, VRAM, CPU, RAM, drive usage, and
+DarkFusion's resident memory (RSS). The CPU tile also shows the busiest logical
+thread. Use its **Text size** control for larger text and **Keep Above** to
+keep the monitor visible. GPU watts are NVIDIA GPU board power when available;
+they do not measure the PSU or total system power.
 
 Training runs in a separate process so the main interface can remain
 responsive. Available controls include:

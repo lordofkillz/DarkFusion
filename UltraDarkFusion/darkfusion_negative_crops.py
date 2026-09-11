@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import math
 import os
+import itertools
 
 import cv2
 
 
-NEGATIVE_FOLDER_NAMES = ("blanks", "negative_crops", "negatives", "negative")
+NEGATIVE_FOLDER_NAME = "blanks"
 
 
 def dataset_root_for_image(image_path, label_path="", dataset_hint=""):
@@ -40,36 +41,37 @@ def dataset_root_for_image(image_path, label_path="", dataset_hint=""):
 
 
 def resolve_negative_folder(dataset_dir, create=False):
-    """Reuse an existing negative folder; otherwise choose the legacy ``blanks`` path."""
+    """Return the one shared ``blanks`` folder used by every negative workflow."""
     dataset_dir = os.path.abspath(str(dataset_dir or ""))
-    if os.path.basename(dataset_dir).lower() in NEGATIVE_FOLDER_NAMES:
+    if os.path.basename(dataset_dir).lower() == NEGATIVE_FOLDER_NAME:
         target = dataset_dir
     else:
-        target = ""
-        for name in NEGATIVE_FOLDER_NAMES:
-            candidate = os.path.join(dataset_dir, name)
-            if os.path.isdir(candidate):
-                target = candidate
-                break
-        if not target:
-            target = os.path.join(dataset_dir, NEGATIVE_FOLDER_NAMES[0])
+        target = os.path.join(dataset_dir, NEGATIVE_FOLDER_NAME)
     if create:
         os.makedirs(target, exist_ok=True)
     return os.path.abspath(target)
 
 
-def pad_crop_for_training(image, minimum_size=128, stride=32):
-    """Center a native-resolution crop on a reflected, stride-aligned square canvas."""
+def pad_crop_for_training(image, minimum_size=32, stride=1):
+    """Reflect-pad each short dimension without resizing or forcing a square.
+
+    ``stride`` is retained for callers that want stride-aligned output.  With
+    the default value, a 20x90 crop becomes 32x90 instead of 96x96, preserving
+    the native aspect ratio and all useful surrounding context.
+    """
     if image is None or getattr(image, "size", 0) == 0:
         return None, (0, 0, 0, 0)
     height, width = image.shape[:2]
     stride = max(1, int(stride or 1))
-    side = max(width, height, int(minimum_size or 0), stride)
-    side = int(math.ceil(side / float(stride)) * stride)
-    left = (side - width) // 2
-    right = side - width - left
-    top = (side - height) // 2
-    bottom = side - height - top
+    output_width = max(width, int(minimum_size or 0), 1)
+    output_height = max(height, int(minimum_size or 0), 1)
+    if stride > 1:
+        output_width = int(math.ceil(output_width / float(stride)) * stride)
+        output_height = int(math.ceil(output_height / float(stride)) * stride)
+    left = (output_width - width) // 2
+    right = output_width - width - left
+    top = (output_height - height) // 2
+    bottom = output_height - height - top
     if not any((left, top, right, bottom)):
         return image.copy(), (0, 0, 0, 0)
     # Reflection avoids teaching the model a synthetic solid border. Very tiny
@@ -132,6 +134,70 @@ def _centered_rect(cx, cy, crop_width, crop_height, image_width, image_height):
     return (x1, y1, x1 + crop_width, y1 + crop_height)
 
 
+def _expand_rect_side(rect, side, desired_value, protected):
+    """Expand one rectangle side as far as possible without touching labels."""
+    side_index = {"left": 0, "top": 1, "right": 2, "bottom": 3}[side]
+    current_value = float(rect[side_index])
+    desired_value = float(desired_value)
+    if abs(current_value - desired_value) < 0.01:
+        return tuple(rect)
+
+    best = current_value
+    low = 0.0
+    high = 1.0
+    for _ in range(24):
+        fraction = (low + high) / 2.0
+        trial = list(rect)
+        trial[side_index] = current_value + (desired_value - current_value) * fraction
+        if any(_intersects(trial, bounds) for bounds in protected):
+            high = fraction
+        else:
+            best = trial[side_index]
+            low = fraction
+    result = list(rect)
+    result[side_index] = best
+    return tuple(result)
+
+
+def _plan_freeform_context_crop(
+    width,
+    height,
+    bad,
+    protected,
+    context_scale,
+    minimum_context,
+):
+    """Grow all four crop sides independently and return the largest safe result."""
+    bad_width = max(1.0, bad[2] - bad[0])
+    bad_height = max(1.0, bad[3] - bad[1])
+    desired_width = min(float(width), max(bad_width * max(1.0, context_scale), float(minimum_context)))
+    desired_height = min(float(height), max(bad_height * max(1.0, context_scale), float(minimum_context)))
+    cx = (bad[0] + bad[2]) / 2.0
+    cy = (bad[1] + bad[3]) / 2.0
+    desired = _centered_rect(cx, cy, desired_width, desired_height, width, height)
+    side_targets = {
+        "left": desired[0],
+        "top": desired[1],
+        "right": desired[2],
+        "bottom": desired[3],
+    }
+
+    # Side order matters when a protected object occupies only one corner.
+    # Trying every order is tiny (24 passes) and lets the free sides retain the
+    # context that a uniformly-shrunk centered crop would throw away.
+    best = tuple(bad)
+    best_area = max(0.0, (bad[2] - bad[0]) * (bad[3] - bad[1]))
+    for order in itertools.permutations(("left", "top", "right", "bottom")):
+        candidate = tuple(bad)
+        for side in order:
+            candidate = _expand_rect_side(candidate, side, side_targets[side], protected)
+        area = max(0.0, (candidate[2] - candidate[0]) * (candidate[3] - candidate[1]))
+        if area > best_area:
+            best = candidate
+            best_area = area
+    return best
+
+
 def plan_negative_crop(
     image_width,
     image_height,
@@ -143,10 +209,12 @@ def plan_negative_crop(
     minimum_context=96,
     safety_margin=4,
 ):
-    """Plan a centered crop containing one false detection and no known labels.
+    """Plan a crop containing one false detection and no known labels.
 
     The returned rectangle uses integer, exclusive-end pixel coordinates.  A
     failed plan includes a human-readable ``reason`` instead of a rectangle.
+    Pass ``aspect_ratio=None`` to grow each side independently for the largest
+    useful freeform context crop.
     """
     width = int(image_width or 0)
     height = int(image_height or 0)
@@ -174,6 +242,58 @@ def plan_negative_crop(
                 "The rejected prediction overlaps a saved ground-truth object, so it cannot "
                 "be exported as an empty-label crop safely."
             ),
+        }
+
+    if aspect_ratio is None:
+        candidate = _plan_freeform_context_crop(
+            width,
+            height,
+            bad,
+            protected,
+            context_scale,
+            minimum_context,
+        )
+        x1 = max(0, int(math.floor(candidate[0])))
+        y1 = max(0, int(math.floor(candidate[1])))
+        x2 = min(width, int(math.ceil(candidate[2])))
+        y2 = min(height, int(math.ceil(candidate[3])))
+        # The floating-point plan may stop on a protected edge between two
+        # pixels.  Round that blocked side inward rather than rejecting an
+        # otherwise safe crop after ceil/floor conversion.
+        for bounds in protected:
+            integer_candidate = (x1, y1, x2, y2)
+            if not _intersects(integer_candidate, bounds):
+                continue
+            if candidate[2] <= bounds[0] + 1e-5:
+                x2 = min(x2, int(math.floor(bounds[0])))
+            elif candidate[0] >= bounds[2] - 1e-5:
+                x1 = max(x1, int(math.ceil(bounds[2])))
+            elif candidate[3] <= bounds[1] + 1e-5:
+                y2 = min(y2, int(math.floor(bounds[1])))
+            elif candidate[1] >= bounds[3] - 1e-5:
+                y1 = max(y1, int(math.ceil(bounds[3])))
+        integer_rect = (x1, y1, x2, y2)
+        contains_prediction = (
+            x1 <= int(math.floor(bad[0]))
+            and y1 <= int(math.floor(bad[1]))
+            and x2 >= int(math.ceil(bad[2]))
+            and y2 >= int(math.ceil(bad[3]))
+        )
+        if not contains_prediction or x2 <= x1 or y2 <= y1 or any(
+            _intersects(integer_rect, bounds) for bounds in protected
+        ):
+            return {
+                "rect": None,
+                "reason": (
+                    "No crop can contain the entire rejected prediction without also "
+                    "including a saved ground-truth object."
+                ),
+            }
+        return {
+            "rect": integer_rect,
+            "reason": "",
+            "prediction_rect": tuple(int(round(value)) for value in bad),
+            "protected_count": len(protected),
         }
 
     bad_width = max(1.0, bad[2] - bad[0])
