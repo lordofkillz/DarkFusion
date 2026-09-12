@@ -51,16 +51,26 @@ if (-not $environmentPath) {
 $pythonArgs = @("run", "--name", $EnvironmentName, "--no-capture-output", "python")
 $env:PYTHONNOUSERSITE = "1"
 
-Write-Host "Upgrading pip build tools..."
-& $conda @pythonArgs -m pip install --upgrade pip setuptools wheel
-if ($LASTEXITCODE -ne 0) {
-    throw "Could not upgrade pip build tools."
-}
+$previousPipConfigFile = $env:PIP_CONFIG_FILE
+try {
+    # --isolated skips user settings, but still reads machine-wide pip.ini.
+    # Use only this repository's indexes, including in build subprocesses.
+    $env:PIP_CONFIG_FILE = "nul"
 
-Write-Host "Installing UltraDarkFusion dependencies..."
-& $conda @pythonArgs -m pip install --no-user --requirement $requirementsPath
-if ($LASTEXITCODE -ne 0) {
-    throw "Dependency installation failed."
+    Write-Host "Upgrading pip build tools..."
+    & $conda @pythonArgs -m pip --isolated install --index-url https://pypi.org/simple --upgrade pip setuptools wheel
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not upgrade pip build tools."
+    }
+
+    Write-Host "Installing UltraDarkFusion dependencies..."
+    & $conda @pythonArgs -m pip --isolated install --index-url https://pypi.org/simple --no-user --requirement $requirementsPath
+    if ($LASTEXITCODE -ne 0) {
+        throw "Dependency installation failed."
+    }
+}
+finally {
+    $env:PIP_CONFIG_FILE = $previousPipConfigFile
 }
 
 Write-Host "Verifying the application environment..."

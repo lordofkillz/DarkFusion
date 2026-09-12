@@ -124,6 +124,18 @@ Launch DarkFusion with:
 .\run_darkfusion.bat
 ```
 
+The launcher also finds standard Miniconda/Anaconda installations when Conda
+is not on `PATH`. To use a separate environment, use the same name when
+installing and launching:
+
+```powershell
+.\install.ps1 -EnvironmentName fusion-test
+.\run_darkfusion.bat fusion-test
+```
+
+The installer uses the package indexes in this repository and ignores local
+pip configuration for the installation, without changing that configuration.
+
 Manual installation is also supported:
 
 ```powershell

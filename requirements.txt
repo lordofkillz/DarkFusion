@@ -11,7 +11,7 @@
 # env instead of C:\Users\jason\AppData\Roaming\Python.
 
 --extra-index-url https://download.pytorch.org/whl/cu128
---extra-index-url https://pypi.ngc.nvidia.com
+--extra-index-url https://pypi.nvidia.com
 
 # Build helpers used by native ML packages.
 setuptools==78.1.1
