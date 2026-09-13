@@ -203,14 +203,14 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
         auto heading = add(window, L"STATIC", L"Install DarkFusion", 0, 24, 20, 565, 35);
         SendMessageW(heading, WM_SETFONT, reinterpret_cast<WPARAM>(headingFont), TRUE);
-        add(window, L"STATIC", onlineSetup() ? L"Setup downloads everything needed to run DarkFusion. No Python or Conda setup required." : L"Includes its own Python runtime. Your other Python and Conda environments stay separate.", 0, 24, 65, 555, 48);
+        add(window, L"STATIC", onlineSetup() ? L"Includes the app, Python runtime, SAM3 and GroundingDINO models. Setup downloads and installs them automatically." : L"Includes its own Python runtime. Your other Python and Conda environments stay separate.", 0, 24, 65, 555, 48);
         add(window, L"STATIC", L"Install to a writable folder", 0, 24, 125, 555, 22);
         destinationEdit = add(window, L"EDIT", installDirectory.c_str(), WS_TABSTOP | ES_AUTOHSCROLL, 24, 153, 448, 31, Destination);
         browseButton = add(window, L"BUTTON", L"Browse...", WS_TABSTOP | BS_PUSHBUTTON, 482, 152, 105, 33, Browse);
         menuBox = add(window, L"BUTTON", L"Add a Start menu shortcut", WS_TABSTOP | BS_AUTOCHECKBOX, 24, 203, 290, 25, StartMenu);
         SendMessageW(menuBox, BM_SETCHECK, BST_CHECKED, 0);
         desktopBox = add(window, L"BUTTON", L"Add a desktop shortcut", WS_TABSTOP | BS_AUTOCHECKBOX, 321, 203, 267, 25, Desktop);
-        statusLabel = add(window, L"STATIC", onlineSetup() ? L"Download: about 6.3 GB. Allow 25 GB free during setup.\nChoose a folder, then click Install." : L"Ready to install. Keep the installer files together until setup finishes.", 0, 24, 247, 560, 48, Status);
+        statusLabel = add(window, L"STATIC", onlineSetup() ? L"Download: about 10.2 GB. Allow 35 GB free during setup.\nChoose a folder, then click Install." : L"Ready to install. Keep the installer files together until setup finishes.", 0, 24, 247, 560, 48, Status);
         progressBar = add(window, PROGRESS_CLASSW, L"", PBS_MARQUEE, 24, 309, 563, 15, Progress);
         logButton = add(window, L"BUTTON", L"View install log", WS_TABSTOP | BS_PUSHBUTTON, 24, 346, 150, 35, OpenLog);
         installButton = add(window, L"BUTTON", L"Install", WS_TABSTOP | BS_DEFPUSHBUTTON, 437, 346, 150, 35, Install);

@@ -41,7 +41,8 @@ def main():
                           'sha256': digest.hexdigest(),
                           'url': f'https://github.com/lordofkillz/DarkFusion/releases/download/{args.release_tag}/{name}'})
             print(f'Prepared {name}', flush=True)
-    manifest = {'schema_version': 1, 'product': 'DarkFusion', 'payload': payload, 'parts': parts}
+    models = json.loads((Path(__file__).parent / 'windows' / 'model-bundle.json').read_text(encoding='utf-8'))
+    manifest = {'schema_version': 1, 'product': 'DarkFusion', 'payload': payload, 'parts': parts, 'models': models}
     (args.output / 'download.json').write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
     print('Build DarkFusionSetup.exe with -OnlineManifest pointing to download.json.', flush=True)
 

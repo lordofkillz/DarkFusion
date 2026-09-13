@@ -9,14 +9,18 @@ remains available for people who manage their own Python environment.
 
 **[Download DarkFusionSetup.exe](https://github.com/lordofkillz/DarkFusion/releases/latest/download/DarkFusionSetup.exe)**,
 open it, choose a new writable folder, and click **Install**. Setup downloads the
-application/runtime automatically, checks the files, installs them and creates
-your selected shortcuts. You only need to download the EXE yourself. When setup
+application/runtime and the SAM3/GroundingDINO model bundle automatically, checks
+the files, installs them and creates your selected shortcuts. You only need to
+download the EXE yourself. When setup
 finishes, click **Open DarkFusion** to launch the app immediately. The Start menu
 shortcut is selected by default; a desktop shortcut is optional.
 
-Allow approximately 25 GB free during setup and an internet connection for the
-6.3 GB download. The installed application/runtime occupy about 11 GB. Download
-progress appears in the window. Run setup again after an interrupted download
+Allow approximately 35 GB free during setup and an internet connection for the
+combined 10.2 GB download. The installed application, runtime, and models occupy
+about 15.2 GB. The model checkpoints are installed in
+`<installation folder>\app\UltraDarkFusion\Sam`; no manual model download or
+folder copying is needed. Download progress appears in the window. Run setup
+again after an interrupted download
 to resume it. Download files are removed after installation succeeds.
 
 The [Python installation method](../README.md#python-installation) remains
@@ -55,8 +59,9 @@ Conda, or install packages into another application's environment.
 
 Windows 10 version 1903 or later, or Windows 11 x64, is required. Keep a compatible NVIDIA graphics driver for GPU
 features. Application/runtime installation works offline from the complete
-distribution. SAM3 and GroundingDINO checkpoints remain a separate download;
-follow `app/MODEL_SETUP.md` inside the installation. Optional YouTube and Darknet
+distribution. With this offline runtime distribution, SAM3 and GroundingDINO
+checkpoints require the separate model bundle; follow `app/MODEL_SETUP.md` inside
+the installation. Optional YouTube and Darknet
 features still require their external Deno/Darknet tools.
 
 This first installer supports fresh installations. It refuses to overwrite a
@@ -158,7 +163,9 @@ Upload the generated `DarkFusion-runtime.*.bin` assets, `download.json`, and
 `native/DarkFusionSetup.exe` to that exact GitHub release tag. The EXE embeds its
 versioned download URLs and checksums, so upload all files before publishing the
 release. The README download link targets only the setup EXE. Runtime assets are
-fetched and verified automatically; end users do not assemble them.
+fetched and verified automatically; end users do not assemble them. The online
+installer also downloads the verified SAM3/GroundingDINO bundle from its
+configured model host and installs the checkpoints before setup completes.
 
 Each runtime asset stays below GitHub's 2 GiB release-asset limit. Downloads are
 cached on the selected installation drive, with range-based resume and SHA-256

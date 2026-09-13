@@ -19,15 +19,16 @@ running inference through PyTorch, ONNX, or TensorRT.
 Setup adds a Start menu shortcut by default, and you can also select a desktop
 shortcut so DarkFusion is easy to open next time.
 
-Setup automatically downloads and installs the application and its private Python
-runtime. **You do not need to install Python, Conda, Git, or build tools.** Download
+Setup automatically downloads and installs the application, its private Python
+runtime, and the SAM3/GroundingDINO model bundle into the app's `Sam` folder.
+**You do not need to install Python, Conda, Git, or build tools.** Download
 progress appears in the setup window; interrupted downloads can resume when you
 run setup again.
 
 Requires Windows 10 version 1903 or later, or Windows 11 x64, an internet connection,
-and approximately **25 GB free during setup**. The download is about **6.3 GB**;
-the application/runtime occupy about **11 GB** after setup. NVIDIA drivers are
-needed for GPU features. Optional SAM3/GroundingDINO models are downloaded separately.
+and approximately **35 GB free during setup**. The combined download is about
+**10.2 GB**; the application, runtime, and included models occupy about **15.2 GB**
+after setup. NVIDIA drivers are needed for GPU features.
 
 ### Prefer to manage Python yourself?
 
@@ -136,7 +137,7 @@ cd C:\DarkFusion
 
 For complete SAM3 snapping, segmentation, augmentation, and GroundingDINO
 auto-labeling, also install the
-[DarkFusion 5.2 required model bundle (3.58 GB)](https://drive.google.com/file/d/1j9Y-WpUDjPt67_U43lafO-7dTkxLJuPS/view?usp=sharing).
+[DarkFusion 5.2 required model bundle (3.84 GB)](https://drive.google.com/file/d/1j9Y-WpUDjPt67_U43lafO-7dTkxLJuPS/view?usp=sharing).
 Open the downloaded ZIP and copy its `Sam` folder into
 `C:\DarkFusion\UltraDarkFusion`. The resulting paths must include:
 

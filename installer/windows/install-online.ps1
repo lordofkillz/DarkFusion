@@ -44,10 +44,10 @@ function Test-Download([string]$Path, [long]$Size, [string]$Hash) {
     finally { $stream.Dispose(); $algorithm.Dispose() }
 }
 
-function Receive-Part($Part, [int]$Number, [int]$Total) {
+function Receive-Part($Part, [int]$Number, [int]$Total, [string]$Label = 'application files') {
     $target = Join-Path $cache ([string]$Part.name)
     if (Test-Download $target ([long]$Part.size_bytes) ([string]$Part.sha256)) {
-        Write-DownloadLog "STAGE: Download $Number of $Total is ready"
+        Write-DownloadLog "STAGE: $Label download $Number of $Total is ready"
         return $target
     }
     $partial = $target + '.partial'
@@ -55,7 +55,7 @@ function Receive-Part($Part, [int]$Number, [int]$Total) {
     if (Test-Download $partial ([long]$Part.size_bytes) ([string]$Part.sha256)) {
         if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Force }
         Move-Item -LiteralPath $partial -Destination $target
-        Write-DownloadLog "STAGE: Download $Number of $Total is ready"
+        Write-DownloadLog "STAGE: $Label download $Number of $Total is ready"
         return $target
     }
     for ($attempt = 1; $attempt -le 3; $attempt++) {
@@ -69,7 +69,7 @@ function Receive-Part($Part, [int]$Number, [int]$Total) {
                 $offset = (Get-Item -LiteralPath $partial).Length
                 if ($offset -ge [long]$Part.size_bytes) { $offset = 0 }
             }
-            Write-DownloadLog "STAGE: Downloading application files ($Number of $Total)"
+            Write-DownloadLog "STAGE: Downloading $Label ($Number of $Total)"
             $request = New-Object Net.Http.HttpRequestMessage([Net.Http.HttpMethod]::Get, [string]$Part.url)
             if ($offset -gt 0) { $request.Headers.Range = New-Object Net.Http.Headers.RangeHeaderValue($offset, $null) }
             $response = $client.SendAsync($request, [Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
@@ -96,7 +96,7 @@ function Receive-Part($Part, [int]$Number, [int]$Total) {
                 $received += $count
                 if ([DateTime]::UtcNow -ge $nextUpdate) {
                     $percent = [int][Math]::Floor(100.0 * $received / [long]$Part.size_bytes)
-                    Write-DownloadLog "STAGE: Downloading application files ($Number of $Total, $percent%)"
+                    Write-DownloadLog "STAGE: Downloading $Label ($Number of $Total, $percent%)"
                     $nextUpdate = [DateTime]::UtcNow.AddSeconds(2)
                 }
             }
@@ -166,6 +166,14 @@ try {
         $partTotal += [long]$part.size_bytes
     }
     if ($partTotal -ne [long]$manifest.payload.archive_size_bytes) { throw 'The download package size is invalid.' }
+    $models = $manifest.models
+    if ($models.name -cne 'DarkFusion-models.zip' -or
+        $models.url -cne 'https://drive.usercontent.google.com/download?id=1j9Y-WpUDjPt67_U43lafO-7dTkxLJuPS&export=download&confirm=t' -or
+        $models.sha256 -notmatch '^[a-fA-F0-9]{64}$' -or
+        [long]$models.size_bytes -le 0 -or [long]$models.unpacked_size_bytes -le 0 -or
+        @($models.files).Count -ne 2) {
+        throw 'The installer contains invalid model download information. Download the installer again.'
+    }
     $parent = [IO.Path]::GetDirectoryName($InstallDirectory)
     $cacheBase = Join-Path $parent '.DarkFusion-Setup-Cache'
     $cache = Join-Path $cacheBase ([string]$manifest.payload.sha256).ToLowerInvariant()
@@ -175,17 +183,19 @@ try {
     $cacheLock = [IO.File]::Open((Join-Path $cache 'download.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
     $drive = New-Object IO.DriveInfo([IO.Path]::GetPathRoot($InstallDirectory))
     if ($drive.DriveType -eq [IO.DriveType]::Network) { throw 'Choose a local drive.' }
-    $needed = [decimal]$manifest.payload.unpacked_size_bytes + 2 * [decimal]$partTotal + 1GB
+    $needed = [decimal]$manifest.payload.unpacked_size_bytes + 2 * [decimal]$partTotal +
+        [decimal]$models.size_bytes + [decimal]$models.unpacked_size_bytes + 1GB
     $cachedBytes = (Get-ChildItem -LiteralPath $cache -File | Measure-Object Length -Sum).Sum
-    if ($cachedBytes) { $needed -= [Math]::Min([decimal]$cachedBytes, 2 * [decimal]$partTotal) }
-    if ([decimal]$drive.AvailableFreeSpace -lt $needed) { throw 'Allow at least 25 GB free on the selected drive while setup downloads and installs DarkFusion.' }
+    if ($cachedBytes) { $needed -= [Math]::Min([decimal]$cachedBytes, 2 * [decimal]$partTotal + [decimal]$models.size_bytes) }
+    if ([decimal]$drive.AvailableFreeSpace -lt $needed) { throw 'Allow at least 35 GB free on the selected drive while setup downloads and installs DarkFusion and its models.' }
+    # Models may still need downloading when the complete runtime is cached.
+    Add-Type -AssemblyName System.Net.Http
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $client = New-Object Net.Http.HttpClient
+    $client.Timeout = [TimeSpan]::FromMinutes(5)
+    $client.DefaultRequestHeaders.UserAgent.ParseAdd('DarkFusionSetup/5.2')
     $payload = Join-Path $cache 'payload.zip'
     if (-not (Test-Download $payload ([long]$manifest.payload.archive_size_bytes) ([string]$manifest.payload.sha256))) {
-        Add-Type -AssemblyName System.Net.Http
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        $client = New-Object Net.Http.HttpClient
-        $client.Timeout = [TimeSpan]::FromMinutes(5)
-        $client.DefaultRequestHeaders.UserAgent.ParseAdd('DarkFusionSetup/5.2')
         $downloaded = @()
         $index = 0
         foreach ($part in $manifest.parts) {
@@ -214,9 +224,17 @@ try {
         $path = Join-Path $cache ([string]$part.name)
         if (Test-Path -LiteralPath $path -PathType Leaf) { Assert-Unlinked $path; Remove-Item -LiteralPath $path -Force }
     }
+    # Finish every download before creating the installation destination so an
+    # interrupted model download can resume without leaving a partial app.
+    $modelPackage = Receive-Part $models 1 1 'SAM3 and GroundingDINO models'
     $payloadManifest = Join-Path $cache 'payload.json'
+    Assert-Unlinked $payloadManifest
     [IO.File]::WriteAllText($payloadManifest, ($manifest.payload | ConvertTo-Json -Depth 5), (New-Object Text.UTF8Encoding($false)))
-    $installParameters = @{PackagePath=$payload; ManifestPath=$payloadManifest; InstallDirectory=$InstallDirectory; LogPath=$LogPath}
+    $modelManifest = Join-Path $cache 'models.json'
+    Assert-Unlinked $modelManifest
+    [IO.File]::WriteAllText($modelManifest, ($models | ConvertTo-Json -Depth 5), (New-Object Text.UTF8Encoding($false)))
+    $installParameters = @{PackagePath=$payload; ManifestPath=$payloadManifest; InstallDirectory=$InstallDirectory; LogPath=$LogPath;
+        ModelPackagePath=$modelPackage; ModelManifestPath=$modelManifest}
     if ($DesktopShortcut) { $installParameters.DesktopShortcut = $true }
     if ($StartMenuShortcut) { $installParameters.StartMenuShortcut = $true }
     & (Join-Path $PSScriptRoot 'install-standalone.ps1') @installParameters
@@ -224,6 +242,8 @@ try {
     if ($exitCode -eq 0) {
         Remove-Item -LiteralPath $payload -Force
         Remove-Item -LiteralPath $payloadManifest -Force
+        Remove-Item -LiteralPath $modelPackage -Force
+        Remove-Item -LiteralPath $modelManifest -Force
     }
 }
 catch {

@@ -1,0 +1,21 @@
+{
+  "name": "DarkFusion-models.zip",
+  "url": "https://drive.usercontent.google.com/download?id=1j9Y-WpUDjPt67_U43lafO-7dTkxLJuPS&export=download&confirm=t",
+  "size_bytes": 3841463101,
+  "sha256": "2b26091fc94ce73a6ea1554d1e8cfe5dd3a5be9f0ea8a66a8ca32dec07fc9a5a",
+  "unpacked_size_bytes": 4144059918,
+  "files": [
+    {
+      "archive_path": "Sam/sam3.pt",
+      "target_path": "app/UltraDarkFusion/Sam/sam3.pt",
+      "size_bytes": 3450062241,
+      "sha256": "9999e2341ceef5e136daa386eecb55cb414446a00ac2b55eb2dfd2f7c3cf8c9e"
+    },
+    {
+      "archive_path": "Sam/groundingdino_swint_ogc.pth",
+      "target_path": "app/UltraDarkFusion/Sam/groundingdino_swint_ogc.pth",
+      "size_bytes": 693997677,
+      "sha256": "3b3ca2563c77c69f651d7bd133e97139c186df06231157a64c507099c52bc799"
+    }
+  ]
+}

@@ -1,6 +1,11 @@
 # Model directory
 
-For complete DarkFusion functionality, download the
+The recommended Windows **DarkFusionSetup.exe** automatically installs the
+required SAM3 and GroundingDINO checkpoints into this directory before setup
+finishes. The small support files are included with the application.
+
+For a Python/source installation or the optional offline runtime distribution,
+download the
 [required model bundle](https://drive.google.com/file/d/1j9Y-WpUDjPt67_U43lafO-7dTkxLJuPS/view?usp=sharing)
 and copy its `Sam` folder into `UltraDarkFusion`.
 

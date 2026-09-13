@@ -6,10 +6,19 @@ individual files larger than 100 MB.
 
 ## Required DarkFusion model bundle
 
-Download the
-[DarkFusion 5.2 required model bundle (3.58 GB)](https://drive.google.com/file/d/1j9Y-WpUDjPt67_U43lafO-7dTkxLJuPS/view?usp=sharing),
+The recommended Windows **DarkFusionSetup.exe** downloads and installs this
+bundle automatically before setup finishes. The installed checkpoints are at
+`<installation folder>\app\UltraDarkFusion\Sam\sam3.pt` and
+`<installation folder>\app\UltraDarkFusion\Sam\groundingdino_swint_ogc.pth`.
+No manual model download is needed with that installer.
+
+For a Python/source installation or the optional offline runtime distribution,
+download the
+[DarkFusion 5.2 required model bundle (3.84 GB)](https://drive.google.com/file/d/1j9Y-WpUDjPt67_U43lafO-7dTkxLJuPS/view?usp=sharing),
 then extract its `Sam` folder into the repository's `UltraDarkFusion` folder.
-On the standard installation path, verify that these files exist:
+For an offline runtime installation, extract it into
+`<installation folder>\app\UltraDarkFusion` instead. On the standard Python
+installation path, verify that these files exist:
 
 ```text
 C:\DarkFusion\UltraDarkFusion\Sam\sam3.pt

@@ -5,7 +5,9 @@ param(
     [Parameter(Mandatory = $true)][string]$InstallDirectory,
     [Parameter(Mandatory = $true)][string]$LogPath,
     [switch]$DesktopShortcut,
-    [switch]$StartMenuShortcut
+    [switch]$StartMenuShortcut,
+    [string]$ModelPackagePath,
+    [string]$ModelManifestPath
 )
 
 # This backend is invoked by DarkFusionSetup.exe. It never installs into, or
@@ -20,6 +22,7 @@ $script:EnvironmentChanged = $false
 $script:ExitCode = 1
 $packageStream = $null
 $archive = $null
+$models = $null
 
 function Write-InstallLog([string]$Message) {
     $line = ('[{0}] {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Message)
@@ -100,6 +103,131 @@ function Get-ManifestInteger($Object, [string]$Name) {
     catch { throw "Package manifest has an invalid $Name value." }
     if ($number -le 0) { throw "Package manifest has an invalid $Name value." }
     return $number
+}
+
+function Open-ModelPackage([string]$PackageFile, [string]$ManifestFile, $RuntimeNames) {
+    $modelStream = $null
+    $modelArchive = $null
+    try {
+        $modelManifest = [IO.File]::ReadAllText($ManifestFile) | ConvertFrom-Json
+        if ($null -eq $modelManifest -or $modelManifest.name -cne 'DarkFusion-models.zip' -or
+            [string]$modelManifest.sha256 -notmatch '^[0-9a-fA-F]{64}$' -or
+            @($modelManifest.files).Count -ne 2) {
+            throw 'The model package manifest is invalid.'
+        }
+        $archiveBytes = Get-ManifestInteger $modelManifest 'size_bytes'
+        $unpackedBytes = Get-ManifestInteger $modelManifest 'unpacked_size_bytes'
+        $allowed = @{
+            'Sam/sam3.pt' = 'app/UltraDarkFusion/Sam/sam3.pt'
+            'Sam/groundingdino_swint_ogc.pth' = 'app/UltraDarkFusion/Sam/groundingdino_swint_ogc.pth'
+        }
+        $requested = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
+        [long]$requestedBytes = 0
+        foreach ($file in $modelManifest.files) {
+            $source = [string]$file.archive_path
+            $relative = [string]$file.target_path
+            if (-not $allowed.ContainsKey($source) -or $relative -cne $allowed[$source] -or
+                $source -cne ('Sam/' + [IO.Path]::GetFileName($relative)) -or
+                $requested.ContainsKey($source) -or [string]$file.sha256 -notmatch '^[0-9a-fA-F]{64}$') {
+                throw 'The model manifest contains unexpected or repeated file paths.'
+            }
+            $size = Get-ManifestInteger $file 'size_bytes'
+            if ($size -gt ($unpackedBytes - $requestedBytes)) { throw 'The model file sizes exceed the manifest.' }
+            $requestedBytes += $size
+            $target = [IO.Path]::GetFullPath((Join-Path $script:Destination $relative.Replace('/', '\')))
+            if (-not (Test-PathWithin $target $script:Destination)) { throw 'The model destination is unsafe.' }
+            if ($RuntimeNames.ContainsKey($relative)) { throw "The runtime unexpectedly supplies a model destination: $relative" }
+            $components = $relative.Split('/')
+            for ($index = 1; $index -lt $components.Length; $index++) {
+                $parentName = [string]::Join('/', $components[0..($index - 1)])
+                if ($RuntimeNames.ContainsKey($parentName) -and -not $RuntimeNames[$parentName]) {
+                    throw "The runtime has a conflicting model folder: $parentName"
+                }
+            }
+            $requested.Add($source, [pscustomobject]@{ Relative = $relative; Target = $target; Size = $size; Hash = ([string]$file.sha256).ToLowerInvariant() })
+        }
+        if ($requestedBytes -ne $unpackedBytes) { throw 'The model file sizes do not match the manifest.' }
+        # Keep this exact read-only handle open until extraction completes.
+        $modelStream = [IO.File]::Open($PackageFile, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        if ($modelStream.Length -ne $archiveBytes) { throw 'The model package size does not match its manifest.' }
+        $hasher = [Security.Cryptography.SHA256]::Create()
+        try { $hash = [BitConverter]::ToString($hasher.ComputeHash($modelStream)).Replace('-', '').ToLowerInvariant() }
+        finally { $hasher.Dispose() }
+        if ($hash -cne ([string]$modelManifest.sha256).ToLowerInvariant()) { throw 'The model package checksum does not match. Run setup again to download it.' }
+        $modelStream.Position = 0
+        $modelArchive = New-Object IO.Compression.ZipArchive($modelStream, [IO.Compression.ZipArchiveMode]::Read, $true)
+        $modelNames = New-Object 'System.Collections.Generic.Dictionary[string,bool]' ([StringComparer]::OrdinalIgnoreCase)
+        $selected = New-Object 'System.Collections.Generic.List[object]'
+        foreach ($entry in $modelArchive.Entries) {
+            $name = $entry.FullName.Replace('\', '/')
+            $isDirectory = $name.EndsWith('/')
+            $relative = $name.TrimEnd('/')
+            if (-not $relative -or $relative.StartsWith('/') -or $relative -match '[<>:"|?*\x00-\x1f]') {
+                throw "The model package contains an unsafe entry: $name"
+            }
+            foreach ($component in $relative.Split('/')) {
+                if (-not $component -or $component -in @('.', '..') -or $component.EndsWith('.') -or
+                    $component.EndsWith(' ') -or $component -match '^(?i:CON|PRN|AUX|NUL|CLOCK\$|COM[1-9\u00b9\u00b2\u00b3]|LPT[1-9\u00b9\u00b2\u00b3])(?:\.|$)') {
+                    throw "The model package contains an unsafe entry: $name"
+                }
+            }
+            $unixKind = ($entry.ExternalAttributes -shr 16) -band 0xf000
+            if ($unixKind -notin @(0, 0x4000, 0x8000) -or ($entry.ExternalAttributes -band 0x400) -ne 0) {
+                throw "Linked or special model archive entries are not supported: $name"
+            }
+            if ($modelNames.ContainsKey($relative)) { throw "The model package contains conflicting paths: $name" }
+            $modelNames.Add($relative, $isDirectory)
+            if ($isDirectory -and $entry.Length -ne 0) { throw "The model package has an invalid directory entry: $name" }
+            # Other bundle support files already ship with the runtime. Extract only
+            # these two explicitly mapped checkpoints; never overwrite support files.
+            if ($requested.ContainsKey($relative)) {
+                $file = $requested[$relative]
+                if ($isDirectory -or $entry.Length -ne $file.Size) { throw "The model package has an invalid required file: $name" }
+                $selected.Add([pscustomobject]@{ Entry = $entry; Relative = $file.Relative; Target = $file.Target; Size = $file.Size; Hash = $file.Hash })
+            }
+        }
+        foreach ($relative in $modelNames.Keys) {
+            $components = $relative.Split('/')
+            for ($index = 1; $index -lt $components.Length; $index++) {
+                $parentName = [string]::Join('/', $components[0..($index - 1)])
+                if ($modelNames.ContainsKey($parentName) -and -not $modelNames[$parentName]) {
+                    throw "The model package contains conflicting file and folder paths: $parentName"
+                }
+            }
+        }
+        if ($selected.Count -ne $requested.Count) { throw 'The model package is missing a required SAM3 or GroundingDINO checkpoint.' }
+        return [pscustomobject]@{ Stream = $modelStream; Archive = $modelArchive; Entries = $selected; Size = $unpackedBytes; Hash = $hash }
+    }
+    catch {
+        if ($modelArchive) { $modelArchive.Dispose() }
+        if ($modelStream) { $modelStream.Dispose() }
+        throw
+    }
+}
+
+function Install-ModelFiles($Package) {
+    foreach ($file in $Package.Entries) {
+        Write-InstallLog ('STAGE: Installing ' + [IO.Path]::GetFileName($file.Target))
+        Assert-NoReparseAncestors $file.Target
+        Ensure-ExtractionDirectory ([IO.Path]::GetDirectoryName($file.Target))
+        $input = $file.Entry.Open()
+        $output = $null
+        try {
+            $output = [IO.File]::Open($file.Target, [IO.FileMode]::CreateNew, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+            $input.CopyTo($output)
+            if ($output.Length -ne $file.Size) { throw "The model file could not be installed completely: $($file.Relative)" }
+            $output.Position = 0
+            $hasher = [Security.Cryptography.SHA256]::Create()
+            try { $hash = [BitConverter]::ToString($hasher.ComputeHash($output)).Replace('-', '').ToLowerInvariant() }
+            finally { $hasher.Dispose() }
+            if ($hash -cne $file.Hash) { throw "The installed model checksum does not match: $($file.Relative)" }
+        }
+        finally {
+            if ($output) { $output.Dispose() }
+            $input.Dispose()
+        }
+    }
+    Write-InstallLog 'SAM3 and GroundingDINO checkpoints installed and verified.'
 }
 
 function Invoke-PrivatePython([string]$Python, [string[]]$Arguments) {
@@ -192,6 +320,15 @@ try {
     $script:Destination = Get-LocalFullPath $InstallDirectory 'Installation folder'
     $packageFile = Get-LocalFullPath $PackagePath 'Package path'
     $manifestFile = Get-LocalFullPath $ManifestPath 'Manifest path'
+    $modelInputs = @()
+    if ([string]::IsNullOrWhiteSpace($ModelPackagePath) -ne [string]::IsNullOrWhiteSpace($ModelManifestPath)) {
+        throw 'Supply both the model package and its manifest.'
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ModelPackagePath)) {
+        $modelPackageFile = Get-LocalFullPath $ModelPackagePath 'Model package path'
+        $modelManifestFile = Get-LocalFullPath $ModelManifestPath 'Model manifest path'
+        $modelInputs = @($modelPackageFile, $modelManifestFile)
+    }
     $logFile = Get-LocalFullPath $LogPath 'Log path'
     if (Test-PathWithin $logFile $script:Destination) {
         throw 'Choose an installation folder separate from the installation log.'
@@ -213,7 +350,7 @@ try {
     if ($env:USERPROFILE -and $script:Destination.Equals($env:USERPROFILE, [StringComparison]::OrdinalIgnoreCase)) {
         throw 'Choose a folder inside your profile, not the profile root.'
     }
-    foreach ($inputFile in @($packageFile, $manifestFile, $PSCommandPath, $logFile)) {
+    foreach ($inputFile in (@($packageFile, $manifestFile, $PSCommandPath, $logFile) + $modelInputs)) {
         if (Test-PathWithin $inputFile $script:Destination) {
             throw 'Choose an installation folder separate from the setup package and installation log.'
         }
@@ -225,7 +362,7 @@ try {
         throw 'Choose an installation folder outside the DarkFusion source checkout.'
     }
     Assert-EmptyDestination $script:Destination
-    foreach ($inputFile in @($packageFile, $manifestFile)) {
+    foreach ($inputFile in (@($packageFile, $manifestFile) + $modelInputs)) {
         Assert-NoReparseAncestors $inputFile
         if (-not (Test-Path -LiteralPath $inputFile -PathType Leaf)) { throw "Setup file is missing: $inputFile" }
     }
@@ -301,9 +438,15 @@ try {
     $unpackRelative = @('runtime/Scripts/conda-unpack-script.py', 'runtime/Scripts/conda-unpack') |
         Where-Object { $names.ContainsKey($_) -and -not $names[$_] } | Select-Object -First 1
     if (-not $unpackRelative) { throw 'The private runtime relocation script is missing from the package.' }
+    [long]$modelUnpackedSize = 0
+    if ($modelInputs.Count -gt 0) {
+        Write-InstallLog 'STAGE: Checking required model package'
+        $models = Open-ModelPackage $modelPackageFile $modelManifestFile $names
+        $modelUnpackedSize = $models.Size
+    }
     $drive = New-Object IO.DriveInfo($driveRoot)
     if ($drive.DriveType -eq [IO.DriveType]::Network) { throw 'Choose a local drive for the application runtime.' }
-    $spaceRequired = [decimal]$unpackedSize + [Math]::Max([decimal]536870912, [decimal]$unpackedSize * [decimal]0.05)
+    $spaceRequired = [decimal]$unpackedSize + [decimal]$modelUnpackedSize + [Math]::Max([decimal]536870912, [decimal]$unpackedSize * [decimal]0.05)
     if ([decimal]$drive.AvailableFreeSpace -lt $spaceRequired) {
         throw ('Not enough free space. Allow at least {0:N1} GB for this installation.' -f ($spaceRequired / 1GB))
     }
@@ -348,6 +491,11 @@ try {
     $archive = $null
     $packageStream.Dispose()
     $packageStream = $null
+    if ($models) {
+        Install-ModelFiles $models
+        $models.Archive.Dispose()
+        $models.Stream.Dispose()
+    }
 
     foreach ($variable in @('PATH', 'PYTHONNOUSERSITE', 'PYTHONHOME', 'PYTHONPATH',
             'CONDA_PREFIX', 'CONDA_DEFAULT_ENV', 'CONDA_SHLVL', 'QT_PLUGIN_PATH', 'QT_QPA_PLATFORM_PLUGIN_PATH', 'QT_QPA_PLATFORM')) {
@@ -387,6 +535,7 @@ try {
         install_directory = $script:Destination
         status = 'complete'
     }
+    if ($models) { $state.model_bundle_sha256 = $models.Hash }
     $statePath = Join-Path $script:Destination 'install-state.json'
     Assert-NoReparseAncestors $statePath
     if (Test-Path -LiteralPath $statePath) { throw 'The package unexpectedly supplied installation state.' }
@@ -413,6 +562,7 @@ catch {
 finally {
     if ($archive) { $archive.Dispose() }
     if ($packageStream) { $packageStream.Dispose() }
+    if ($models) { $models.Archive.Dispose(); $models.Stream.Dispose() }
     if ($script:EnvironmentChanged) {
         foreach ($variable in $script:SavedEnvironment.Keys) {
             [Environment]::SetEnvironmentVariable($variable, $script:SavedEnvironment[$variable], 'Process')
