@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$OutputDirectory = (Join-Path $PSScriptRoot 'build'),
-    [switch]$RunTests
+    [switch]$RunTests,
+    [string]$OnlineManifest
 )
 
 $ErrorActionPreference = 'Stop'
@@ -38,13 +39,32 @@ $compiler = (Get-Command cl.exe -ErrorAction Stop).Source
 $common = @('/nologo', '/std:c++17', '/EHsc', '/O2', '/MT', '/W4', '/utf-8', '/DUNICODE', '/D_UNICODE', '/D_WIN32_WINNT=0x0A00')
 $libraries = @('user32.lib', 'gdi32.lib', 'shell32.lib', 'ole32.lib', 'comctl32.lib', 'uuid.lib')
 $manifest = Join-Path $PSScriptRoot 'app.manifest'
+$resources = @()
+if ($OnlineManifest) {
+    $resourceCompiler = (Get-Command rc.exe -ErrorAction Stop).Source
+    $downloadManifest = (Resolve-Path -LiteralPath $OnlineManifest).ProviderPath
+    $backend = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\windows\install-standalone.ps1')).ProviderPath
+    $onlineBackend = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\windows\install-online.ps1')).ProviderPath
+    $resourceScript = Join-Path $OutputDirectory 'setup-resources.rc'
+    $resourceOutput = Join-Path $OutputDirectory 'setup-resources.res'
+    $resourceLines = @('#include <windows.h>',
+        ('101 RCDATA "{0}"' -f $backend.Replace('\','\\')),
+        ('102 RCDATA "{0}"' -f $onlineBackend.Replace('\','\\')),
+        ('103 RCDATA "{0}"' -f $downloadManifest.Replace('\','\\')))
+    [IO.File]::WriteAllLines($resourceScript, $resourceLines, (New-Object Text.UTF8Encoding($false)))
+    & $resourceCompiler /nologo /c65001 "/fo$resourceOutput" $resourceScript
+    if ($LASTEXITCODE -ne 0) { throw 'Could not embed the automatic download configuration.' }
+    $resources = @($resourceOutput)
+}
 
 Push-Location $PSScriptRoot
 try {
     foreach ($target in @(@{ Source = 'setup.cpp'; Name = 'DarkFusionSetup' }, @{ Source = 'launcher.cpp'; Name = 'DarkFusion' })) {
         $exe = Join-Path $OutputDirectory ($target.Name + '.exe')
         $obj = Join-Path $OutputDirectory ($target.Name + '.obj')
-        & $compiler @common $target.Source "/Fo$obj" "/Fe$exe" /link /SUBSYSTEM:WINDOWS /MANIFEST:EMBED "/MANIFESTINPUT:$manifest" @libraries
+        [string[]]$targetResources = @()
+        if ($target.Name -eq 'DarkFusionSetup') { $targetResources = $resources }
+        & $compiler @common $target.Source "/Fo$obj" "/Fe$exe" @targetResources /link /SUBSYSTEM:WINDOWS /MANIFEST:EMBED "/MANIFESTINPUT:$manifest" @libraries
         if ($LASTEXITCODE -ne 0) { throw "Native build failed: $($target.Name)" }
     }
     if ($RunTests) {
@@ -53,7 +73,7 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'Native smoke test build failed.' }
         & $testExe
         if ($LASTEXITCODE -ne 0) { throw 'Native argument/environment smoke test failed.' }
-        & (Join-Path $PSScriptRoot 'test-setup.ps1') -BuildDirectory $OutputDirectory
+        if (-not $OnlineManifest) { & (Join-Path $PSScriptRoot 'test-setup.ps1') -BuildDirectory $OutputDirectory }
     }
 } finally {
     Pop-Location

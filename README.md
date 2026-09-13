@@ -6,6 +6,32 @@ UltraDarkFusion is a Windows desktop application for building YOLO datasets,
 labeling images and video, training models, reviewing validation failures, and
 running inference through PyTorch, ONNX, or TensorRT.
 
+## Download and install
+
+### Recommended: Windows installer
+
+**[Download DarkFusionSetup.exe for Windows](https://github.com/lordofkillz/DarkFusion/releases/latest/download/DarkFusionSetup.exe)**
+
+1. Download and open **DarkFusionSetup.exe**.
+2. Choose a new writable folder and click **Install**.
+3. Open DarkFusion from the shortcut setup creates.
+
+Setup automatically downloads and installs the application and its private Python
+runtime. **You do not need to install Python, Conda, Git, or build tools.** Download
+progress appears in the setup window; interrupted downloads can resume when you
+run setup again.
+
+Requires Windows 10 version 1903 or later, or Windows 11 x64, an internet connection,
+and approximately **25 GB free during setup**. The download is about **6.3 GB**;
+the application/runtime occupy about **11 GB** after setup. NVIDIA drivers are
+needed for GPU features. Optional SAM3/GroundingDINO models are downloaded separately.
+
+### Prefer to manage Python yourself?
+
+The [Python installation method](#python-installation) remains available below.
+GitHub's **Code → Download ZIP** provides the source for that method. For the
+recommended setup experience, use the **Download DarkFusionSetup.exe** link above.
+
 ## Short walkthrough
 
 The walkthrough uses COCO images inside the current UltraDarkFusion 5.2
@@ -78,8 +104,10 @@ Analysis, training, tuning, and validation review.
 ## Supported system
 
 - Windows 10/11, 64-bit.
-- Miniconda or Anaconda.
-- Python 3.12 in a dedicated environment named `fusion`.
+- For the Python installation: Miniconda or Anaconda and Python 3.12 in a
+  dedicated environment (`fusion` by default).
+- For the standalone package: Windows 10 version 1903 or later, or Windows 11;
+  Python and its dependencies are included.
 - NVIDIA GPU and current driver recommended.
 - The pinned PyTorch build uses CUDA 12.8 and supports modern NVIDIA GPUs,
   including Blackwell/RTX 50-series.
@@ -88,13 +116,11 @@ The normal Python installation does not require compiling OpenCV or installing
 a separate CUDA Toolkit. The PyTorch wheel provides its matching CUDA runtime.
 A locally installed CUDA Toolkit is only needed for specialized source builds.
 
-## Install
+## Python installation
 
-An optional **native Windows setup wizard** can install DarkFusion with its own
-Python/ML runtime in a chosen writable folder, without an existing Python or
-Conda installation. See the [standalone installer instructions](installer/README.md)
-for the distribution layout and build steps. The Python installation method below
-remains available.
+Use this method to install from the repository and manage DarkFusion's Python
+environment. For the separate native setup package, see
+[Download and install](#download-and-install).
 
 Install [Git](https://git-scm.com/download/win) and
 [Miniconda](https://docs.conda.io/projects/miniconda/en/latest/), then:

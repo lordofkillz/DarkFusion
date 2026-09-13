@@ -5,9 +5,30 @@ runtime. People using this distribution do not need to install Python, Conda,
 Git, or build tools. The regular `fusion_install.bat` / `install.ps1` method
 remains available for people who manage their own Python environment.
 
-## Install from a standalone distribution
+## Recommended installation
 
-Keep these files together and open **DarkFusionSetup.exe**:
+**[Download DarkFusionSetup.exe](https://github.com/lordofkillz/DarkFusion/releases/latest/download/DarkFusionSetup.exe)**,
+open it, choose a new writable folder, and click **Install**. Setup downloads the
+application/runtime automatically, checks the files, installs them and creates
+your selected shortcuts. You only need to download the EXE yourself.
+
+Allow approximately 25 GB free during setup and an internet connection for the
+6.3 GB download. The installed application/runtime occupy about 11 GB. Download
+progress appears in the window. Run setup again after an interrupted download
+to resume it. Download files are removed after installation succeeds.
+
+The [Python installation method](../README.md#python-installation) remains
+available for people who manage their own environment. GitHub's source ZIP is
+for that method; the setup EXE is linked above.
+
+## Offline distribution (optional)
+
+Maintainers can also supply a complete offline installation folder. The regular
+online setup EXE does not require users to download or arrange these files.
+
+If the complete distribution is supplied inside an outer ZIP, extract that ZIP
+first. Keep the following files together and open **DarkFusionSetup.exe**.
+Leave `payload.zip` intact; setup extracts it automatically.
 
 ```text
 DarkFusionSetup.exe
@@ -20,6 +41,8 @@ START HERE.txt
 
 Choose a new, writable folder on a local drive, such as
 `D:\Applications\DarkFusion` or the suggested folder inside your user profile.
+Allow approximately **11 GB** for the application/runtime, plus room for your
+models, datasets, and generated files.
 Setup verifies the package, extracts the application and runtime, configures
 the runtime for the chosen location, and checks the required imports. It creates
 the selected shortcuts after those checks pass.
@@ -112,3 +135,30 @@ shown by the wizard. Failed installation files are retained for diagnosis; setup
 does not recursively delete a selected destination.
 
 Runtime relocation uses [conda-pack](https://conda.github.io/conda-pack/).
+
+## Publish the single-EXE installer (maintainers)
+
+After building the offline distribution above, prepare the versioned runtime
+downloads and compile their manifest and setup scripts into the native EXE:
+
+```powershell
+python .\installer\prepare_download.py `
+  --distribution D:\DarkFusionBuild\distribution `
+  --output D:\DarkFusionBuild\online `
+  --release-tag v5.2.0-windows.1
+.\installer\native\build.ps1 `
+  -OutputDirectory D:\DarkFusionBuild\online\native `
+  -OnlineManifest D:\DarkFusionBuild\online\download.json `
+  -RunTests
+```
+
+Upload the generated `DarkFusion-runtime.*.bin` assets, `download.json`, and
+`native/DarkFusionSetup.exe` to that exact GitHub release tag. The EXE embeds its
+versioned download URLs and checksums, so upload all files before publishing the
+release. The README download link targets only the setup EXE. Runtime assets are
+fetched and verified automatically; end users do not assemble them.
+
+Each runtime asset stays below GitHub's 2 GiB release-asset limit. Downloads are
+cached on the selected installation drive, with range-based resume and SHA-256
+verification. The installer preserves completed downloads when a connection
+fails. It never downloads or uses a user's existing Conda installation.

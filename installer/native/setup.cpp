@@ -2,6 +2,8 @@
 #include <commctrl.h>
 #include <shlobj.h>
 #include <shobjidl.h>
+#include <fstream>
+#include <sstream>
 
 namespace {
 constexpr int Destination = 101, Browse = 102, Install = 103, Desktop = 104,
@@ -9,12 +11,64 @@ constexpr int Destination = 101, Browse = 102, Install = 103, Desktop = 104,
 HFONT font = nullptr, headingFont = nullptr;
 HWND destinationEdit = nullptr, installButton = nullptr, browseButton = nullptr,
      statusLabel = nullptr, progressBar = nullptr, desktopBox = nullptr, menuBox = nullptr, logButton = nullptr;
-std::filesystem::path installDirectory, sourceDirectory, logPath;
+std::filesystem::path installDirectory, sourceDirectory, logPath, resourceDirectory;
 PROCESS_INFORMATION installProcess{};
 bool installing = false, installed = false;
 int scale = 96;
 
 int px(int value) { return MulDiv(value, scale, 96); }
+
+bool onlineSetup() {
+    return FindResourceW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(103), RT_RCDATA) != nullptr;
+}
+
+void writeResource(int identifier, const std::filesystem::path& path) {
+    const auto module = GetModuleHandleW(nullptr);
+    const auto resource = FindResourceW(module, MAKEINTRESOURCEW(identifier), RT_RCDATA);
+    const auto handle = resource ? LoadResource(module, resource) : nullptr;
+    const auto bytes = handle ? LockResource(handle) : nullptr;
+    const auto size = resource ? SizeofResource(module, resource) : 0;
+    if (!bytes || !size) throw std::runtime_error("The setup download is incomplete. Download DarkFusionSetup.exe again.");
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    output.write(static_cast<const char*>(bytes), size);
+    if (!output) throw std::runtime_error("Setup could not prepare its temporary files.");
+}
+
+void prepareResources() {
+    if (!resourceDirectory.empty()) return;
+    GUID guid{};
+    if (FAILED(CoCreateGuid(&guid))) throw std::runtime_error("Cannot create a setup session.");
+    wchar_t suffix[40]{};
+    StringFromGUID2(guid, suffix, 40);
+    resourceDirectory = logPath.parent_path() / (std::wstring(L"DarkFusionSetup-") + suffix);
+    if (!CreateDirectoryW(resourceDirectory.c_str(), nullptr)) throw std::runtime_error("Cannot create the temporary setup folder.");
+    writeResource(101, resourceDirectory / L"install-standalone.ps1");
+    writeResource(102, resourceDirectory / L"install-online.ps1");
+    writeResource(103, resourceDirectory / L"download.json");
+}
+
+void removeResources() {
+    if (resourceDirectory.empty()) return;
+    for (const auto* name : {L"install-standalone.ps1", L"install-online.ps1", L"download.json"})
+        DeleteFileW((resourceDirectory / name).c_str());
+    RemoveDirectoryW(resourceDirectory.c_str());
+    resourceDirectory.clear();
+}
+
+void updateStageText() {
+    std::ifstream input(logPath, std::ios::binary);
+    std::string line, latest;
+    while (std::getline(input, line)) {
+        const auto marker = line.find("STAGE: ");
+        if (marker != std::string::npos) latest = line.substr(marker + 7);
+    }
+    if (latest.empty()) return;
+    const int length = MultiByteToWideChar(CP_UTF8, 0, latest.data(), static_cast<int>(latest.size()), nullptr, 0);
+    if (!length) return;
+    std::wstring text(length, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, latest.data(), static_cast<int>(latest.size()), text.data(), length);
+    SetWindowTextW(statusLabel, text.c_str());
+}
 
 HWND add(HWND parent, const wchar_t* type, const wchar_t* title, DWORD style,
          int x, int y, int width, int height, int id = 0) {
@@ -49,7 +103,7 @@ std::filesystem::path powershellPath() {
 }
 
 bool startInstallation(bool desktop, bool startMenu, std::wstring& error) {
-    for (const auto* file : {L"install-standalone.ps1", L"payload.zip", L"payload.json"}) {
+    if (!onlineSetup()) for (const auto* file : {L"install-standalone.ps1", L"payload.zip", L"payload.json"}) {
         if (!std::filesystem::is_regular_file(sourceDirectory / file)) {
             error = std::wstring(L"The download is incomplete: ") + file +
                 L" is missing. Extract all of the installer files into the same folder.";
@@ -60,14 +114,25 @@ bool startInstallation(bool desktop, bool startMenu, std::wstring& error) {
         error = L"Choose a full folder path, such as D:\\Applications\\DarkFusion.";
         return false;
     }
-    std::vector<std::wstring> arguments{L"-NoLogo", L"-NoProfile", L"-NonInteractive", L"-ExecutionPolicy", L"Bypass", L"-File",
-        (sourceDirectory / L"install-standalone.ps1").wstring(),
-        L"-PackagePath", (sourceDirectory / L"payload.zip").wstring(),
-        L"-ManifestPath", (sourceDirectory / L"payload.json").wstring(),
-        L"-InstallDirectory", installDirectory.wstring(), L"-LogPath", logPath.wstring()};
+    std::vector<std::wstring> arguments{L"-NoLogo", L"-NoProfile", L"-NonInteractive", L"-ExecutionPolicy", L"Bypass", L"-File"};
+    auto workingDirectory = sourceDirectory;
+    if (onlineSetup()) {
+        try { prepareResources(); }
+        catch (const std::exception&) {
+            error = L"Setup could not prepare its temporary files. Check that your temporary folder is writable, then download and run setup again.";
+            return false;
+        }
+        workingDirectory = resourceDirectory;
+        arguments.push_back((resourceDirectory / L"install-online.ps1").wstring());
+    } else {
+        arguments.insert(arguments.end(), {(sourceDirectory / L"install-standalone.ps1").wstring(),
+            L"-PackagePath", (sourceDirectory / L"payload.zip").wstring(),
+            L"-ManifestPath", (sourceDirectory / L"payload.json").wstring()});
+    }
+    arguments.insert(arguments.end(), {L"-InstallDirectory", installDirectory.wstring(), L"-LogPath", logPath.wstring()});
     if (desktop) arguments.push_back(L"-DesktopShortcut");
     if (startMenu) arguments.push_back(L"-StartMenuShortcut");
-    if (!df::startProcess(powershellPath(), arguments, sourceDirectory, installProcess)) {
+    if (!df::startProcess(powershellPath(), arguments, workingDirectory, installProcess)) {
         error = L"Windows could not start the installer.\n\n" + df::errorMessage();
         return false;
     }
@@ -123,7 +188,7 @@ void begin(HWND owner) {
     }
     installing = true;
     for (auto control : {destinationEdit, browseButton, installButton, desktopBox, menuBox}) EnableWindow(control, FALSE);
-    SetWindowTextW(statusLabel, L"Installing your private Python runtime and DarkFusion. Large packages can take several minutes.");
+    SetWindowTextW(statusLabel, L"Preparing your installation...");
     SendMessageW(progressBar, PBM_SETMARQUEE, TRUE, 40);
     SetTimer(owner, 1, 250, nullptr);
 }
@@ -138,14 +203,14 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
         auto heading = add(window, L"STATIC", L"Install DarkFusion", 0, 24, 20, 565, 35);
         SendMessageW(heading, WM_SETFONT, reinterpret_cast<WPARAM>(headingFont), TRUE);
-        add(window, L"STATIC", L"Includes its own Python runtime. Your other Python and Conda environments stay separate.", 0, 24, 65, 555, 48);
+        add(window, L"STATIC", onlineSetup() ? L"Setup downloads everything needed to run DarkFusion. No Python or Conda setup required." : L"Includes its own Python runtime. Your other Python and Conda environments stay separate.", 0, 24, 65, 555, 48);
         add(window, L"STATIC", L"Install to a writable folder", 0, 24, 125, 555, 22);
         destinationEdit = add(window, L"EDIT", installDirectory.c_str(), WS_TABSTOP | ES_AUTOHSCROLL, 24, 153, 448, 31, Destination);
         browseButton = add(window, L"BUTTON", L"Browse...", WS_TABSTOP | BS_PUSHBUTTON, 482, 152, 105, 33, Browse);
         menuBox = add(window, L"BUTTON", L"Add a Start menu shortcut", WS_TABSTOP | BS_AUTOCHECKBOX, 24, 203, 290, 25, StartMenu);
         SendMessageW(menuBox, BM_SETCHECK, BST_CHECKED, 0);
         desktopBox = add(window, L"BUTTON", L"Add a desktop shortcut", WS_TABSTOP | BS_AUTOCHECKBOX, 321, 203, 267, 25, Desktop);
-        statusLabel = add(window, L"STATIC", L"Ready to install. Keep the installer files together until setup finishes.", 0, 24, 247, 560, 48, Status);
+        statusLabel = add(window, L"STATIC", onlineSetup() ? L"Download: about 6.3 GB. Allow 25 GB free during setup.\nChoose a folder, then click Install." : L"Ready to install. Keep the installer files together until setup finishes.", 0, 24, 247, 560, 48, Status);
         progressBar = add(window, PROGRESS_CLASSW, L"", PBS_MARQUEE, 24, 309, 563, 15, Progress);
         logButton = add(window, L"BUTTON", L"View install log", WS_TABSTOP | BS_PUSHBUTTON, 24, 346, 150, 35, OpenLog);
         installButton = add(window, L"BUTTON", L"Install", WS_TABSTOP | BS_DEFPUSHBUTTON, 437, 346, 150, 35, Install);
@@ -162,6 +227,7 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         }
         return 0;
     case WM_TIMER:
+        if (installing) updateStageText();
         if (installing && WaitForSingleObject(installProcess.hProcess, 0) == WAIT_OBJECT_0) {
             DWORD code = 1;
             GetExitCodeProcess(installProcess.hProcess, &code);
@@ -187,6 +253,7 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         else DestroyWindow(window);
         return 0;
     case WM_DESTROY:
+        removeResources();
         if (font) DeleteObject(font);
         if (headingFont) DeleteObject(headingFont);
         PostQuitMessage(0);
@@ -231,6 +298,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
             DWORD code = 1;
             GetExitCodeProcess(installProcess.hProcess, &code);
             df::closeProcess(installProcess);
+            removeResources();
             return static_cast<int>(code);
         }
         CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
