@@ -14,7 +14,10 @@ running inference through PyTorch, ONNX, or TensorRT.
 
 1. Download and open **DarkFusionSetup.exe**.
 2. Choose a new writable folder and click **Install**.
-3. Open DarkFusion from the shortcut setup creates.
+3. Click **Open DarkFusion** when setup finishes to start the app.
+
+Setup adds a Start menu shortcut by default, and you can also select a desktop
+shortcut so DarkFusion is easy to open next time.
 
 Setup automatically downloads and installs the application and its private Python
 runtime. **You do not need to install Python, Conda, Git, or build tools.** Download

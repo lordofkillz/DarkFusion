@@ -35,7 +35,13 @@ function Test-Download([string]$Path, [long]$Size, [string]$Hash) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
     Assert-Unlinked $Path
     if ((Get-Item -LiteralPath $Path).Length -ne $Size) { return $false }
-    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash -ieq $Hash
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    $stream = [IO.File]::OpenRead($Path)
+    try {
+        $actual = [BitConverter]::ToString($algorithm.ComputeHash($stream)).Replace('-', '')
+        return $actual -ieq $Hash
+    }
+    finally { $stream.Dispose(); $algorithm.Dispose() }
 }
 
 function Receive-Part($Part, [int]$Number, [int]$Total) {
@@ -46,6 +52,12 @@ function Receive-Part($Part, [int]$Number, [int]$Total) {
     }
     $partial = $target + '.partial'
     Assert-Unlinked $partial
+    if (Test-Download $partial ([long]$Part.size_bytes) ([string]$Part.sha256)) {
+        if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Force }
+        Move-Item -LiteralPath $partial -Destination $target
+        Write-DownloadLog "STAGE: Download $Number of $Total is ready"
+        return $target
+    }
     for ($attempt = 1; $attempt -le 3; $attempt++) {
         $response = $null
         $request = $null

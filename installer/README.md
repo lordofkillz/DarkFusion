@@ -10,7 +10,9 @@ remains available for people who manage their own Python environment.
 **[Download DarkFusionSetup.exe](https://github.com/lordofkillz/DarkFusion/releases/latest/download/DarkFusionSetup.exe)**,
 open it, choose a new writable folder, and click **Install**. Setup downloads the
 application/runtime automatically, checks the files, installs them and creates
-your selected shortcuts. You only need to download the EXE yourself.
+your selected shortcuts. You only need to download the EXE yourself. When setup
+finishes, click **Open DarkFusion** to launch the app immediately. The Start menu
+shortcut is selected by default; a desktop shortcut is optional.
 
 Allow approximately 25 GB free during setup and an internet connection for the
 6.3 GB download. The installed application/runtime occupy about 11 GB. Download
