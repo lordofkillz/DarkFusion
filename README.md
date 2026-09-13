@@ -90,6 +90,12 @@ A locally installed CUDA Toolkit is only needed for specialized source builds.
 
 ## Install
 
+An optional **native Windows setup wizard** can install DarkFusion with its own
+Python/ML runtime in a chosen writable folder, without an existing Python or
+Conda installation. See the [standalone installer instructions](installer/README.md)
+for the distribution layout and build steps. The Python installation method below
+remains available.
+
 Install [Git](https://git-scm.com/download/win) and
 [Miniconda](https://docs.conda.io/projects/miniconda/en/latest/), then:
 

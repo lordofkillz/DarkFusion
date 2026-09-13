@@ -20,6 +20,7 @@ REQUIRED_FILES = (
     "prediction_size_filter.py",
     "splash_utils.py",
     "darkfusion_command_runner.py",
+    "darkfusion_console_runner.py",
     "darkfusion_ultralytics_batch.py",
     "darkfusion_ultralytics_cli.py",
     "darkfusion_ultralytics_train.py",

@@ -23,6 +23,10 @@ __pycache__/
 .idea/
 *.code-workspace
 
+# Optional native installer build outputs
+installer/native/build/
+installer/dist/
+
 # DarkFusion generated state and reports
 .darkfusion/
 .darkfusion_cache/

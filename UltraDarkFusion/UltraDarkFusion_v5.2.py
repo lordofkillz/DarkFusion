@@ -66055,7 +66055,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         if sys.platform.startswith("win"):
             if keep_open:
-                return subprocess.Popen(["cmd.exe", "/k", command_display], cwd=working_dir)
+                from darkfusion_console_runner import launch_console_command
+
+                return launch_console_command(command, cwd=working_dir)
             return subprocess.Popen(command, cwd=working_dir, creationflags=subprocess.CREATE_NEW_CONSOLE)
         else:
             if not keep_open:
@@ -67079,7 +67081,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             command_display = self.format_command_for_log(command)
 
             if sys.platform == 'win32':
-                subprocess.Popen(["cmd.exe", "/k", command_display], cwd=working_dir)
+                from darkfusion_console_runner import launch_console_command
+
+                launch_console_command(command, cwd=working_dir)
             else:
                 try:
                     subprocess.Popen(["gnome-terminal", "--working-directory", working_dir, "--"] + command)
