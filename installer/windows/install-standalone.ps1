@@ -7,7 +7,8 @@ param(
     [switch]$DesktopShortcut,
     [switch]$StartMenuShortcut,
     [string]$ModelPackagePath,
-    [string]$ModelManifestPath
+    [string]$ModelManifestPath,
+    [string]$LauncherPath
 )
 
 # This backend is invoked by DarkFusionSetup.exe. It never installs into, or
@@ -23,6 +24,7 @@ $script:ExitCode = 1
 $packageStream = $null
 $archive = $null
 $models = $null
+$launcher = $null
 
 function Write-InstallLog([string]$Message) {
     $line = ('[{0}] {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Message)
@@ -72,6 +74,65 @@ function Assert-EmptyDestination([string]$Path) {
         if (@(Get-ChildItem -LiteralPath $Path -Force | Select-Object -First 1).Count -gt 0) {
             throw 'The installation folder is not empty. Choose a new or empty folder; existing installations and personal files are never overwritten.'
         }
+    }
+}
+
+function Read-LauncherUpdate([string]$Path) {
+    Assert-NoReparseAncestors $Path
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Setup launcher is missing: $Path" }
+    # Keep a bounded snapshot so the bytes checked here are exactly those installed.
+    $input = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        if ($input.Length -lt 64 -or $input.Length -gt 16MB) { throw 'The setup launcher has an invalid size.' }
+        $bytes = New-Object byte[] ([int]$input.Length)
+        $offset = 0
+        while ($offset -lt $bytes.Length) {
+            $count = $input.Read($bytes, $offset, $bytes.Length - $offset)
+            if ($count -le 0) { throw 'The setup launcher could not be read completely.' }
+            $offset += $count
+        }
+    }
+    finally { $input.Dispose() }
+    $peOffset = [BitConverter]::ToInt32($bytes, 60)
+    if ($bytes[0] -ne 0x4d -or $bytes[1] -ne 0x5a -or
+        $peOffset -lt 64 -or $peOffset -gt ($bytes.Length - 26)) {
+        throw 'The setup launcher is not a valid Windows executable.'
+    }
+    $headerSize = [BitConverter]::ToUInt16($bytes, $peOffset + 20)
+    $characteristics = [BitConverter]::ToUInt16($bytes, $peOffset + 22)
+    if ([BitConverter]::ToUInt32($bytes, $peOffset) -ne 0x00004550 -or
+        [BitConverter]::ToUInt16($bytes, $peOffset + 4) -ne 0x8664 -or
+        $headerSize -lt 112 -or $headerSize -gt ($bytes.Length - $peOffset - 24) -or
+        [BitConverter]::ToUInt16($bytes, $peOffset + 24) -ne 0x20b -or
+        ($characteristics -band 0x0002) -eq 0 -or ($characteristics -band 0x2000) -ne 0) {
+        throw 'The setup launcher is not a valid 64-bit Windows executable.'
+    }
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $hash = [BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant() }
+    finally { $sha.Dispose() }
+    return [pscustomobject]@{ Bytes = $bytes; Hash = $hash }
+}
+
+function Install-LauncherUpdate($Launcher) {
+    if (-not $script:ExtractionStarted) { throw 'The setup launcher can only replace a newly extracted launcher.' }
+    $target = Join-Path $script:Destination 'DarkFusion.exe'
+    Assert-NoReparseAncestors $target
+    if (-not (Test-Path -LiteralPath $target -PathType Leaf)) { throw 'The extracted DarkFusion launcher is missing.' }
+    Write-InstallLog 'STAGE: Installing the DarkFusion launcher'
+    $output = [IO.File]::Open($target, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    $sha = $null
+    try {
+        $output.Write($Launcher.Bytes, 0, $Launcher.Bytes.Length)
+        $output.SetLength($Launcher.Bytes.Length)
+        $output.Flush()
+        $output.Position = 0
+        $sha = [Security.Cryptography.SHA256]::Create()
+        $installedHash = [BitConverter]::ToString($sha.ComputeHash($output)).Replace('-', '').ToLowerInvariant()
+        if ($installedHash -cne $Launcher.Hash) { throw 'The installed launcher checksum does not match.' }
+    }
+    finally {
+        if ($sha) { $sha.Dispose() }
+        $output.Dispose()
     }
 }
 
@@ -329,6 +390,11 @@ try {
         $modelManifestFile = Get-LocalFullPath $ModelManifestPath 'Model manifest path'
         $modelInputs = @($modelPackageFile, $modelManifestFile)
     }
+    $launcherInputs = @()
+    if (-not [string]::IsNullOrWhiteSpace($LauncherPath)) {
+        $launcherFile = Get-LocalFullPath $LauncherPath 'Launcher path'
+        $launcherInputs = @($launcherFile)
+    }
     $logFile = Get-LocalFullPath $LogPath 'Log path'
     if (Test-PathWithin $logFile $script:Destination) {
         throw 'Choose an installation folder separate from the installation log.'
@@ -350,7 +416,7 @@ try {
     if ($env:USERPROFILE -and $script:Destination.Equals($env:USERPROFILE, [StringComparison]::OrdinalIgnoreCase)) {
         throw 'Choose a folder inside your profile, not the profile root.'
     }
-    foreach ($inputFile in (@($packageFile, $manifestFile, $PSCommandPath, $logFile) + $modelInputs)) {
+    foreach ($inputFile in (@($packageFile, $manifestFile, $PSCommandPath, $logFile) + $modelInputs + $launcherInputs)) {
         if (Test-PathWithin $inputFile $script:Destination) {
             throw 'Choose an installation folder separate from the setup package and installation log.'
         }
@@ -362,10 +428,11 @@ try {
         throw 'Choose an installation folder outside the DarkFusion source checkout.'
     }
     Assert-EmptyDestination $script:Destination
-    foreach ($inputFile in (@($packageFile, $manifestFile) + $modelInputs)) {
+    foreach ($inputFile in (@($packageFile, $manifestFile) + $modelInputs + $launcherInputs)) {
         Assert-NoReparseAncestors $inputFile
         if (-not (Test-Path -LiteralPath $inputFile -PathType Leaf)) { throw "Setup file is missing: $inputFile" }
     }
+    if ($launcherInputs.Count -gt 0) { $launcher = Read-LauncherUpdate $launcherFile }
     $manifest = [IO.File]::ReadAllText($manifestFile) | ConvertFrom-Json
     if ($null -eq $manifest -or $manifest.schema_version -ne 1 -or
         $manifest.product -cne 'DarkFusion' -or
@@ -496,6 +563,7 @@ try {
         $models.Archive.Dispose()
         $models.Stream.Dispose()
     }
+    if ($launcher) { Install-LauncherUpdate $launcher }
 
     foreach ($variable in @('PATH', 'PYTHONNOUSERSITE', 'PYTHONHOME', 'PYTHONPATH',
             'CONDA_PREFIX', 'CONDA_DEFAULT_ENV', 'CONDA_SHLVL', 'QT_PLUGIN_PATH', 'QT_QPA_PLATFORM_PLUGIN_PATH', 'QT_QPA_PLATFORM')) {
@@ -536,6 +604,7 @@ try {
         status = 'complete'
     }
     if ($models) { $state.model_bundle_sha256 = $models.Hash }
+    if ($launcher) { $state.launcher_sha256 = $launcher.Hash }
     $statePath = Join-Path $script:Destination 'install-state.json'
     Assert-NoReparseAncestors $statePath
     if (Test-Path -LiteralPath $statePath) { throw 'The package unexpectedly supplied installation state.' }

@@ -16,6 +16,14 @@ The two executables appear in `installer/native/build`. They use the static MSVC
 runtime (`/MT`), so the native setup/launcher do not require a separately installed
 Visual C++ runtime. The Python runtime's native libraries are packaged separately.
 
+Both executables embed `UltraDarkFusion/styles/icons/DarkFusion.ico`, using the
+existing gold `Df1.png` artwork at nine Windows icon sizes (16 through 256 pixels).
+Setup also sets its window icons, and installed shortcuts use `DarkFusion.exe`
+as their icon source. Online setup embeds the launcher it just built and installs
+that verified launcher before creating shortcuts. The runtime archive remains
+independently verified; `launcher_sha256` identifies the embedded launcher in
+the completed installation state.
+
 The release builder places these files together for installation:
 
 ```text

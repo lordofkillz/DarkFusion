@@ -234,7 +234,8 @@ try {
     Assert-Unlinked $modelManifest
     [IO.File]::WriteAllText($modelManifest, ($models | ConvertTo-Json -Depth 5), (New-Object Text.UTF8Encoding($false)))
     $installParameters = @{PackagePath=$payload; ManifestPath=$payloadManifest; InstallDirectory=$InstallDirectory; LogPath=$LogPath;
-        ModelPackagePath=$modelPackage; ModelManifestPath=$modelManifest}
+        ModelPackagePath=$modelPackage; ModelManifestPath=$modelManifest;
+        LauncherPath=(Join-Path $PSScriptRoot 'DarkFusion.exe')}
     if ($DesktopShortcut) { $installParameters.DesktopShortcut = $true }
     if ($StartMenuShortcut) { $installParameters.StartMenuShortcut = $true }
     & (Join-Path $PSScriptRoot 'install-standalone.ps1') @installParameters

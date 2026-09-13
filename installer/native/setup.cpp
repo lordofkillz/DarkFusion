@@ -45,11 +45,12 @@ void prepareResources() {
     writeResource(101, resourceDirectory / L"install-standalone.ps1");
     writeResource(102, resourceDirectory / L"install-online.ps1");
     writeResource(103, resourceDirectory / L"download.json");
+    writeResource(104, resourceDirectory / L"DarkFusion.exe");
 }
 
 void removeResources() {
     if (resourceDirectory.empty()) return;
-    for (const auto* name : {L"install-standalone.ps1", L"install-online.ps1", L"download.json"})
+    for (const auto* name : {L"install-standalone.ps1", L"install-online.ps1", L"download.json", L"DarkFusion.exe"})
         DeleteFileW((resourceDirectory / name).c_str());
     RemoveDirectoryW(resourceDirectory.c_str());
     resourceDirectory.clear();
@@ -308,6 +309,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         windowClass.lpfnWndProc = windowProc;
         windowClass.hInstance = instance;
         windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        windowClass.hIcon = LoadIconW(instance, MAKEINTRESOURCEW(201));
         windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
         windowClass.lpszClassName = L"DarkFusionSetupWindow";
         RegisterClassW(&windowClass);
@@ -319,6 +321,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
             CW_USEDEFAULT, CW_USEDEFAULT, bounds.right - bounds.left, bounds.bottom - bounds.top,
             nullptr, nullptr, instance, nullptr);
         if (!window) throw std::runtime_error("Cannot create the installer window.");
+        const UINT dpi = GetDpiForWindow(window);
+        const auto smallIcon = static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(201), IMAGE_ICON,
+            GetSystemMetricsForDpi(SM_CXSMICON, dpi), GetSystemMetricsForDpi(SM_CYSMICON, dpi), LR_SHARED));
+        const auto largeIcon = static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(201), IMAGE_ICON,
+            GetSystemMetricsForDpi(SM_CXICON, dpi), GetSystemMetricsForDpi(SM_CYICON, dpi), LR_SHARED));
+        SendMessageW(window, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(smallIcon));
+        SendMessageW(window, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(largeIcon));
         ShowWindow(window, show);
         MSG message{};
         while (GetMessageW(&message, nullptr, 0, 0) > 0) {
