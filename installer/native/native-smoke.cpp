@@ -15,10 +15,13 @@ int wmain() {
             const std::vector<std::wstring> received(arguments.begin() + 1, arguments.end());
             if (received != trickyArguments()) return 11;
             if (df::environmentVariable(L"PYTHONNOUSERSITE") != L"1") return 12;
-            for (auto name : {L"PYTHONHOME", L"PYTHONPATH", L"QT_PLUGIN_PATH", L"QT_QPA_PLATFORM_PLUGIN_PATH", L"VIRTUAL_ENV"})
+            for (auto name : {L"PYTHONHOME", L"PYTHONPATH", L"VIRTUAL_ENV"})
                 if (!df::environmentVariable(name).empty()) return 13;
             if (df::environmentVariable(L"CONDA_PREFIX") != L"D:\\private runtime \u03A9 & things") return 14;
             if (df::environmentVariable(L"PATH").find(L"D:\\private runtime \u03A9 & things;") != 0) return 15;
+            const auto plugins = std::filesystem::path(L"D:\\private runtime \u03A9 & things") / L"Lib" / L"site-packages" / L"PyQt5" / L"Qt5" / L"plugins";
+            if (df::environmentVariable(L"QT_PLUGIN_PATH") != plugins.wstring()) return 16;
+            if (df::environmentVariable(L"QT_QPA_PLATFORM_PLUGIN_PATH") != (plugins / L"platforms").wstring()) return 17;
             return 37;
         }
         auto cases = trickyArguments();

@@ -120,6 +120,11 @@ inline std::vector<wchar_t> privateRuntimeEnvironment(const std::filesystem::pat
                              L"QT_PLUGIN_PATH", L"QT_QPA_PLATFORM_PLUGIN_PATH", L"QML2_IMPORT_PATH"}) values.erase(name);
     values[L"PYTHONNOUSERSITE"] = L"1";
     values[L"CONDA_PREFIX"] = runtime.wstring();
+    // PyQt5's embedded qt.conf can lose Unicode characters in the runtime path.
+    // Supply the private plugin directories through the Unicode environment.
+    const auto plugins = runtime / L"Lib" / L"site-packages" / L"PyQt5" / L"Qt5" / L"plugins";
+    values[L"QT_PLUGIN_PATH"] = plugins.wstring();
+    values[L"QT_QPA_PLATFORM_PLUGIN_PATH"] = (plugins / L"platforms").wstring();
     values[L"PATH"] = runtime.wstring() + L";" + (runtime / L"Library" / L"mingw-w64" / L"bin").wstring() +
                        L";" + (runtime / L"Library" / L"usr" / L"bin").wstring() +
                        L";" + (runtime / L"Library" / L"bin").wstring() +

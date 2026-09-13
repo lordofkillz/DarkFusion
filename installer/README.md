@@ -28,7 +28,7 @@ Launch the installed **DarkFusion.exe** or its shortcut. The application uses
 only its own Python environment; setup does not change system PATH, register
 Conda, or install packages into another application's environment.
 
-Windows 10/11 x64 is required. Keep a compatible NVIDIA graphics driver for GPU
+Windows 10 version 1903 or later, or Windows 11 x64, is required. Keep a compatible NVIDIA graphics driver for GPU
 features. Application/runtime installation works offline from the complete
 distribution. SAM3 and GroundingDINO checkpoints remain a separate download;
 follow `app/MODEL_SETUP.md` inside the installation. Optional YouTube and Darknet
@@ -83,6 +83,13 @@ to a ZIP64 payload. It records the source commit, archive size, unpacked size, a
 SHA-256 digest in `payload.json`. It excludes untracked models, datasets, settings,
 and local diagnostics. Retain the complete distribution folder when sharing it;
 the setup EXE alone does not contain the multi-gigabyte ML runtime.
+
+The Windows SDK manifest tool enables UTF-8 paths in the bundled `python.exe`
+while preserving its existing manifest settings. This lets native image libraries
+read files from folders with international characters. It changes only the copy
+inside the distribution; the source environment and Windows locale are preserved.
+The native launcher also sets explicit private Qt plugin paths. Setup checks Qt
+and MediaPipe startup before creating shortcuts.
 
 The source tree contains installer build inputs. Prebuilt distribution files
 must be built and shared separately; a source checkout alone is not the standalone

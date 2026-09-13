@@ -145,8 +145,8 @@ try {
         throw 'DarkFusion requires 64-bit Windows and the 64-bit installer.'
     }
     $windowsVersion = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
-    if ([int]$windowsVersion.CurrentBuildNumber -lt 10240) {
-        throw 'DarkFusion requires Windows 10 or Windows 11.'
+    if ([int]$windowsVersion.CurrentBuildNumber -lt 18362) {
+        throw 'DarkFusion requires Windows 10 version 1903 or later, or Windows 11.'
     }
 
     $script:Destination = Get-LocalFullPath $InstallDirectory 'Installation folder'
@@ -310,7 +310,7 @@ try {
     $packageStream = $null
 
     foreach ($variable in @('PATH', 'PYTHONNOUSERSITE', 'PYTHONHOME', 'PYTHONPATH',
-            'CONDA_PREFIX', 'CONDA_DEFAULT_ENV', 'CONDA_SHLVL', 'QT_PLUGIN_PATH', 'QT_QPA_PLATFORM_PLUGIN_PATH')) {
+            'CONDA_PREFIX', 'CONDA_DEFAULT_ENV', 'CONDA_SHLVL', 'QT_PLUGIN_PATH', 'QT_QPA_PLATFORM_PLUGIN_PATH', 'QT_QPA_PLATFORM')) {
         $script:SavedEnvironment[$variable] = [Environment]::GetEnvironmentVariable($variable, 'Process')
     }
     $script:EnvironmentChanged = $true
@@ -326,11 +326,16 @@ try {
         [Environment]::SetEnvironmentVariable($variable, $null, 'Process')
     }
     $env:CONDA_PREFIX = $runtime
+    $env:QT_PLUGIN_PATH = Join-Path $runtime 'Lib\site-packages\PyQt5\Qt5\plugins'
+    $env:QT_QPA_PLATFORM_PLUGIN_PATH = Join-Path $env:QT_PLUGIN_PATH 'platforms'
     $python = Join-Path $runtime 'python.exe'
     Write-InstallLog 'STAGE: Preparing the private application runtime'
     Invoke-PrivatePython $python @((Join-Path $script:Destination $unpackRelative.Replace('/', '\')))
     Write-InstallLog 'STAGE: Verifying DarkFusion'
     Invoke-PrivatePython $python @((Join-Path $script:Destination 'app\scripts\verify_install.py'))
+    Write-InstallLog 'STAGE: Checking application startup'
+    $env:QT_QPA_PLATFORM = 'offscreen'
+    Invoke-PrivatePython $python @('-c', "from PyQt5.QtWidgets import QApplication; app = QApplication([]); import mediapipe as mp; segment = mp.solutions.selfie_segmentation.SelfieSegmentation(model_selection=1); segment.close(); print('Qt and image-processing startup verified.')")
 
     $state = [ordered]@{
         schema_version = 1

@@ -7,11 +7,15 @@ compiled native executables. End users require none of these build tools.
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
+import tempfile
+import xml.etree.ElementTree as ET
 import zipfile
 
 
@@ -24,6 +28,30 @@ def sha256(path: Path) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def unicode_python(archive: zipfile.ZipFile, work: Path, manifest_tool: Path) -> Path:
+    """Enable Unicode paths for native extensions without changing system locale."""
+    executable = work / "python.exe"
+    executable.write_bytes(archive.read("runtime/python.exe"))
+    manifest = work / "python.manifest"
+    subprocess.run([str(manifest_tool), "-nologo", f"-inputresource:{executable};#1", f"-out:{manifest}"], check=True)
+    tree = ET.parse(manifest)
+    assembly = "urn:schemas-microsoft-com:asm.v3"
+    code_page = "http://schemas.microsoft.com/SMI/2019/WindowsSettings"
+    application = tree.getroot().find(f"{{{assembly}}}application")
+    if application is None:
+        application = ET.SubElement(tree.getroot(), f"{{{assembly}}}application")
+    settings = application.find(f"{{{assembly}}}windowsSettings")
+    if settings is None:
+        settings = ET.SubElement(application, f"{{{assembly}}}windowsSettings")
+    setting = settings.find(f"{{{code_page}}}activeCodePage")
+    if setting is None:
+        setting = ET.SubElement(settings, f"{{{code_page}}}activeCodePage")
+    setting.text = "UTF-8"
+    tree.write(manifest, encoding="utf-8", xml_declaration=True)
+    subprocess.run([str(manifest_tool), "-nologo", "-manifest", str(manifest), f"-outputresource:{executable};#1"], check=True)
+    return executable
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runtime-archive", required=True, type=Path)
@@ -31,12 +59,20 @@ def main() -> None:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--version", default="5.2")
+    parser.add_argument("--manifest-tool", type=Path, help="Windows SDK x64 mt.exe (automatically discovered by default)")
     args = parser.parse_args()
     repo = args.repo.resolve()
     output = args.output.resolve()
     runtime_archive = args.runtime_archive.resolve()
     native = args.native_directory.resolve()
     backend = repo / "installer/windows/install-standalone.ps1"
+    manifest_tool = args.manifest_tool
+    if manifest_tool is None:
+        sdk = Path(os.environ.get("ProgramFiles(x86)", "C:/Program Files (x86)")) / "Windows Kits/10/bin"
+        candidates = sorted(sdk.glob("*/x64/mt.exe"))
+        manifest_tool = candidates[-1] if candidates else None
+    if manifest_tool is None or not manifest_tool.is_file():
+        raise SystemExit("Windows SDK x64 mt.exe is required to configure Unicode paths in the private Python runtime.")
     for path in (runtime_archive, native / "DarkFusionSetup.exe", native / "DarkFusion.exe", backend):
         if not path.is_file():
             raise SystemExit(f"Required build input is missing: {path}")
@@ -64,8 +100,21 @@ def main() -> None:
 
     output.mkdir(parents=True, exist_ok=True)
     payload = output / "payload.zip"
-    print("Copying the private runtime archive...", flush=True)
-    shutil.copyfile(runtime_archive, payload)
+    print("Packaging the private runtime with Unicode path support...", flush=True)
+    with tempfile.TemporaryDirectory(prefix=".runtime-build-", dir=output) as directory:
+        work = Path(directory).resolve()
+        assert work.parent == output  # Temporary cleanup stays inside this new build folder.
+        with zipfile.ZipFile(runtime_archive) as source, zipfile.ZipFile(payload, "w", allowZip64=True) as target:
+            python = unicode_python(source, work, manifest_tool)
+            for entry in source.infolist():
+                encoded = copy.copy(entry)
+                encoded.compress_type = zipfile.ZIP_DEFLATED
+                encoded._compresslevel = 1
+                if entry.filename == "runtime/python.exe":
+                    target.writestr(encoded, python.read_bytes())
+                else:
+                    with source.open(entry) as src, target.open(encoded, "w", force_zip64=True) as dst:
+                        shutil.copyfileobj(src, dst, length=1024 * 1024)
     print("Adding application source and native launcher...", flush=True)
     with zipfile.ZipFile(payload, "a", compression=zipfile.ZIP_DEFLATED, compresslevel=1, allowZip64=True) as archive:
         for name in app_files:
@@ -95,7 +144,7 @@ def main() -> None:
     shutil.copy2(backend, output / "install-standalone.ps1")
     shutil.copy2(repo / "LICENSE.txt", output / "LICENSE.txt")
     (output / "START HERE.txt").write_text(
-        "DarkFusion standalone installation for Windows 10/11 x64\n\n"
+        "DarkFusion standalone installation for Windows 10 (1903+) / 11 x64\n\n"
         "Keep all files in this folder together. Double-click DarkFusionSetup.exe,\n"
         "choose a new writable folder, and click Install. Python, Conda, Git, and\n"
         "compiler tools are not needed on the destination computer.\n\n"
