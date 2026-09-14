@@ -229,8 +229,17 @@ Keep the labeling rule consistent across the entire dataset.
 
 Use an annotation preview's context menu to find similar annotations. Adjust
 the similarity threshold to narrow or broaden the matches, inspect the
-results, and remove matching labels when appropriate. Shape-aware matching
-helps distinguish annotations with similar colors but different outlines.
+results, and remove matching labels when appropriate. The default AI visual
+matching uses DINOv2 to compare objects of the same class, including objects
+with changes in lighting or background. A high similarity score means visual
+resemblance; it does not establish that a label is incorrect.
+
+Choose the matching method in **Settings > Display > Review Preview**.
+The first AI search downloads approximately 350 MB; subsequent searches reuse
+the model and cached object features. NVIDIA GPUs use FP16 inference, with CPU
+support when CUDA is unavailable. **Appearance and shape (CPU)** keeps the
+original matcher available. Use **Stop scan** in the status bar to cancel a
+search. Thresholds may need adjustment when switching matching methods.
 
 Negative-crop actions retain the selected region and available surrounding
 context while excluding saved objects. Output goes into the dataset's

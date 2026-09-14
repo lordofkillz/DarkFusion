@@ -48,6 +48,29 @@ https://github.com/IDEA-Research/GroundingDINO
 The published bundle contains the checkpoints used with the pinned DarkFusion
 environment. Keep the file names and directory layout unchanged.
 
+## Visual similarity review
+
+**Settings > Display > Review Preview > Matching method** defaults to AI visual
+matching with [Meta's DINOv2 Base with registers](https://huggingface.co/facebook/dinov2-with-registers-base).
+The first similarity search automatically downloads approximately 350 MB from
+the official repository. No account, API key, or additional Python packages are
+required. The checkpoint is pinned to revision
+`a1d738ccfa7ae170945f210395d99dde8adb1805` and loaded from safetensors.
+
+Model files and object descriptors are cached under
+`UltraDarkFusion/.darkfusion_cache/review_similarity`. Subsequent searches reuse
+unchanged image/box descriptors; fully cached searches need neither internet nor
+a loaded model. Image or annotation changes invalidate the corresponding cache
+entries. GPU inference uses FP16; CPU inference is available when CUDA is absent
+or GPU memory is busy.
+
+The matcher preserves whole object crops and their aspect ratio, with a small
+margin. It searches annotations of the selected class and ranks results by
+visual resemblance. A similarity percentage is not confidence that a label is
+incorrect. Review matches before using the existing bulk-removal actions.
+**Appearance and shape (CPU)** remains available in the matching-method setting.
+Use **Stop scan** in the status bar to cancel; completed cached work is retained.
+
 ## TensorRT engines
 
 Do not distribute one `.engine` as a universal model. TensorRT engines depend

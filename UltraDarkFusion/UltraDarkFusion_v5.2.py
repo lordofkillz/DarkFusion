@@ -7266,6 +7266,12 @@ class SettingsDialog(QtWidgets.QDialog):
         if hasattr(self.parent(), "set_preview_flash_time"):
             self.parent().set_preview_flash_time(value)
 
+    def save_review_similarity_method_setting(self, _index):
+        method = str(self.review_similarity_method_combo.currentData() or "visual")
+        self.parent().settings["reviewSimilarityMethod"] = method
+        self.parent().saveSettings()
+        self.parent().refresh_active_review_similarity_filter()
+
     def save_review_similarity_threshold_setting(self, value):
         value = max(50, min(99, int(value)))
         if hasattr(self.parent(), "set_review_similarity_threshold"):
@@ -7722,6 +7728,22 @@ class SettingsDialog(QtWidgets.QDialog):
         self.preview_hover_zoom_checkbox.toggled.connect(self.save_preview_hover_zoom_setting)
         preview_layout.addRow("", self.preview_hover_zoom_checkbox)
 
+        self.review_similarity_method_combo = QtWidgets.QComboBox()
+        self.review_similarity_method_combo.addItem("AI visual matching (DINOv2)", "visual")
+        self.review_similarity_method_combo.addItem("Appearance and shape (CPU)", "appearance")
+        method_index = self.review_similarity_method_combo.findData(
+            self.parent().settings.get("reviewSimilarityMethod", "visual")
+        )
+        self.review_similarity_method_combo.setCurrentIndex(max(0, method_index))
+        self.review_similarity_method_combo.setToolTip(
+            "AI compares object appearance across images. Its first scan downloads about 350 MB. "
+            "Object features are cached for repeat searches. CPU mode uses colors and edges."
+        )
+        self.review_similarity_method_combo.currentIndexChanged.connect(
+            self.save_review_similarity_method_setting
+        )
+        preview_layout.addRow("Matching method:", self.review_similarity_method_combo)
+
         similarity_value = int(self.parent().settings.get("reviewSimilarityThreshold", 90) or 90)
         similarity_row = QtWidgets.QHBoxLayout()
         self.review_similarity_threshold_slider = QtWidgets.QSlider(Qt.Horizontal)
@@ -7730,9 +7752,9 @@ class SettingsDialog(QtWidgets.QDialog):
         self.review_similarity_threshold_slider.setPageStep(5)
         self.review_similarity_threshold_slider.setValue(max(50, min(99, similarity_value)))
         self.review_similarity_threshold_slider.setToolTip(
-            "Match the selected object's appearance or shape within the same class. "
-            "Lower values include similar shapes with different colors, sizes, or surroundings. "
-            "Higher values favor close appearance and context matches. This is a similarity score, not certainty."
+            "Find similar annotated objects within the same class. Lower values include more "
+            "appearance variations; higher values are stricter. AI and CPU scores differ. "
+            "This is visual similarity, not confidence that a label is incorrect."
         )
         self.review_similarity_threshold_value_label = QtWidgets.QLabel(
             f"{self.review_similarity_threshold_slider.value()}%"
@@ -15838,9 +15860,10 @@ class ReviewFilterWorker(QThread):
 
 
 class ReviewSimilarityWorker(QThread):
-    """CPU-only annotation/context matching for the normal Review filter."""
+    """Annotation matching using cached visual AI or CPU appearance/shape."""
 
     progress = pyqtSignal(int, int, int)
+    status = pyqtSignal(int, str)
     completed = pyqtSignal(int, object, object, bool)
     failed = pyqtSignal(int, str)
 
@@ -15854,6 +15877,8 @@ class ReviewSimilarityWorker(QThread):
         polygon_preference=None,
         appearance_similarity=None,
         parent=None,
+        matching_method="appearance",
+        cache_dir=None,
     ):
         super().__init__(parent)
         self.request_id = int(request_id)
@@ -15864,6 +15889,8 @@ class ReviewSimilarityWorker(QThread):
         self.polygon_preference = polygon_preference
         self.appearance_similarity = appearance_similarity
         self._cancel_requested = False
+        self.matching_method = matching_method
+        self.cache_dir = cache_dir or os.path.abspath(".darkfusion_cache/review_similarity")
 
     def cancel(self):
         self._cancel_requested = True
@@ -16067,6 +16094,98 @@ class ReviewSimilarityWorker(QThread):
             return None
 
     def run(self):
+        if self.matching_method == "visual":
+            self._run_visual()
+        else:
+            self._run_appearance()
+
+    def _run_visual(self):
+        matcher = None
+        try:
+            from darkfusion_review_similarity import ReviewEmbeddingMatcher, ReviewSimilarityCancelled
+
+            matcher = ReviewEmbeddingMatcher(
+                self.cache_dir,
+                status=lambda message: self.status.emit(self.request_id, message),
+                cancelled=lambda: self._cancel_requested,
+            )
+            source_path = self._normalize_path(self.reference.get("image_file", ""))
+            source_line = str(self.reference.get("label_text", "") or "").strip()
+            source_box = self._parse_bbox(source_line)
+            source_bounds = self._bbox_bounds(source_box)
+            if source_bounds is None:
+                raise ValueError("The selected annotation could not be read for AI matching.")
+            source = matcher.encode_records([{
+                "image_file": source_path, "bounds": source_bounds, "label_text": source_line,
+            }])[0]
+            if source is None:
+                raise ValueError("The selected object's image could not be read for AI matching.")
+            source_class = int(getattr(source_box, "class_id", -1))
+            matches, pending = [], []
+
+            def compare_pending():
+                vectors = matcher.encode_records(pending)
+                for record, vector in zip(pending, vectors):
+                    if self._cancel_requested:
+                        raise ReviewSimilarityCancelled("Similarity scan cancelled.")
+                    if vector is None:
+                        continue
+                    score = matcher.score(source, vector)
+                    if score + 1e-9 >= self.threshold:
+                        result = dict(record)
+                        result.pop("bounds", None)
+                        result.update(score=float(score), match_basis="visual_ai")
+                        matches.append(result)
+                pending.clear()
+
+            total = len(self.image_files)
+            self.progress.emit(self.request_id, 0, total)
+            for image_number, image_file in enumerate(self.image_files, 1):
+                if self._cancel_requested:
+                    raise ReviewSimilarityCancelled("Similarity scan cancelled.")
+                image_file = self._normalize_path(image_file)
+                label_file = self._normalize_path(
+                    self.label_files.get(image_file) or os.path.splitext(image_file)[0] + ".txt"
+                )
+                try:
+                    with open(label_file, "r", encoding="utf-8", errors="ignore") as handle:
+                        lines = [line.strip() for line in handle if line.strip()]
+                except OSError:
+                    lines = []
+                for line_index, line in enumerate(lines):
+                    box = self._parse_bbox(line)
+                    if box is None or int(getattr(box, "class_id", -2)) != source_class:
+                        continue
+                    bounds = self._bbox_bounds(box)
+                    if bounds is not None:
+                        pending.append(dict(image_file=image_file, label_file=label_file,
+                                            line_index=line_index, label_text=line,
+                                            class_id=source_class, bounds=bounds))
+                    if len(pending) >= 256:
+                        compare_pending()
+                if image_number % 25 == 0 or image_number == total:
+                    self.progress.emit(self.request_id, image_number, total)
+            if pending:
+                compare_pending()
+            if self._cancel_requested:
+                raise ReviewSimilarityCancelled("Similarity scan cancelled.")
+            matches.sort(key=lambda record: record["score"], reverse=True)
+            matched_images = list(dict.fromkeys(record["image_file"] for record in matches))
+            self.status.emit(self.request_id,
+                             f"AI matching finished: {matcher.stats['cache_hits']} cached, "
+                             f"{matcher.stats['encoded']} new object descriptors.")
+            self.completed.emit(self.request_id, matched_images, matches, False)
+        except Exception as error:
+            if self._cancel_requested:
+                self.completed.emit(self.request_id, [], [], True)
+            else:
+                self.failed.emit(self.request_id, str(error) +
+                                 " You can select Appearance and shape in Settings > Display > Review Preview.")
+        finally:
+            if matcher is not None:
+                matcher.close()
+
+    def _run_appearance(self):
         try:
             source_image_path = self._normalize_path(self.reference.get("image_file", ""))
             source_line = str(self.reference.get("label_text", "") or "").strip()
@@ -23075,6 +23194,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.current_icon_index = 0
         self.threadpool = QThreadPool()
         self._review_filter_worker = None
+        self._review_similarity_threads = []
         self._review_filter_request_id = 0
         self._review_filter_label_cache = {}
         self._review_similarity_reference = None
@@ -24876,6 +24996,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             'previewHoverZoomEnabled': True,
             'previewThumbnailSize': 128,
             'reviewSimilarityThreshold': 90,
+            'reviewSimilarityMethod': 'visual',
             'previewFlashTimeMs': 1000,
             'previewFlashColor': [255, 0, 0],
             'previewAlternateFlashColor': [0, 0, 255],
@@ -26677,6 +26798,16 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         """
         Ensure annotations are saved safely before application closes.
         """
+
+        review_threads = [worker for worker in getattr(self, "_review_similarity_threads", [])
+                          if self.qthread_is_running(worker)]
+        if review_threads:
+            for worker in review_threads:
+                worker.cancel()
+            self.statusBar().showMessage("Stopping similarity work before closing...")
+            event.ignore()
+            QTimer.singleShot(100, self.close)
+            return
 
         self._sam3_propagation_shutting_down = True
         self._propagation_stop_requested = True
@@ -45284,6 +45415,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
     def _cancel_review_filter_request(self):
         """Invalidate workers whose snapshots may no longer match the dataset."""
+        self._set_review_similarity_busy(False)
+        if hasattr(self, "filter_class_spinbox"):
+            self.filter_class_spinbox.setEnabled(True)
+        self.reset_label_progress(0)
         self._review_filter_request_id = int(getattr(self, "_review_filter_request_id", 0)) + 1
         worker = getattr(self, "_review_filter_worker", None)
         if worker is not None:
@@ -45389,9 +45524,16 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             polygon_preference=self._polygon_label_parse_preference(),
             appearance_similarity=self._propagation_mask_similarity,
             parent=self,
+            matching_method=self.settings.get("reviewSimilarityMethod", "visual"),
+            cache_dir=os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   ".darkfusion_cache", "review_similarity"),
         )
         self._review_filter_worker = worker
+        self._review_similarity_threads.append(worker)
+        worker.finished.connect(lambda current=worker: self._review_similarity_worker_finished(current))
+        self._set_review_similarity_busy(True)
         worker.progress.connect(self._on_review_similarity_progress)
+        worker.status.connect(self._on_review_similarity_status)
         worker.completed.connect(self._on_review_similarity_completed)
         worker.failed.connect(self._on_review_filter_failed)
         worker.finished.connect(worker.deleteLater)
@@ -45406,6 +45548,26 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         )
         worker.start()
 
+    def _set_review_similarity_busy(self, busy):
+        button = getattr(self, "_review_similarity_stop_button", None)
+        if button is None and busy:
+            button = QtWidgets.QPushButton("Stop scan", self)
+            button.setToolTip("Stop the similarity search; completed cached features are kept.")
+            button.clicked.connect(self._cancel_review_filter_request)
+            self.statusBar().addPermanentWidget(button)
+            self._review_similarity_stop_button = button
+        if button is not None:
+            button.setVisible(bool(busy))
+
+    def _review_similarity_worker_finished(self, worker):
+        threads = getattr(self, "_review_similarity_threads", [])
+        if worker in threads:
+            threads.remove(worker)
+
+    def _on_review_similarity_status(self, request_id, message):
+        if request_id == getattr(self, "_review_filter_request_id", None):
+            self.statusBar().showMessage(str(message))
+
     def _on_review_similarity_progress(self, request_id, processed, total):
         if request_id != getattr(self, "_review_filter_request_id", None):
             return
@@ -45419,6 +45581,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
     def _on_review_similarity_completed(self, request_id, filtered_files, matches, canceled):
         if request_id != getattr(self, "_review_filter_request_id", None):
             return
+        self._set_review_similarity_busy(False)
         if canceled:
             if hasattr(self, "filter_class_spinbox"):
                 self.filter_class_spinbox.setEnabled(True)
@@ -45507,6 +45670,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         }
 
     def _start_review_filter_worker(self, filter_index):
+        self._set_review_similarity_busy(False)
         try:
             filter_index = int(filter_index)
         except Exception:
@@ -45589,6 +45753,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
     def _on_review_filter_failed(self, request_id, message):
         if request_id != getattr(self, "_review_filter_request_id", None):
             return
+        self._set_review_similarity_busy(False)
 
         if hasattr(self, "filter_class_spinbox"):
             self.filter_class_spinbox.setEnabled(True)

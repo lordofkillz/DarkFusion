@@ -29,6 +29,7 @@ REQUIRED_FILES = (
     "darkfusion_teammate_review.py",
     "darkfusion_onnx_runtime.py",
     "darkfusion_negative_crops.py",
+    "darkfusion_review_similarity.py",
     "darkfusion_system_metrics.py",
     "training_eta.py",
     "botsort.yaml",
