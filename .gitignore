@@ -30,6 +30,8 @@ installer/dist/
 # DarkFusion generated state and reports
 .darkfusion/
 .darkfusion_cache/
+.release-work/
+**/translations/.scan_manifest.json
 .codex*/
 UltraDarkFusion/.codex-*.png
 UltraDarkFusion/.marker-layout-check.png

@@ -1,4 +1,4 @@
-# UltraDarkFusion 5.2
+# UltraDarkFusion 5.2.1
 
 ![UltraDarkFusion](samples/darkfusion2.gif)
 
@@ -35,6 +35,18 @@ after setup. NVIDIA drivers are needed for GPU features.
 The [Python installation method](#python-installation) remains available below.
 GitHub's **Code → Download ZIP** provides the source for that method. For the
 recommended setup experience, use the **Download DarkFusionSetup.exe** link above.
+
+## What changed in 5.2.1
+
+- DINOv3 Base/Large visual matching and DINOv3 visual class outlier analysis,
+  with verified model downloads on first use. Base downloads 343 MB; Large
+  downloads 1.21 GB. See [model setup](MODEL_SETUP.md).
+- UI language changes use cached JSON immediately and translate missing text in
+  the background. File names, model paths, stylesheet choices, and class data
+  retain their original values. New translations are saved for future launches.
+- Manually drawn labels on extracted video frames seed propagation correctly.
+- Updated annotation, review, and display controls, including a cursor-anchored
+  zoom correction found during release testing.
 
 ## Short walkthrough
 

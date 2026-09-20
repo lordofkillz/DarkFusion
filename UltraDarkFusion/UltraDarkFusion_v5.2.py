@@ -1,5 +1,7 @@
 import warnings
+import ast
 import os
+import xml.etree.ElementTree as ET
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -46,6 +48,11 @@ import yaml
 import psutil
 import GPUtil
 from darkfusion_system_metrics import GpuPowerSampler
+from darkfusion_translation import TranslationController
+from darkfusion_review_settings import (
+    METHOD_OPTIONS, RECOMMENDED_THRESHOLDS, migrate_review_settings,
+    review_method, review_threshold, select_review_method, set_review_threshold,
+)
 from threading import Thread
 import functools
 from PIL import Image
@@ -2348,6 +2355,7 @@ class FloatingPanPuck(QWidget):
 
     def apply_saved_settings(self):
         settings = self._settings()
+        self.enabled = bool(settings.get("panOverlayEnabled", True))
         self.free_pan = bool(settings.get("panOverlayFreePan", True))
         self.position_locked = bool(settings.get("panOverlayLocked", False))
         self.always_show = bool(settings.get("panOverlayAlwaysShow", False))
@@ -2674,7 +2682,7 @@ class FloatingPanPuck(QWidget):
         zoom_locked = False
         if self.main_window is not None and hasattr(self.main_window, "is_zoom_locked"):
             zoom_locked = bool(self.main_window.is_zoom_locked())
-        should_show = zoom_locked and (self.always_show or self.view.image_can_pan())
+        should_show = self.enabled and zoom_locked and (self.always_show or self.view.image_can_pan())
         self.setVisible(bool(should_show))
         if should_show:
             self.raise_()
@@ -2905,9 +2913,13 @@ class CustomGraphicsView(QGraphicsView):
         old_pos = self.mapToScene(event.pos())
         self.setRenderHint(QPainter.SmoothPixmapTransform, True)
         self.scale(zoom_factor, zoom_factor)
-        new_pos = self.mapToScene(event.pos())
-        delta = new_pos - old_pos
-        self.centerOn(self.mapToScene(self.viewport().rect().center()) - delta)
+        # Correct in viewport pixels. Repeated centerOn(mapToScene(rect.center()))
+        # rounds an even-sized viewport's center down and accumulates drift.
+        anchored = self.mapFromScene(old_pos)
+        self.horizontalScrollBar().setValue(
+            self.horizontalScrollBar().value() + anchored.x() - event.pos().x())
+        self.verticalScrollBar().setValue(
+            self.verticalScrollBar().value() + anchored.y() - event.pos().y())
         self._refresh_zoom_metrics()
         self.setRenderHint(QPainter.SmoothPixmapTransform, False)
         event.accept()
@@ -7178,6 +7190,15 @@ class SettingsDialog(QtWidgets.QDialog):
         self.parent().saveSettings()
         self.parent().update_blank_overlay_state()
 
+    def save_pan_tool_setting(self, checked):
+        self.parent().settings["panOverlayEnabled"] = bool(checked)
+        self.parent().saveSettings()
+
+        screen_view = getattr(self.parent(), "screen_view", None)
+        if screen_view is not None and hasattr(screen_view, "pan_overlay"):
+            screen_view.pan_overlay.enabled = bool(checked)
+            screen_view.pan_overlay.update_visibility()
+
     def pick_crosshair_color_setting(self):
         saved_color = self.parent().settings.get("crosshairColor", [255, 255, 0])
 
@@ -7267,10 +7288,33 @@ class SettingsDialog(QtWidgets.QDialog):
             self.parent().set_preview_flash_time(value)
 
     def save_review_similarity_method_setting(self, _index):
-        method = str(self.review_similarity_method_combo.currentData() or "visual")
-        self.parent().settings["reviewSimilarityMethod"] = method
-        self.parent().saveSettings()
-        self.parent().refresh_active_review_similarity_filter()
+        parent = self.parent()
+        method = str(self.review_similarity_method_combo.currentData() or "dinov3_base")
+        value = select_review_method(parent.settings, method)
+        with blocked_signals(self.review_similarity_threshold_slider):
+            self.review_similarity_threshold_slider.setValue(value)
+        self.review_similarity_threshold_value_label.setText(f"{value}%")
+        parent.set_review_similarity_threshold(value, save=False)
+        self.update_review_similarity_hint()
+        parent.saveSettings()
+        parent.refresh_active_review_similarity_filter()
+
+    def reset_review_similarity_threshold(self):
+        method = review_method(self.parent().settings)
+        self.review_similarity_threshold_slider.setValue(RECOMMENDED_THRESHOLDS[method])
+
+    def update_review_similarity_hint(self):
+        label = getattr(self, "review_similarity_hint_label", None)
+        if label is None:
+            return
+        method = review_method(self.parent().settings)
+        recommended = RECOMMENDED_THRESHOLDS[method]
+        value = self.review_similarity_threshold_slider.value()
+        if value < 70 and method != "appearance":
+            text = f"Very broad matching. Try {recommended}% to narrow results to closer lookalikes."
+        else:
+            text = f"Start near {recommended}%. Lower includes more variations; higher requires closer matches."
+        label.setText(text + " Each method remembers its threshold.")
 
     def save_review_similarity_threshold_setting(self, value):
         value = max(50, min(99, int(value)))
@@ -7278,6 +7322,7 @@ class SettingsDialog(QtWidgets.QDialog):
             self.parent().set_review_similarity_threshold(value)
         if hasattr(self, "review_similarity_threshold_value_label"):
             self.review_similarity_threshold_value_label.setText(f"{value}%")
+        self.update_review_similarity_hint()
         timer = getattr(self, "_review_similarity_refresh_timer", None)
         if timer is not None:
             timer.start(350)
@@ -7606,9 +7651,10 @@ class SettingsDialog(QtWidgets.QDialog):
         layout.addWidget(appearance_group)
 
         display_group = QtWidgets.QGroupBox("Display")
-        display_layout = QtWidgets.QVBoxLayout(display_group)
+        display_layout = QtWidgets.QGridLayout(display_group)
         display_layout.setContentsMargins(12, 12, 12, 12)
-        display_layout.setSpacing(8)
+        display_layout.setHorizontalSpacing(24)
+        display_layout.setVerticalSpacing(8)
         self.hide_labels_checkbox = QtWidgets.QCheckBox("Hide class labels (text)")
         self.hide_labels_checkbox.setToolTip(
             "Checked hides class-name text, badges, and leader lines; annotation shapes remain visible."
@@ -7617,7 +7663,7 @@ class SettingsDialog(QtWidgets.QDialog):
             annotation_labels_hidden(self.parent())
         )
         self.hide_labels_checkbox.toggled.connect(self.save_hide_labels_setting)
-        display_layout.addWidget(self.hide_labels_checkbox)
+        display_layout.addWidget(self.hide_labels_checkbox, 0, 0)
 
         self.measurement_overlay_checkbox = QtWidgets.QCheckBox("Show annotation measurements")
         self.measurement_overlay_checkbox.setToolTip(
@@ -7628,7 +7674,7 @@ class SettingsDialog(QtWidgets.QDialog):
             bool(self.parent().settings.get("showMeasurementOverlay", True))
         )
         self.measurement_overlay_checkbox.toggled.connect(self.save_measurement_overlay_setting)
-        display_layout.addWidget(self.measurement_overlay_checkbox)
+        display_layout.addWidget(self.measurement_overlay_checkbox, 0, 1)
 
         self.blank_image_overlay_checkbox = QtWidgets.QCheckBox("Show blank-image overlay")
         self.blank_image_overlay_checkbox.setToolTip(
@@ -7639,7 +7685,18 @@ class SettingsDialog(QtWidgets.QDialog):
             bool(self.parent().settings.get("showBlankImageOverlay", True))
         )
         self.blank_image_overlay_checkbox.toggled.connect(self.save_blank_image_overlay_setting)
-        display_layout.addWidget(self.blank_image_overlay_checkbox)
+        display_layout.addWidget(self.blank_image_overlay_checkbox, 1, 0)
+
+        self.pan_tool_checkbox = QtWidgets.QCheckBox("Show pan tool with Zoom Lock")
+        self.pan_tool_checkbox.setToolTip(
+            "When Zoom Lock is enabled, show the floating pan joystick for moving "
+            "the view. Turn off to hide it."
+        )
+        self.pan_tool_checkbox.setChecked(
+            bool(self.parent().settings.get("panOverlayEnabled", True))
+        )
+        self.pan_tool_checkbox.toggled.connect(self.save_pan_tool_setting)
+        display_layout.addWidget(self.pan_tool_checkbox, 1, 1)
 
         self.confirm_clear_frame_checkbox = QtWidgets.QCheckBox(
             "Confirm before clearing current frame labels"
@@ -7654,7 +7711,9 @@ class SettingsDialog(QtWidgets.QDialog):
         self.confirm_clear_frame_checkbox.toggled.connect(
             self.save_clear_frame_confirmation_setting
         )
-        display_layout.addWidget(self.confirm_clear_frame_checkbox)
+        display_layout.addWidget(self.confirm_clear_frame_checkbox, 3, 0, 1, 2)
+        display_layout.setColumnStretch(0, 1)
+        display_layout.setColumnStretch(1, 1)
         layout.addWidget(display_group)
 
         audio_group = QtWidgets.QGroupBox("Audio")
@@ -7670,17 +7729,13 @@ class SettingsDialog(QtWidgets.QDialog):
         audio_layout.addWidget(self.mute_audio_checkbox)
         layout.addWidget(audio_group)
 
-        crosshair_group = QtWidgets.QGroupBox("Crosshair")
-        crosshair_layout = QtWidgets.QVBoxLayout(crosshair_group)
-        crosshair_layout.setContentsMargins(12, 12, 12, 12)
-        crosshair_layout.setSpacing(8)
         self.xy_lines_checkbox = QtWidgets.QCheckBox("Show XY crosshair lines")
         self.xy_lines_checkbox.setToolTip("Show horizontal and vertical guide lines under the cursor.")
         self.xy_lines_checkbox.setChecked(
             bool(self.parent().settings.get("showXYLines", False))
         )
         self.xy_lines_checkbox.toggled.connect(self.save_xy_lines_setting)
-        crosshair_layout.addWidget(self.xy_lines_checkbox)
+        display_layout.addWidget(self.xy_lines_checkbox, 2, 0)
 
         crosshair_row = QtWidgets.QHBoxLayout()
 
@@ -7704,8 +7759,7 @@ class SettingsDialog(QtWidgets.QDialog):
         crosshair_row.addWidget(self.crosshair_color_btn)
         crosshair_row.addStretch()
 
-        crosshair_layout.addLayout(crosshair_row)
-        layout.addWidget(crosshair_group)
+        display_layout.addLayout(crosshair_row, 2, 1)
 
         preview_group = QtWidgets.QGroupBox("Review Preview")
         preview_layout = QtWidgets.QFormLayout(preview_group)
@@ -7729,22 +7783,21 @@ class SettingsDialog(QtWidgets.QDialog):
         preview_layout.addRow("", self.preview_hover_zoom_checkbox)
 
         self.review_similarity_method_combo = QtWidgets.QComboBox()
-        self.review_similarity_method_combo.addItem("AI visual matching (DINOv2)", "visual")
-        self.review_similarity_method_combo.addItem("Appearance and shape (CPU)", "appearance")
-        method_index = self.review_similarity_method_combo.findData(
-            self.parent().settings.get("reviewSimilarityMethod", "visual")
-        )
+        for key, label in METHOD_OPTIONS:
+            self.review_similarity_method_combo.addItem(label, key)
+        method_index = self.review_similarity_method_combo.findData(review_method(self.parent().settings))
         self.review_similarity_method_combo.setCurrentIndex(max(0, method_index))
         self.review_similarity_method_combo.setToolTip(
-            "AI compares object appearance across images. Its first scan downloads about 350 MB. "
-            "Object features are cached for repeat searches. CPU mode uses colors and edges."
+            "DINOv3 downloads its model once on first use and saves it in Sam. Base is recommended; "
+            "Large uses more processing time. Object features are cached for repeat searches. "
+            "DINOv2 and the original appearance/shape method remain available."
         )
         self.review_similarity_method_combo.currentIndexChanged.connect(
             self.save_review_similarity_method_setting
         )
         preview_layout.addRow("Matching method:", self.review_similarity_method_combo)
 
-        similarity_value = int(self.parent().settings.get("reviewSimilarityThreshold", 90) or 90)
+        similarity_value = review_threshold(self.parent().settings)
         similarity_row = QtWidgets.QHBoxLayout()
         self.review_similarity_threshold_slider = QtWidgets.QSlider(Qt.Horizontal)
         self.review_similarity_threshold_slider.setRange(50, 99)
@@ -7766,7 +7819,16 @@ class SettingsDialog(QtWidgets.QDialog):
         )
         similarity_row.addWidget(self.review_similarity_threshold_slider, 1)
         similarity_row.addWidget(self.review_similarity_threshold_value_label)
+        self.review_similarity_reset_button = QtWidgets.QPushButton("Recommended")
+        self.review_similarity_reset_button.setToolTip("Restore the suggested threshold for this matching method.")
+        self.review_similarity_reset_button.clicked.connect(self.reset_review_similarity_threshold)
+        similarity_row.addWidget(self.review_similarity_reset_button)
         preview_layout.addRow("Similarity match:", similarity_row)
+        self.review_similarity_hint_label = QtWidgets.QLabel()
+        self.review_similarity_hint_label.setWordWrap(True)
+        self.review_similarity_hint_label.setMinimumWidth(0)
+        preview_layout.addRow("", self.review_similarity_hint_label)
+        self.update_review_similarity_hint()
         self._review_similarity_refresh_timer = QTimer(self)
         self._review_similarity_refresh_timer.setSingleShot(True)
         self._review_similarity_refresh_timer.timeout.connect(
@@ -8978,26 +9040,76 @@ class ScanAnnotations(QObject):
                 records_by_image.setdefault(image_path, []).append(item)
 
         feature_records = []
-        total_images = len(records_by_image)
-        for image_number, (image_path, records) in enumerate(records_by_image.items(), start=1):
-            if should_cancel():
+        matcher = None
+        try:
+            # DINOv3-first descriptors; shared cache/models with the review filter.
+            from darkfusion_review_similarity import ReviewEmbeddingMatcher
+            app_dir = os.path.dirname(os.path.abspath(__file__))
+            matcher = ReviewEmbeddingMatcher(
+                os.path.join(app_dir, ".darkfusion_cache", "review_similarity"),
+                status=(
+                    lambda m: progress_callback(0, 1, m)
+                    if callable(progress_callback) else None
+                ),
+                cancelled=should_cancel,
+                model_key="dinov3_base",
+                models_dir=os.path.join(app_dir, "Sam"),
+            )
+            matcher_records = [
+                {"image_file": image_path, "bounds": record["bounds"]}
+                for image_path, records in records_by_image.items()
+                for record in records
+            ]
+            if not matcher_records:
+                # Nothing to embed; skip loading the DINOv3 model entirely.
+                matcher.close()
+                matcher = None
                 return
-            image = cv2.imread(image_path, cv2.IMREAD_COLOR)
-            if image is None:
-                continue
-            for record in records:
-                feature = self._visual_outlier_feature(image, record.get("bounds"))
-                if feature is not None:
-                    record["feature"] = feature
-                    feature_records.append(record)
-            if callable(progress_callback) and (
-                image_number == total_images or image_number % 50 == 0
+            matcher.prepare()
+            vectors = matcher.encode_records(matcher_records)
+            for record, vector in zip(
+                (r for rs in records_by_image.values() for r in rs), vectors
             ):
-                progress_callback(
-                    image_number,
-                    max(1, total_images),
-                    "Checking within-class visual consistency...",
-                )
+                if vector is not None:
+                    record["feature"] = vector
+                    feature_records.append(record)
+        except Exception:
+            # Quiet fallback to the CPU histogram/DCT feature; the checkbox
+            # must never break even if the DINOv3 model is unavailable.
+            if matcher is not None:
+                try:
+                    matcher.close()
+                except Exception:
+                    pass
+                matcher = None
+            if should_cancel():
+                # The user stopped the scan; do not start the CPU fallback.
+                return
+            feature_records = []
+            total_images = len(records_by_image)
+            for image_number, (image_path, records) in enumerate(records_by_image.items(), start=1):
+                if should_cancel():
+                    return
+                image = cv2.imread(image_path, cv2.IMREAD_COLOR)
+                if image is None:
+                    continue
+                for record in records:
+                    record.pop("feature", None)
+                    feature = self._visual_outlier_feature(image, record.get("bounds"))
+                    if feature is not None:
+                        record["feature"] = feature
+                        feature_records.append(record)
+                if callable(progress_callback) and (
+                    image_number == total_images or image_number % 50 == 0
+                ):
+                    progress_callback(
+                        image_number,
+                        max(1, total_images),
+                        "Checking within-class visual consistency...",
+                    )
+        finally:
+            if matcher is not None:
+                matcher.close()
 
         grouped = OrderedDict()
         for record in feature_records:
@@ -10005,8 +10117,9 @@ class ScanAnnotations(QObject):
             bool(summary.get("visual_outliers_enabled", False))
         )
         visual_outliers_check.setToolTip(
-            "Compare each annotation crop with others in the same class and queue only "
-            "conservative appearance outliers. This is a review hint, not a learnability score."
+            "Uses DINOv3 lookalike descriptors to compare each annotation crop with "
+            "others in the same class and queue conservative outliers. Falls back to a "
+            "CPU color/shape histogram if the model is unavailable. Review hint only."
         )
         visual_outlier_threshold = QDoubleSpinBox(tools_group)
         visual_outlier_threshold.setRange(0.20, 0.90)
@@ -15879,6 +15992,7 @@ class ReviewSimilarityWorker(QThread):
         parent=None,
         matching_method="appearance",
         cache_dir=None,
+        models_dir=None,
     ):
         super().__init__(parent)
         self.request_id = int(request_id)
@@ -15890,6 +16004,7 @@ class ReviewSimilarityWorker(QThread):
         self.appearance_similarity = appearance_similarity
         self._cancel_requested = False
         self.matching_method = matching_method
+        self.models_dir = models_dir
         self.cache_dir = cache_dir or os.path.abspath(".darkfusion_cache/review_similarity")
 
     def cancel(self):
@@ -16094,10 +16209,10 @@ class ReviewSimilarityWorker(QThread):
             return None
 
     def run(self):
-        if self.matching_method == "visual":
-            self._run_visual()
-        else:
+        if self.matching_method == "appearance":
             self._run_appearance()
+        else:
+            self._run_visual()
 
     def _run_visual(self):
         matcher = None
@@ -16108,6 +16223,8 @@ class ReviewSimilarityWorker(QThread):
                 self.cache_dir,
                 status=lambda message: self.status.emit(self.request_id, message),
                 cancelled=lambda: self._cancel_requested,
+                model_key=self.matching_method,
+                models_dir=self.models_dir,
             )
             source_path = self._normalize_path(self.reference.get("image_file", ""))
             source_line = str(self.reference.get("label_text", "") or "").strip()
@@ -16134,7 +16251,9 @@ class ReviewSimilarityWorker(QThread):
                     if score + 1e-9 >= self.threshold:
                         result = dict(record)
                         result.pop("bounds", None)
-                        result.update(score=float(score), match_basis="visual_ai")
+                        result.update(score=float(score), model_key=self.matching_method,
+                                      match_basis=("visual_ai" if self.matching_method == "visual"
+                                                   else matcher.model_label))
                         matches.append(result)
                 pending.clear()
 
@@ -19562,6 +19681,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             self.video_propagate_labels_button.clicked.connect(
                 lambda: self.open_label_propagation_dialog("video")
             )
+            # Hidden per user request: the Label tab's Propagate toggle covers
+            # both images and video, so this Collect-tab copy stays out of sight.
+            # Re-enable with setVisible(True) if it is ever needed again.
+            self.video_propagate_labels_button.setVisible(False)
         transport_row.addWidget(self.video_propagate_labels_button, 1)
 
         options_row = QtWidgets.QHBoxLayout()
@@ -23047,8 +23170,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         previous_button, img_index_number, total_images, next_button, delete_button = nav_widgets
         button_specs = (
-            (previous_button, "Prev", "Open the previous image in the current list."),
-            (next_button, "Next", "Open the next image in the current list."),
+            (previous_button, "Prev", "Open the previous image, or the previous source video frame when labeling a video."),
+            (next_button, "Next", "Open the next image, or the next source video frame when labeling a video."),
             (delete_button, "Delete", "Delete the current image and its matching label file."),
         )
 
@@ -23204,9 +23327,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self._review_similarity_origin_index = -1
         self._review_filter_restore_file = ""
         self._review_filter_restore_index = -1
-        self.review_similarity_threshold = int(
-            getattr(self, "settings", {}).get("reviewSimilarityThreshold", 90) or 90
-        )
+        self.review_similarity_threshold = review_threshold(getattr(self, "settings", {}))
         self._bulk_move_worker = None
         self._filtered_export_worker = None
         self.logger = logging.getLogger("UltraDarkFusionLogger")
@@ -23910,101 +24031,18 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         for lang_display, lang_code in languages.items():
             self.language_dropdown.addItem(lang_display, lang_code)
-        self.language_dropdown.currentIndexChanged.connect(self.change_language)
-        self.language_dropdown.setCurrentIndex(0)  # Default to English
-        self.translations_memory_cache = {}
-        self.original_ui_texts = {}
-
-        # Define widget types clearly once
-        (
-            QtWidgets.QLabel, QtWidgets.QCheckBox, QtWidgets.QToolBox,
-            QtWidgets.QSpinBox, QtWidgets.QSlider, QtWidgets.QComboBox,
-            QtWidgets.QTableWidget, QtWidgets.QPushButton, QtWidgets.QAction,
-            QtWidgets.QMenu, QtWidgets.QDockWidget, QtWidgets.QTabWidget
+        self.ui_translation = TranslationController(
+            self, Path(__file__).resolve().parent / "translations",
+            online=bool(self.settings.get("translationOnlineEnabled", True)),
         )
-
-        for child in self.findChildren(QtWidgets.QWidget):
-            if child.objectName() == 'language_dropdown':
-                continue
-
-            # Simple widgets: labels, buttons, checkboxes, docks, and sliders.
-            if isinstance(child, (QtWidgets.QLabel, QtWidgets.QPushButton, QtWidgets.QCheckBox,
-                                QtWidgets.QDockWidget, QtWidgets.QSlider)):
-                if hasattr(child, 'text') and callable(child.text):
-                    text = child.text().strip()
-                    if text:
-                        key = child.objectName()
-                        self.original_ui_texts[key] = text
-
-            # Tooltips.
-            if hasattr(child, 'toolTip') and callable(child.toolTip):
-                tooltip = child.toolTip().strip()
-                if tooltip:
-                    key = f"{child.objectName()}_tooltip"
-                    self.original_ui_texts[key] = tooltip
-
-            # Optional whatsThis help text.
-            if hasattr(child, 'whatsThis') and callable(child.whatsThis):
-                whats = child.whatsThis().strip()
-                if whats:
-                    key = f"{child.objectName()}_whatsthis"
-                    self.original_ui_texts[key] = whats
-
-            # ComboBox items
-            if isinstance(child, QtWidgets.QComboBox):
-                for i in range(child.count()):
-                    item_text = child.itemText(i).strip()
-                    if item_text:
-                        key = f"{child.objectName()}_item_{i}"
-                        self.original_ui_texts[key] = item_text
-
-            # ToolBox items
-            if isinstance(child, QtWidgets.QToolBox):
-                for i in range(child.count()):
-                    item_text = child.itemText(i).strip()
-                    if item_text:
-                        key = f"{child.objectName()}_toolbox_{i}"
-                        self.original_ui_texts[key] = item_text
-
-            # TableWidget headers
-            if isinstance(child, QtWidgets.QTableWidget):
-                for col in range(child.columnCount()):
-                    header_item = child.horizontalHeaderItem(col)
-                    if header_item and header_item.text().strip():
-                        key = f"{child.objectName()}_header_{col}"
-                        self.original_ui_texts[key] = header_item.text().strip()
-
-            # TabWidget tabs
-            if isinstance(child, QtWidgets.QTabWidget):
-                for i in range(child.count()):
-                    tab_text = child.tabText(i).strip()
-                    if tab_text:
-                        key = f"{child.objectName()}_tab_{i}"
-                        self.original_ui_texts[key] = tab_text
-
-        # Actions
-        for action in self.findChildren(QtWidgets.QAction):
-            text = action.text().strip()
-            if text:
-                key = action.objectName()
-                self.original_ui_texts[key] = text
-
-        # Menus
-        for menu in self.findChildren(QtWidgets.QMenu):
-            menu_title = menu.title().strip()
-            if menu_title:
-                key = menu.objectName()
-                self.original_ui_texts[key] = menu_title
-
-        # Window Title
-        window_title = self.windowTitle().strip()
-        if window_title:
-            self.original_ui_texts["window_title"] = window_title
+        self.language_dropdown.currentIndexChanged.connect(self.change_language)
 
         saved_language = self.settings.get("languageCode", "en")
         saved_language_index = self.language_dropdown.findData(saved_language)
         if saved_language_index > 0:
             self.language_dropdown.setCurrentIndex(saved_language_index)
+        else:
+            self.change_language(0)
 
         self.restore_persistent_ui_state()
         self.setup_persistent_settings_bindings()
@@ -24084,7 +24122,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if main_tabs is None:
             return
 
-        current_text = main_tabs.tabText(index).strip()
+        current_text = self._ui_tab_source_text(main_tabs, index).strip()
         if current_text != "Label" and hasattr(self, "_finalize_sparse_video_working_frame"):
             self._finalize_sparse_video_working_frame()
         if current_text != "Collect":
@@ -24095,7 +24133,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             return
 
         for index in range(tab_widget.count()):
-            if tab_widget.tabText(index) == old_text:
+            if self._ui_tab_source_text(tab_widget, index) == old_text:
                 tab_widget.setTabText(index, new_text)
                 return
 
@@ -24109,7 +24147,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             if str(name).strip()
         }
         for index in range(tab_widget.count()):
-            if tab_widget.tabText(index).strip().lower() in normalized_names:
+            if self._ui_tab_source_text(tab_widget, index).strip().lower() in normalized_names:
                 return index
         return -1
 
@@ -24131,7 +24169,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         for title in desired_order:
             current_index = -1
             for index in range(tab_widget.count()):
-                if tab_widget.tabText(index) == title:
+                if self._ui_tab_source_text(tab_widget, index) == title:
                     current_index = index
                     break
 
@@ -24166,8 +24204,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             "styleComboBox": (None, "Switch the application theme."),
             "gif_change": (None, "Switch the animated status visual."),
             "language_dropdown": (None, "Switch the interface language."),
-            "next_button": ("Next", "Open the next image in the current list."),
-            "previous_button": ("Prev", "Open the previous image in the current list."),
+            "next_button": ("Next", "Open the next image, or the next source video frame when labeling a video."),
+            "previous_button": ("Prev", "Open the previous image, or the previous source video frame when labeling a video."),
             "delete_button": ("Delete", "Delete the current image and its matching label file."),
             "network_height": (None, "Network input height. Ultralytics receives imgsz as [H, W]."),
             "network_width": (None, "Network input width. Ultralytics receives imgsz as [H, W]."),
@@ -24677,6 +24715,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         moved = self.navigate_by_offset(direction_sign * max(1, int(amount)))
 
+        if moved and self._propagation_video_annotation_context() is not None:
+            return True
+
         if moved and hasattr(self, "statusBar"):
             total = len(getattr(self, "filtered_image_files", []) or [])
             current = int(getattr(self, "current_img_index", 0)) + 1
@@ -24923,6 +24964,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             settings["activeClassName"] = app_settings.get("globalActiveClassName", "")
             settings["activeClassId"] = app_settings.get("globalActiveClassId", settings.get("activeClassId", 0))
 
+        migrate_review_settings(settings)
         return settings
 
     def defaultSettings(self):
@@ -24984,6 +25026,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             'anchors': [],
             'batchSize': 1000,
             **DEFAULT_KEYBINDS,
+            'panOverlayEnabled': True,
             'panOverlayFreePan': True,
             'panOverlayLocked': False,
             'panOverlayAlwaysShow': False,
@@ -24995,8 +25038,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             'labelPreviewVisible': True,
             'previewHoverZoomEnabled': True,
             'previewThumbnailSize': 128,
-            'reviewSimilarityThreshold': 90,
-            'reviewSimilarityMethod': 'visual',
+            'reviewSimilarityThreshold': 82,
+            'reviewSimilarityMethod': 'dinov3_base',
             'previewFlashTimeMs': 1000,
             'previewFlashColor': [255, 0, 0],
             'previewAlternateFlashColor': [0, 0, 255],
@@ -26533,6 +26576,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.settings = self.defaultSettings()
         self.settings.update(app_settings)
         self.settings.update(self.load_project_settings(directory))
+        migrate_review_settings(self.settings)
         self.settings["last_dir"] = directory
 
     def normalize_path(self, path):
@@ -26641,105 +26685,27 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
     # TRANSLATION AND VOICE CONTROLS
     # -----------------------------
 
+    def _refresh_runtime_translations(self):
+        controller = getattr(self, "ui_translation", None)
+        if controller is not None:
+            controller.enqueue(self, tree=True)
+
+    def _schedule_translation_refresh(self):
+        # The translation controller observes individual widgets as they appear.
+        # Kept for callers that explicitly rebuild a complete window.
+        self._refresh_runtime_translations()
+
     def change_language(self, index):
         if index < 0:
             return
-        lang_code = self.language_dropdown.itemData(index)
-        if hasattr(self, "settings"):
-            self.settings["languageCode"] = lang_code or "en"
-            self.saveSettings()
-        logger.debug(f"Loading bundled UI language: {lang_code}")
+        code = self.language_dropdown.itemData(index) or "en"
+        self.settings["languageCode"] = code
+        self.queue_settings_save()
+        self.ui_translation.set_language(code)
 
-        self.translation_cache = self.load_translations(lang_code)
-        missing_keys = []
-        for key, original_text in self.original_ui_texts.items():
-            translated_text = self.translation_cache.get(key)
-            if not translated_text:
-                translated_text = original_text
-                missing_keys.append(key)
-            self.update_widget_by_key(key, translated_text)
-
-        if missing_keys:
-            logger.warning(
-                "Bundled translation '%s' is missing %d entries; using English fallback.",
-                lang_code,
-                len(missing_keys),
-            )
-        else:
-            logger.debug("Bundled UI language loaded without network translation.")
-
-    def update_widget_by_key(self, key, translated_text):
-        if '_item_' in key:
-            widget_name, index = key.rsplit('_item_', 1)
-            widget = self.findChild(QtWidgets.QComboBox, widget_name)
-            if widget:
-                widget.setItemText(int(index), translated_text)
-
-        elif '_toolbox_' in key:
-            widget_name, index = key.rsplit('_toolbox_', 1)
-            widget = self.findChild(QtWidgets.QToolBox, widget_name)
-            if widget:
-                widget.setItemText(int(index), translated_text)
-
-        elif '_header_' in key:
-            widget_name, col = key.rsplit('_header_', 1)
-            widget = self.findChild(QtWidgets.QTableWidget, widget_name)
-            if widget:
-                header_item = widget.horizontalHeaderItem(int(col))
-                if header_item:
-                    header_item.setText(translated_text)
-
-        elif key.endswith("_tooltip"):
-            base_key = key.rsplit('_tooltip', 1)[0]
-            widget = self.findChild(QtWidgets.QWidget, base_key)
-            if widget:
-                widget.setToolTip(translated_text)
-
-        elif key.endswith("_whatsthis"):
-            base_key = key.rsplit('_whatsthis', 1)[0]
-            widget = self.findChild(QtWidgets.QWidget, base_key)
-            if widget:
-                widget.setWhatsThis(translated_text)
-
-        elif '_tab_' in key:
-            widget_name, index = key.rsplit('_tab_', 1)
-            widget = self.findChild(QtWidgets.QTabWidget, widget_name)
-            if widget:
-                widget.setTabText(int(index), translated_text)
-
-        elif key == "window_title":
-            self.setWindowTitle(translated_text)
-
-        else:
-            widget = self.findChild(QtWidgets.QWidget, key)
-            if widget and hasattr(widget, 'setText'):
-                widget.setText(translated_text)
-            else:
-                action = self.findChild(QtWidgets.QAction, key)
-                if action:
-                    action.setText(translated_text)
-                else:
-                    menu = self.findChild(QtWidgets.QMenu, key)
-                    if menu:
-                        menu.setTitle(translated_text)
-
-    def get_translation_filepath(self, lang_code):
-        translation_dir = Path(__file__).resolve().parent / "translations"
-        return translation_dir / f"{lang_code}.json"
-
-    def load_translations(self, lang_code):
-        if lang_code in self.translations_memory_cache:
-            return self.translations_memory_cache[lang_code]
-
-        filepath = self.get_translation_filepath(lang_code)
-        if filepath.exists():
-            try:
-                with open(filepath, "r", encoding="utf-8") as file:
-                    self.translations_memory_cache[lang_code] = json.load(file)
-                return self.translations_memory_cache[lang_code]
-            except (OSError, json.JSONDecodeError) as exc:
-                logger.warning("Could not load bundled translation '%s': %s", lang_code, exc)
-        return {}
+    def _ui_tab_source_text(self, tabs, index):
+        controller = getattr(self, "ui_translation", None)
+        return controller.source_text(tabs, "tab", index) if controller else tabs.tabText(index)
 
     def toggle_voice_mode(self, state):
         if state == Qt.Checked:
@@ -38174,6 +38140,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         return False
 
     def step_video_frame(self, delta):
+        if self._propagation_video_annotation_context() is not None:
+            return self.navigate_by_offset(delta)
         current = self.current_video_frame_index()
         target = current + int(delta or 0)
         if self.seek_video_frame(target, pause=True):
@@ -40752,7 +40720,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         class_name = self.id_to_class.get(bbox.class_id, f"cls_{bbox.class_id}")
         label_type = "seg" if bbox.segmentation else "obb" if bbox.obb else "kpt" if bbox.keypoints else "bbox"
         size_text = f"{x2 - x1}x{y2 - y1}"
-        label_text = bbox.to_str()
+        label_text = getattr(bbox, "_review_label_text", None) or bbox.to_str()
         details_widget, accent = self._create_preview_details_widget(
             bbox,
             class_name,
@@ -40801,6 +40769,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 if match.get("match_basis"):
                     tooltip += f"\nBest match: {str(match['match_basis']).title()}"
                 details_widget.setToolTip(tooltip)
+                score_label = QLabel(f"Match {float(match.get('score', 0.0)) * 100.0:.1f}%")
+                score_label.setObjectName("reviewSimilarityScore")
+                score_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+                score_label.setStyleSheet("color: #91d7ff; font-size: 14px; font-weight: 700;")
+                score_label.setToolTip(tooltip)
+                details_widget.layout().insertWidget(0, score_label)
         image_item.setToolTip(tooltip)
         self.preview_list.setItem(row_count, 0, image_item)
         self.preview_list.setCellWidget(row_count, 0, thumbnail_label)
@@ -40914,8 +40888,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 if not self.class_visibility.get(class_name, True):
                     continue
 
+            bbox._review_label_text = line.strip()
             filtered_entries.append((line_index, bbox))
 
+        if similarity_keys is not None:
+            scores_by_row = {int(record.get("line_index", -1)): float(record.get("score", 0.0))
+                             for record in records}
+            filtered_entries.sort(key=lambda entry: scores_by_row.get(entry[0], 0.0), reverse=True)
         self._preview_filtered_entries = filtered_entries
         self._preview_batch_pixmap = pixmap
         self._preview_batch_image_width = img_width
@@ -41280,10 +41259,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.flash_time_value = int(self.settings.get("previewFlashTimeMs", 1000))
         self._image_size_value = int(self.settings.get("previewThumbnailSize", 128))
         self._preview_hover_zoom_enabled = bool(self.settings.get("previewHoverZoomEnabled", True))
-        self.review_similarity_threshold = max(
-            50,
-            min(99, int(self.settings.get("reviewSimilarityThreshold", 90) or 90)),
-        )
+        migrate_review_settings(self.settings)
+        self.review_similarity_threshold = review_threshold(self.settings)
 
         if hasattr(self, "preview_list"):
             self._perform_size_adjustment()
@@ -41312,7 +41289,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         value = max(50, min(99, int(value)))
         self.review_similarity_threshold = value
         if save and hasattr(self, "settings"):
-            self.settings["reviewSimilarityThreshold"] = value
+            set_review_threshold(self.settings, value)
             self.saveSettings()
 
     def refresh_active_review_similarity_filter(self):
@@ -45511,10 +45488,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         }
         self._review_filter_request_id = int(getattr(self, "_review_filter_request_id", 0)) + 1
         request_id = self._review_filter_request_id
-        threshold_percent = max(
-            50,
-            min(99, int(self.settings.get("reviewSimilarityThreshold", 90) or 90)),
-        )
+        threshold_percent = review_threshold(self.settings)
         worker = ReviewSimilarityWorker(
             request_id=request_id,
             image_files=image_files,
@@ -45524,7 +45498,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             polygon_preference=self._polygon_label_parse_preference(),
             appearance_similarity=self._propagation_mask_similarity,
             parent=self,
-            matching_method=self.settings.get("reviewSimilarityMethod", "visual"),
+            matching_method=review_method(self.settings),
+            models_dir=os.path.join(os.path.dirname(os.path.abspath(__file__)), "Sam"),
             cache_dir=os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                    ".darkfusion_cache", "review_similarity"),
         )
@@ -45868,9 +45843,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                     item.setCheckState(Qt.Checked)
 
                 elif filter_index == -2:
-                    # Blanks have no annotations to display. Clear the class
-                    # visibility checks so the UI matches the active filter.
-                    item.setCheckState(Qt.Unchecked)
+                    # Blank images are still editable. Keep every class visible
+                    # so annotations drawn on the blank image are not hidden.
+                    item.setCheckState(Qt.Checked)
 
                 else:
                     # Specific class only
@@ -50171,7 +50146,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         return label_path
 
     def _record_video_annotation_frame(
-        self, source, frame_index, image_path, label_path, sparse_manual=False
+        self, source, frame_index, image_path, label_path, sparse_manual=False,
+        transform_settings=None, total_frames=None, fps=None,
     ):
         """Record provenance only; YOLO txt remains the annotation source of truth."""
         output_dir = os.path.dirname(image_path)
@@ -50202,13 +50178,18 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 manifest["workflow"] = "batch_extraction"
             else:
                 manifest["workflow"] = "sparse_manual"
-        total_frames = int(getattr(self, "total_frames", 0) or 0)
+        total_frames = int(
+            (getattr(self, "total_frames", 0) if total_frames is None else total_frames) or 0
+        )
         if total_frames > 0:
             manifest["total_frames"] = total_frames
-        video_fps = float(getattr(self, "video_fps", 0.0) or 0.0)
+        video_fps = float((getattr(self, "video_fps", 0.0) if fps is None else fps) or 0.0)
         if video_fps > 0:
             manifest["fps"] = video_fps
-        manifest["transform"] = self.current_video_transform_settings()
+        manifest["transform"] = (
+            transform_settings if isinstance(transform_settings, dict)
+            else self.current_video_transform_settings()
+        )
         frames = manifest.setdefault("frames", {})
         frames[str(max(0, int(frame_index or 0)))] = {
             "image": os.path.relpath(image_path, output_dir).replace("\\", "/"),
@@ -51508,6 +51489,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
     # Assisted label propagation (image sequences and video frames)
     # ------------------------------------------------------------------
 
+    def _propagation_video_annotation_context(self):
+        """Use the edited video's frame identity after Label Frame stops playback."""
+        if not getattr(self, "annotation_scene_active", False):
+            return None
+        current_file = getattr(self, "current_file", None)
+        return self.video_annotation_context_for_image(current_file) if current_file else None
+
     def toggle_image_navigation_propagation(self, enabled):
         """Enable one-frame-at-a-time propagation through normal image navigation."""
         button = getattr(self, "propagate_labels_button", None)
@@ -51747,11 +51735,18 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             self.statusBar().showMessage(message, 6000)
 
     def open_label_propagation_dialog(self, source_kind="images"):
+        video_context = self._propagation_video_annotation_context()
+        if video_context is not None:
+            source_kind = "video"
         source_kind = "video" if source_kind == "video" else "images"
         if source_kind == "images" and not getattr(self, "current_file", None):
             QMessageBox.information(self, "Propagate Labels", "Open an image dataset first.")
             return
-        if source_kind == "video" and getattr(self, "_last_video_frame_bgr", None) is None:
+        if (
+            source_kind == "video"
+            and video_context is None
+            and getattr(self, "_last_video_frame_bgr", None) is None
+        ):
             QMessageBox.information(self, "Propagate Labels", "Open and pause a video on the starting frame first.")
             return
 
@@ -51773,8 +51768,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         object_combo.addItem("Selected object", "selected")
         object_combo.addItem("All objects", "all")
         if source_kind == "video":
-            object_combo.setItemText(0, "First visible prediction")
-            object_combo.setItemText(1, "All saved / visible objects")
+            if video_context is None:
+                object_combo.setItemText(0, "First visible prediction")
+                object_combo.setItemText(1, "All saved / visible objects")
             object_combo.setCurrentIndex(1)
 
         direction_combo = QComboBox(dialog)
@@ -51907,6 +51903,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         return []
 
     def _propagation_seed_lines_from_video(self, object_mode):
+        if self._propagation_video_annotation_context() is not None:
+            # Persist the canvas before reading labels, just like image propagation.
+            return self._propagation_seed_lines_from_image(object_mode)
         source = self._video_annotation_source()
         if source:
             _output_dir, _image_path, saved_label_path = self.video_annotation_paths(
@@ -53667,6 +53666,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 self._release_sam_video_propagation_runtime()
 
     def propagate_image_sequence_labels(self, options, status_label):
+        if self._propagation_video_annotation_context() is not None:
+            return self.propagate_video_labels(options, status_label)
         self._propagation_stop_requested = False
         seed_lines = self._propagation_seed_lines_from_image(options["objects"])
         if not seed_lines or not self._propagation_pose_ready(seed_lines):
@@ -53713,35 +53714,48 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
     def propagate_video_labels(self, options, status_label):
         self._propagation_stop_requested = False
+        video_context = self._propagation_video_annotation_context()
         seed_lines = self._propagation_seed_lines_from_video(options["objects"])
         if not seed_lines:
             QMessageBox.information(
                 self, "Propagate Labels",
-                "No visible video prediction is available. Enable inference, pause on an object, then try again.",
+                "No annotations are available on this frame. Draw and finish at least one annotation, "
+                "or enable video inference and pause on an object, then try again.",
             )
             return False
         if not self._propagation_pose_ready(seed_lines):
             return False
-        source = str(
+        source = video_context["source"] if video_context is not None else str(
             getattr(self, "current_playback_original_source", "")
             or getattr(self, "current_playback_source", "")
         )
         if not source or not os.path.isfile(source):
             QMessageBox.warning(self, "Propagate Labels", "Video propagation currently requires a local video file.")
             return False
-        start_frame = self.current_video_frame_index()
-        seed_image = getattr(self, "_last_video_frame_bgr", None)
+        if video_context is not None:
+            start_frame = int(video_context["frame_index"])
+            seed_image = self._read_image_cv(self.current_file)
+            output_dir = Path(video_context["output_dir"])
+            transform_settings = (video_context.get("manifest") or {}).get("transform")
+        else:
+            start_frame = self.current_video_frame_index()
+            seed_image = getattr(self, "_last_video_frame_bgr", None)
+            output_dir = Path(self.get_video_output_dir(source))
+            transform_settings = None
         if seed_image is None:
             return False
+        if not isinstance(transform_settings, dict):
+            transform_settings = self.current_video_transform_settings()
+        transform_settings = dict(transform_settings)
 
         source_path = Path(source)
-        output_dir = Path(self.get_video_output_dir(source))
         output_dir.mkdir(parents=True, exist_ok=True)
         self._ensure_video_dataset_metadata(str(output_dir))
         capture = cv2.VideoCapture(source)
         if not capture.isOpened():
             return False
         total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        video_fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
         limit = options["limit"] or max(0, total_frames - 1)
         directions = [1, -1] if options["direction"] == "both" else [1 if options["direction"] == "forward" else -1]
         manifest = self._begin_propagation_batch(str(output_dir), "video")
@@ -53751,22 +53765,31 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 frame_numbers = list(range(start_frame + direction, total_frames if direction > 0 else -1, direction))[:limit]
                 records = []
                 for frame_number in frame_numbers:
-                    _canonical_dir, canonical_image, canonical_label = self.video_annotation_paths(
-                        source, frame_number
+                    canonical_image, canonical_label = extraction_frame_paths(
+                        output_dir, source_path.stem, frame_number, self.get_image_extension()
                     )
+                    for extension in OUTPUT_IMAGE_SUFFIXES:
+                        candidate = os.path.splitext(canonical_image)[0] + extension
+                        if os.path.isfile(candidate):
+                            canonical_image = candidate
+                            break
                     image_path = Path(canonical_image)
                     label_path = Path(canonical_label)
 
-                    def read_frame(number=frame_number):
+                    def read_frame(number=frame_number, path=str(image_path)):
+                        if os.path.isfile(path):
+                            return self._read_image_cv(path)
                         capture.set(cv2.CAP_PROP_POS_FRAMES, number)
                         ok, frame = capture.read()
-                        return self.prepare_playback_frame(frame) if ok else None
+                        return transform_video_frame_by_settings(frame, transform_settings) if ok else None
 
                     def save_frame(frame, path=str(image_path), number=frame_number):
-                        saved = save_cv_image(path, frame)
+                        saved = os.path.isfile(path) or save_cv_image(path, frame)
                         if saved:
                             self._record_video_annotation_frame(
-                                source, number, path, os.path.splitext(path)[0] + ".txt"
+                                source, number, path, os.path.splitext(path)[0] + ".txt",
+                                transform_settings=transform_settings,
+                                total_frames=total_frames, fps=video_fps,
                             )
                         return saved
 
@@ -53871,7 +53894,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 scene.height(),
                 scene=scene,
             )
-            self._discard_unlabeled_sparse_video_frame(context, current_file)
 
         output_dir = context["output_dir"]
         image_path, label_path = extraction_frame_paths(
@@ -53905,6 +53927,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 return False
 
         self._ensure_video_dataset_metadata(output_dir)
+
+        # Keep the current working frame if decoding/saving the next one fails.
+        if save_current and scene is not None and not self.is_placeholder_file(current_file):
+            self._discard_unlabeled_sparse_video_frame(context, current_file)
 
         def video_frame_sort_key(path):
             match = re.search(r"_frame_(\d+)$", Path(path).stem, flags=re.IGNORECASE)
@@ -54018,10 +54044,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
             current_file = self.normalize_path(self.current_file)
             video_context = self.video_annotation_context_for_image(current_file)
-            propagation_enabled = bool(
-                getattr(self, "_image_navigation_propagation_enabled", False)
-            )
-            if video_context is not None and propagation_enabled:
+            if video_context is not None:
                 return self._navigate_video_annotation_by_offset(
                     video_context, offset, current_file
                 )
@@ -54052,12 +54075,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
             new_index = max(0, min(len(files) - 1, index + offset))
             if new_index == index:
-                if video_context is not None and not propagation_enabled and hasattr(self, "statusBar"):
-                    self.statusBar().showMessage(
-                        "Only saved labeled frames are shown. Use video -1/+1 to seek, "
-                        "or enable propagation to label the adjacent frame.",
-                        5000,
-                    )
                 if self.auto_scan_checkbox.isChecked():
                     self.auto_scan_checkbox.setChecked(False)
                     self.stop_next_timer()
@@ -54145,12 +54162,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.scan_direction = 'next'
 
         # Navigate to the next frame
-        self.navigate_frame('next')
+        moved = self.navigate_frame('next')
 
         # Continue while the button is physically held, or while Auto Scan is
         # armed. Navigation advances one image per timer tick in either case.
-        if self.auto_scan_checkbox.isChecked() or self.next_button.isDown():
+        if moved and (self.auto_scan_checkbox.isChecked() or self.next_button.isDown()):
             self.start_next_timer()
+        return moved
 
     def previous_frame(self):
         # Stop scanning (if in progress)
@@ -54161,10 +54179,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.scan_direction = 'previous'
 
         # Navigate to the previous frame
-        self.navigate_frame('previous')
+        moved = self.navigate_frame('previous')
 
-        if self.auto_scan_checkbox.isChecked() or self.previous_button.isDown():
+        if moved and (self.auto_scan_checkbox.isChecked() or self.previous_button.isDown()):
             self.start_prev_timer()
+        return moved
 
     def on_next_button_released(self):
         if not self.auto_scan_checkbox.isChecked():
@@ -66220,9 +66239,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         if sys.platform.startswith("win"):
             if keep_open:
-                from darkfusion_console_runner import launch_console_command
-
-                return launch_console_command(command, cwd=working_dir)
+                return subprocess.Popen(["cmd.exe", "/k", command_display], cwd=working_dir)
             return subprocess.Popen(command, cwd=working_dir, creationflags=subprocess.CREATE_NEW_CONSOLE)
         else:
             if not keep_open:
@@ -67246,9 +67263,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             command_display = self.format_command_for_log(command)
 
             if sys.platform == 'win32':
-                from darkfusion_console_runner import launch_console_command
-
-                launch_console_command(command, cwd=working_dir)
+                subprocess.Popen(["cmd.exe", "/k", command_display], cwd=working_dir)
             else:
                 try:
                     subprocess.Popen(["gnome-terminal", "--working-directory", working_dir, "--"] + command)

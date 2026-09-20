@@ -48,28 +48,45 @@ https://github.com/IDEA-Research/GroundingDINO
 The published bundle contains the checkpoints used with the pinned DarkFusion
 environment. Keep the file names and directory layout unchanged.
 
-## Visual similarity review
+## Visual similarity review: DINOv3
 
-**Settings > Display > Review Preview > Matching method** defaults to AI visual
-matching with [Meta's DINOv2 Base with registers](https://huggingface.co/facebook/dinov2-with-registers-base).
-The first similarity search automatically downloads approximately 350 MB from
-the official repository. No account, API key, or additional Python packages are
-required. The checkpoint is pinned to revision
-`a1d738ccfa7ae170945f210395d99dde8adb1805` and loaded from safetensors.
+**Settings > Display > Review Preview > Matching method** defaults to
+**DINOv3 Base**. DINOv3 Large, DINOv2, and Appearance and shape (CPU) remain
+available. Dataset Analysis also uses DINOv3 for visual class outliers.
 
-Model files and object descriptors are cached under
-`UltraDarkFusion/.darkfusion_cache/review_similarity`. Subsequent searches reuse
-unchanged image/box descriptors; fully cached searches need neither internet nor
-a loaded model. Image or annotation changes invalidate the corresponding cache
-entries. GPU inference uses FP16; CPU inference is available when CUDA is absent
-or GPU memory is busy.
+The first uncached DINOv3 scan downloads the selected model in its background
+worker. The interface remains usable and **Stop scan** cancels the work (an
+active network read may take up to ten seconds to return). No account or token
+is required. Subsequent scans reuse the checkpoint and cached descriptors.
 
-The matcher preserves whole object crops and their aspect ratio, with a small
-margin. It searches annotations of the selected class and ranks results by
-visual resemblance. A similarity percentage is not confidence that a label is
-incorrect. Review matches before using the existing bulk-removal actions.
-**Appearance and shape (CPU)** remains available in the matching-method setting.
-Use **Stop scan** in the status bar to cancel; completed cached work is retained.
+| Model | Download | File in `UltraDarkFusion/Sam` |
+| --- | --- | --- |
+| DINOv3 Base | 343 MB | `dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth` |
+| DINOv3 Large | 1.21 GB | `dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth` |
+
+Downloads come from the versioned
+[DarkFusion 5.2.1 release](https://github.com/lordofkillz/DarkFusion/releases/tag/v5.2.1-windows.1).
+Each checkpoint is checked against its pinned size and full SHA-256 before
+installation. Failed or cancelled downloads leave no model file; retry the scan
+when connected. Existing files are preserved and verified before loading.
+For an offline machine, copy the two named checkpoints into `Sam` yourself.
+The release includes the [DINOv3 license](UltraDarkFusion/darkfusion_dinov3/LICENSE.md)
+and [attribution](UltraDarkFusion/darkfusion_dinov3/NOTICE.md) accompanying Meta's
+unmodified weights and vendored inference code. Upstream:
+[Meta DINOv3](https://github.com/facebookresearch/dinov3).
+
+Only the selected model downloads. These weights are separate from the existing
+SAM3/GroundingDINO Google Drive bundle, which remains unchanged.
+
+Descriptors are cached under `UltraDarkFusion/.darkfusion_cache/review_similarity`.
+Unchanged, fully cached searches need neither internet nor a loaded model.
+Image, annotation, model, and crop-setting changes invalidate relevant entries.
+GPU inference uses FP16 with CPU fallback when CUDA is unavailable or VRAM is busy.
+The optional DINOv2 method still downloads its pinned official safetensors model.
+
+The matcher preserves object crops and aspect ratio, with a small margin. It
+compares annotations of the same class. A similarity percentage means visual
+resemblance, not confidence that a label is wrong; inspect matches before removal.
 
 ## TensorRT engines
 

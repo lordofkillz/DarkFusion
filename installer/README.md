@@ -99,6 +99,17 @@ The paths above are examples; use the actual build-machine locations. The setup
 and launcher never use those build-machine paths to locate the installed runtime.
 The environment's dependency check and conda-pack integrity checks must pass.
 
+For an application-only update with unchanged dependencies, the builder also
+accepts `--previous-payload path/to/payload.zip --previous-sha256 <published hash>`
+instead of `--runtime-archive`. It verifies the previous package and reuses only
+its private `runtime/`; all application files come from the new clean commit.
+Test the resulting installation with that private runtime before publishing.
+
+DINOv3 Base/Large checkpoints download on first use in the review worker. Publish
+the named checkpoints plus their license/attribution as separate release assets;
+see [MODEL_SETUP.md](../MODEL_SETUP.md). They are not added to the existing Drive
+bundle, and old installers retain their original verified downloads.
+
 Commit the intended source changes before creating release media, then run:
 
 ```powershell

@@ -30,6 +30,13 @@ REQUIRED_FILES = (
     "darkfusion_onnx_runtime.py",
     "darkfusion_negative_crops.py",
     "darkfusion_review_similarity.py",
+    "darkfusion_review_settings.py",
+    "darkfusion_translation.py",
+    "darkfusion_dinov3/config.py",
+    "darkfusion_dinov3/loader.py",
+    "darkfusion_dinov3/download.py",
+    "darkfusion_dinov3/vision_transformer.py",
+    "darkfusion_dinov3/LICENSE.md",
     "darkfusion_system_metrics.py",
     "training_eta.py",
     "botsort.yaml",
@@ -136,12 +143,12 @@ def main() -> int:
         except (OSError, json.JSONDecodeError) as exc:
             translation_failures.append(f"{code}.json: {exc}")
             continue
-        if expected_keys and set(catalog) != expected_keys:
-            missing_count = len(expected_keys - set(catalog))
-            extra_count = len(set(catalog) - expected_keys)
-            translation_failures.append(
-                f"{code}.json: {missing_count} missing and {extra_count} extra keys"
-            )
+        # Languages acquire new source keys independently in the background.
+        # Missing translations intentionally fall back to the English UI.
+        if not isinstance(catalog, dict) or not all(
+            isinstance(key, str) and isinstance(value, str) for key, value in catalog.items()
+        ):
+            translation_failures.append(f"{code}.json: expected a string-to-string catalog")
 
     if missing_files:
         print("ERROR: required repository files are missing:")

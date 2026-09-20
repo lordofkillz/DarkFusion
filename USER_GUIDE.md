@@ -230,12 +230,12 @@ Keep the labeling rule consistent across the entire dataset.
 Use an annotation preview's context menu to find similar annotations. Adjust
 the similarity threshold to narrow or broaden the matches, inspect the
 results, and remove matching labels when appropriate. The default AI visual
-matching uses DINOv2 to compare objects of the same class, including objects
+matching uses DINOv3 Base to compare objects of the same class, including objects
 with changes in lighting or background. A high similarity score means visual
 resemblance; it does not establish that a label is incorrect.
 
 Choose the matching method in **Settings > Display > Review Preview**.
-The first AI search downloads approximately 350 MB; subsequent searches reuse
+The first DINOv3 Base search downloads approximately 343 MB; subsequent searches reuse
 the model and cached object features. NVIDIA GPUs use FP16 inference, with CPU
 support when CUDA is unavailable. **Appearance and shape (CPU)** keeps the
 original matcher available. Use **Stop scan** in the status bar to cancel a
@@ -377,3 +377,22 @@ model works in the actual scenario rather than only memorizing the dataset.
 - Back up labels before overwrite or automatic repair operations.
 - Export TensorRT engines on the target hardware.
 - Keep an untouched validation set for honest comparisons between runs.
+
+## Language changes
+
+Select the interface language in Settings. Cached translations apply immediately;
+missing text is translated in the background and saved in `translations/*.json`.
+English remains visible while a translation is unavailable. Language changes do
+not rename files or change the values used by model, theme, GIF, or class selectors.
+Online translation sends missing UI phrases to Google Translate with MyMemory as
+a fallback. Paths, numbers, and recognized product/model terms are masked. Set
+`translationOnlineEnabled` to `false` in settings.json for cached-only translation.
+
+## DINOv3 on a new computer
+
+Start a similarity search or visual outlier scan. The selected DINOv3 checkpoint
+downloads once in the worker and is verified before use. Base is approximately
+343 MB and Large is approximately 1.21 GB. Keep the app open until the download
+finishes; **Stop scan** cancels it. See [Model setup](MODEL_SETUP.md) for offline
+installation and the model license. DINOv2 and the CPU appearance method are also
+available under Settings > Display > Review Preview.

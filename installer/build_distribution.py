@@ -54,7 +54,11 @@ def unicode_python(archive: zipfile.ZipFile, work: Path, manifest_tool: Path) ->
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--runtime-archive", required=True, type=Path)
+    runtime_input = parser.add_mutually_exclusive_group(required=True)
+    runtime_input.add_argument("--runtime-archive", type=Path)
+    runtime_input.add_argument("--previous-payload", type=Path,
+                               help="Reuse only runtime/ from a verified previous distribution")
+    parser.add_argument("--previous-sha256", help="Required published SHA-256 for --previous-payload")
     parser.add_argument("--native-directory", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[1])
@@ -63,7 +67,10 @@ def main() -> None:
     args = parser.parse_args()
     repo = args.repo.resolve()
     output = args.output.resolve()
-    runtime_archive = args.runtime_archive.resolve()
+    runtime_archive = (args.runtime_archive or args.previous_payload).resolve()
+    if args.previous_payload:
+        if not args.previous_sha256 or sha256(runtime_archive) != args.previous_sha256.lower():
+            raise SystemExit("Previous payload does not match its published SHA-256.")
     native = args.native_directory.resolve()
     backend = repo / "installer/windows/install-standalone.ps1"
     manifest_tool = args.manifest_tool
@@ -80,6 +87,8 @@ def main() -> None:
         raise SystemExit("Output directory must be new or empty.")
 
     source_commit = git(repo, "rev-parse", "HEAD").strip()
+    if git(repo, "status", "--porcelain").strip():
+        raise SystemExit("Commit the reviewed source before building a release.")
     tracked = [name for name in git(repo, "ls-files", "-z").split("\0") if name]
     # Publish only reviewed, tracked source. Never sweep personal models/settings.
     app_files = [name for name in tracked if not name.startswith(("installer/", ".github/"))]
@@ -95,7 +104,7 @@ def main() -> None:
         names = set(archive.namelist())
         if not {"runtime/python.exe", "runtime/Scripts/conda-unpack-script.py"}.issubset(names):
             raise SystemExit("Runtime archive is not a Windows conda-pack archive rooted at runtime/.")
-        if any(not name.startswith("runtime/") for name in names):
+        if not args.previous_payload and any(not name.startswith("runtime/") for name in names):
             raise SystemExit("Runtime archive contains files outside runtime/.")
 
     output.mkdir(parents=True, exist_ok=True)
@@ -107,6 +116,8 @@ def main() -> None:
         with zipfile.ZipFile(runtime_archive) as source, zipfile.ZipFile(payload, "w", allowZip64=True) as target:
             python = unicode_python(source, work, manifest_tool)
             for entry in source.infolist():
+                if not entry.filename.startswith("runtime/"):
+                    continue  # Replace every old app file with the new tracked source.
                 encoded = copy.copy(entry)
                 encoded.compress_type = zipfile.ZIP_DEFLATED
                 encoded._compresslevel = 1

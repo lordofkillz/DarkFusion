@@ -1,7 +1,7 @@
 # GitHub upload manifest
 
 This manifest defines the files that make up the distributable
-UltraDarkFusion v5.2 repository.
+UltraDarkFusion v5.2.1 repository.
 
 ## Commit these files
 
@@ -49,6 +49,12 @@ UltraDarkFusion v5.2 repository.
 - `UltraDarkFusion/botsort.yaml`
 - `UltraDarkFusion/zlibwapi.dll` (legacy Darknet runtime support)
 
+- `UltraDarkFusion/darkfusion_dinov3/` (inference code, license, downloader)
+- `UltraDarkFusion/darkfusion_review_settings.py`
+- `UltraDarkFusion/darkfusion_review_similarity.py`
+- `UltraDarkFusion/darkfusion_translation.py`
+- `UltraDarkFusion/tests/`
+
 ### Runtime resources
 
 - `UltraDarkFusion/styles/`
@@ -74,3 +80,10 @@ UltraDarkFusion v5.2 repository.
 
 The `.gitignore` enforces these exclusions. See `MODEL_SETUP.md` for the model
 files that users install separately after cloning.
+
+## DINOv3 release assets
+
+Publish both pinned `.pth` checkpoints named in `darkfusion_dinov3/config.py` to
+`v5.2.1-windows.1`, together with `DINOv3-LICENSE.md` and `DINOv3-NOTICE.md`.
+The first-use downloader verifies their full hashes. Do not commit checkpoints
+to Git or modify a published model asset without updating the pinned manifest.
