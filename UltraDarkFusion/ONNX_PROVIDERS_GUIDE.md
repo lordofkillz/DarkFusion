@@ -7,9 +7,10 @@ ONNX Runtime. Check them without changing the environment:
 python -c "import onnxruntime as ort; print(ort.get_available_providers())"
 ```
 
-The supported pinned source installation uses `onnxruntime-gpu==1.22.0` for
-NVIDIA CUDA/TensorRT with CPU fallback. The standalone installer carries its
-own tested runtime. Select a supported provider in DarkFusion's inference
+The pinned Windows source installation and tested standalone runtime use
+`onnxruntime-directml==1.22.0`, matching the working local version. ONNX
+CUDA/TensorRT requires replacing it with `onnxruntime-gpu==1.22.0` in a separate
+tested environment. Select a supported provider in DarkFusion's inference
 settings; provider availability depends on that runtime and installed drivers.
 
 ONNX Runtime's CPU, GPU, DirectML, and OpenVINO pip distributions all provide

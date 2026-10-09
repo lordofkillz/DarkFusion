@@ -40,8 +40,10 @@ python darkfusion_onnx_runtime.py `
 ```
 
 TensorRT uses a persistent engine and timing cache. Its first model load may
-take several minutes. CUDA remains the automatic NVIDIA default; TensorRT is
-opt-in.
+take several minutes. The tested Windows package includes DirectML; Automatic
+selects from providers actually installed. ONNX CUDA/TensorRT requires replacing
+that ONNX Runtime variant with the GPU build, not installing both. TensorRT is
+opt-in. This provider choice does not change PyTorch's CUDA support.
 
 ```python
 model = DarkFusionOnnxModel(

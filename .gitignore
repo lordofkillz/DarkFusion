@@ -139,6 +139,9 @@ UltraDarkFusion/styles/df-assets/**
 !UltraDarkFusion/styles/df-assets/*/icons/tools.svg
 !UltraDarkFusion/styles/df-assets/*/icons/train.svg
 # Maintainer build/publishing records are not user installation inputs.
+LOCAL_WORKSPACE.md
+UltraDarkFusion/build_tools/
+UltraDarkFusion/build_artifacts/
 UPLOAD_MANIFEST.md
 installer/build_distribution.py
 installer/prepare_download.py

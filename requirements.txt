@@ -8,7 +8,7 @@
 #   python -m pip install --no-user -r requirements.txt
 #
 # Keep --no-user in the install command so packages land in the active fusion
-# env instead of C:\Users\jason\AppData\Roaming\Python.
+# env instead of per-user site-packages.
 
 --extra-index-url https://download.pytorch.org/whl/cu128
 --extra-index-url https://pypi.nvidia.com
@@ -48,10 +48,10 @@ clip @ git+https://github.com/ultralytics/CLIP.git@88ade288431a46233f1556d1e1419
 # Direct GroundingDINO path used by dinov5_2.py.
 # Keep local model weights separately, especially Sam/groundingdino_swint_ogc.pth.
 groundingdino-py==0.4.0
-transformers==4.52.4
-tokenizers==0.21.1
+transformers==4.57.1
+tokenizers==0.22.0
 safetensors==0.5.3
-huggingface-hub==0.33.0
+huggingface-hub==0.36.2
 supervision==0.6.0
 timm==1.0.15
 pycocotools==2.0.6
@@ -64,7 +64,10 @@ accelerate>=0.31.0,<2.0.0
 
 # ONNX / TensorRT model support.
 onnx==1.17.0
-onnxruntime-gpu==1.22.0
+onnxruntime-directml==1.22.0; platform_system == "Windows"
+onnxruntime==1.22.0; platform_system != "Windows"
+# Match the tested Windows runtime. To use CUDA/TensorRT ONNX providers instead,
+# replace DirectML with onnxruntime-gpu==1.22.0; never install both variants.
 # ORT 1.22 TensorRT EP is built/tested against TensorRT 10.9 + CUDA 12.
 # Do not replace this with the unsuffixed latest package (currently CUDA 13).
 tensorrt-cu12==10.9.0.34
