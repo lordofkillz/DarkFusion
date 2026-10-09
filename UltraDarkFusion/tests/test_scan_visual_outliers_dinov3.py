@@ -153,64 +153,9 @@ class MidClassSemanticVerifier(StrongClassSemanticVerifier):
         } for _record in records]
 
 
-class WeakForegroundVerifier:
-    instances = []
-
-    def __init__(self, *_args, **_kwargs):
-        self.backend = "sam3"
-        self.device = "cuda:0"
-        self.records = []
-        self.closed = False
-        self.__class__.instances.append(self)
-
-    def score_records(self, records):
-        self.records = list(records)
-        return [{
-            "backend": "sam3",
-            "status": "weak_foreground_separation",
-            "coherence": .20,
-            "foreground_risk": .80,
-            "occupancy": .03,
-            "containment": .55,
-            "component_count": 4,
-            "cached": False,
-        } for _record in self.records]
-
-    def close(self):
-        self.closed = True
-
-
-class CoherentForegroundVerifier(WeakForegroundVerifier):
-    instances = []
-
-    def score_records(self, records):
-        self.records = list(records)
-        return [{
-            "backend": "sam3",
-            "status": "coherent_foreground",
-            "coherence": .90,
-            "foreground_risk": .10,
-            "occupancy": .62,
-            "containment": .96,
-            "component_count": 1,
-            "cached": True,
-        } for _record in self.records]
-
-
-class UnavailableForegroundVerifier(WeakForegroundVerifier):
-    instances = []
-
-    def score_records(self, records):
-        self.records = list(records)
-        raise FileNotFoundError("SAM3 checkpoint not found (test)")
-
-
 class VisualOutlierDinoTests(unittest.TestCase):
     def setUp(self):
         FakeDinoMatcher.instances = []
-        WeakForegroundVerifier.instances = []
-        CoherentForegroundVerifier.instances = []
-        UnavailableForegroundVerifier.instances = []
 
     def _record(self, image_path, line_number):
         return {
@@ -226,6 +171,9 @@ class VisualOutlierDinoTests(unittest.TestCase):
         scan = ScanAnnotations(parent=None)
         scan.valid_classes = ["obj"]
         scan.annotation_family_records = records
+        # Keep these focused matcher tests small; production deliberately uses
+        # a more conservative ten-example minimum.
+        scan.VISUAL_OUTLIER_MIN_CLASS_SAMPLES = 5
         return scan
 
     def _outlier_issues(self, scan):
@@ -495,95 +443,6 @@ class VisualOutlierDinoTests(unittest.TestCase):
                 ["high_priority_findings"],
                 1,
             )
-
-    def test_sam3_checks_only_dino_candidates_and_raises_weak_foreground(self):
-        with tempfile.TemporaryDirectory() as directory:
-            image = Path(directory) / "frame.png"
-            image.write_bytes(b"fixture")
-            scan = self._make_scan([self._record(str(image), i) for i in range(6)])
-            scan.base_directory = directory
-            scan._scan_visual_class_verify_override = True
-            scan._scan_foreground_verify_override = True
-            with mock.patch(
-                "darkfusion_review_similarity.ReviewEmbeddingMatcher",
-                FakeDinoMatcher,
-            ), mock.patch(
-                "darkfusion_class_semantics.ClassSemanticVerifier",
-                MidClassSemanticVerifier,
-            ), mock.patch(
-                "darkfusion_foreground_verifier.ForegroundBackgroundVerifier",
-                WeakForegroundVerifier,
-            ):
-                scan._scan_visual_outliers()
-
-            self.assertEqual(len(WeakForegroundVerifier.instances), 1)
-            verifier = WeakForegroundVerifier.instances[0]
-            self.assertTrue(verifier.closed)
-            self.assertEqual(len(verifier.records), 1)
-            self.assertEqual(len(scan.issues), 1)
-            issue = scan.issues[0]
-            self.assertEqual(issue["foreground_status"], "weak_foreground_separation")
-            self.assertGreater(issue["foreground_adjustment"], 0.0)
-            self.assertGreater(
-                issue["false_positive_priority"], issue["priority_before_foreground"]
-            )
-            self.assertEqual(issue["false_positive_strength"], "high")
-            coverage = scan.visual_outlier_scan["foreground_verification"]
-            self.assertEqual(coverage["candidates_checked"], 1)
-            self.assertEqual(coverage["weak_foreground_separation"], 1)
-            self.assertEqual(coverage["ranked_higher"], 1)
-
-    def test_coherent_foreground_lowers_rank_but_keeps_review_finding(self):
-        with tempfile.TemporaryDirectory() as directory:
-            image = Path(directory) / "frame.png"
-            image.write_bytes(b"fixture")
-            scan = self._make_scan([self._record(str(image), i) for i in range(6)])
-            scan.base_directory = directory
-            scan._scan_visual_class_verify_override = True
-            scan._scan_foreground_verify_override = True
-            with mock.patch(
-                "darkfusion_review_similarity.ReviewEmbeddingMatcher",
-                FakeDinoMatcher,
-            ), mock.patch(
-                "darkfusion_class_semantics.ClassSemanticVerifier",
-                MidClassSemanticVerifier,
-            ), mock.patch(
-                "darkfusion_foreground_verifier.ForegroundBackgroundVerifier",
-                CoherentForegroundVerifier,
-            ):
-                scan._scan_visual_outliers()
-
-            self.assertEqual(len(scan.issues), 1)
-            issue = scan.issues[0]
-            self.assertEqual(issue["foreground_status"], "coherent_foreground")
-            self.assertLess(issue["foreground_adjustment"], 0.0)
-            self.assertLess(
-                issue["false_positive_priority"], issue["priority_before_foreground"]
-            )
-            coverage = scan.visual_outlier_scan["foreground_verification"]
-            self.assertEqual(coverage["cached_results"], 1)
-            self.assertEqual(coverage["ranked_lower"], 1)
-
-    def test_unavailable_sam3_keeps_dino_findings(self):
-        with tempfile.TemporaryDirectory() as directory:
-            image = Path(directory) / "frame.png"
-            image.write_bytes(b"fixture")
-            scan = self._make_scan([self._record(str(image), i) for i in range(6)])
-            scan._scan_foreground_verify_override = True
-            with mock.patch(
-                "darkfusion_review_similarity.ReviewEmbeddingMatcher",
-                FakeDinoMatcher,
-            ), mock.patch(
-                "darkfusion_foreground_verifier.ForegroundBackgroundVerifier",
-                UnavailableForegroundVerifier,
-            ):
-                scan._scan_visual_outliers()
-
-            self.assertEqual(len(scan.issues), 1)
-            self.assertTrue(UnavailableForegroundVerifier.instances[0].closed)
-            coverage = scan.visual_outlier_scan["foreground_verification"]
-            self.assertEqual(coverage["status"], "unavailable")
-            self.assertIn("checkpoint not found", coverage["error"])
 
     def test_reviewed_kept_annotation_is_a_trusted_dino_example(self):
         class SampledMatcher(FakeDinoMatcher):

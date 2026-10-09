@@ -34,7 +34,6 @@ REQUIRED_FILES = (
     "darkfusion_ollama_auto_setup.py",
     "darkfusion_review_feedback.py",
     "darkfusion_shape_verifier.py",
-    "darkfusion_foreground_verifier.py",
     "darkfusion_review_similarity.py",
     "darkfusion_review_settings.py",
     "darkfusion_translation.py",

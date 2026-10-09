@@ -9101,7 +9101,7 @@ class ScanAnnotations(QObject):
         self._scan_visual_outlier_threshold_override = None
         self._scan_visual_outlier_passes_override = None
         self._scan_visual_class_verify_override = None
-        self._scan_foreground_verify_override = None
+        self._scan_shape_verify_override = None
         self._scan_checks_override = None
         self._scan_context_active = False
         self._reset_scan_state()
@@ -9835,8 +9835,8 @@ class ScanAnnotations(QObject):
         semantic_verification_enabled = bool(
             getattr(self, "_scan_visual_class_verify_override", False)
         )
-        foreground_verification_enabled = bool(
-            getattr(self, "_scan_foreground_verify_override", False)
+        shape_verification_enabled = bool(
+            getattr(self, "_scan_shape_verify_override", False)
         )
         coverage = {
             "status": "running", "backend": "not_run", "device": "", "fallback_reason": "",
@@ -9858,20 +9858,6 @@ class ScanAnnotations(QObject):
                 "high_priority_findings": 0,
                 "moderate_priority_findings": 0,
                 "cached_results": 0,
-                "error": "",
-            },
-            "foreground_verification": {
-                "enabled": foreground_verification_enabled,
-                "status": "pending" if foreground_verification_enabled else "disabled",
-                "backend": "sam3" if foreground_verification_enabled else "not_run",
-                "device": "",
-                "candidates_checked": 0,
-                "cached_results": 0,
-                "coherent_foreground": 0,
-                "ambiguous_foreground": 0,
-                "weak_foreground_separation": 0,
-                "ranked_higher": 0,
-                "ranked_lower": 0,
                 "error": "",
             },
             "minimum_class_samples": self.VISUAL_OUTLIER_MIN_CLASS_SAMPLES,
@@ -10371,7 +10357,7 @@ class ScanAnnotations(QObject):
         # Shape-based class verification using SAM3 masks
         shape_results = [None] * len(pending_candidates)
         shape_coverage = {
-            "enabled": True,
+            "enabled": shape_verification_enabled,
             "status": "pending",
             "backend": "sam3",
             "device": "",
@@ -10381,7 +10367,7 @@ class ScanAnnotations(QObject):
             "error": "",
         }
         
-        if pending_candidates:
+        if shape_verification_enabled and pending_candidates:
             try:
                 if self.parent.ensure_sam_model_loaded():
                     profiler = ShapeProfiler()
@@ -10530,8 +10516,10 @@ class ScanAnnotations(QObject):
                 shape_coverage["status"] = "error"
                 shape_coverage["error"] = str(error)[:1000]
                 logger.warning("Shape-based verification encountered error: %s", error)
-        else:
+        elif shape_verification_enabled:
             shape_coverage["status"] = "no_candidates"
+        else:
+            shape_coverage["status"] = "disabled"
         
         coverage["shape_verification"] = shape_coverage
 
@@ -10785,7 +10773,6 @@ class ScanAnnotations(QObject):
                 f"{int(semantic.get('moderate_priority_findings', 0)):,} moderate "
                 "possible false positives."
             )
-        foreground = coverage.get("foreground_verification", {}) or {}
         shape = coverage.get("shape_verification", {}) or {}
         if shape.get("enabled"):
             text += (
@@ -11480,8 +11467,8 @@ class ScanAnnotations(QObject):
                 ("visual_class_verify_enabled", bool(
                     self._scan_visual_class_verify_override
                 )),
-                ("visual_foreground_verify_enabled", bool(
-                    self._scan_foreground_verify_override
+                ("visual_shape_verify_enabled", bool(
+                    self._scan_shape_verify_override
                 )),
                 ("visual_outlier_candidates", self.visual_outlier_candidates),
                 ("visual_outlier_scan", self.visual_outlier_scan),
@@ -11615,20 +11602,6 @@ class ScanAnnotations(QObject):
                     "This ranking combines DINOv3 visual outlier strength and class-name evidence; "
                     "inspect the highlighted annotation before changing it."
                 )
-            foreground_status = str(issue.get("foreground_status", "") or "")
-            if foreground_status:
-                try:
-                    coherence_text = (
-                        f"{float(issue.get('foreground_coherence')) * 100.0:.1f}%"
-                    )
-                except (TypeError, ValueError):
-                    coherence_text = "unavailable"
-                detail += (
-                    "\nSAM3 foreground check: "
-                    f"{foreground_status.replace('_', ' ')} "
-                    f"(coherence {coherence_text}). "
-                    "This changes review order only; it does not prove that the label is correct or wrong."
-                )
         review_issue = {
             "id": "health_" + hashlib.sha256(health_key.encode("utf-8")).hexdigest()[:24],
             "image_path": image_path,
@@ -11665,14 +11638,6 @@ class ScanAnnotations(QObject):
             "false_positive_strength": issue.get("false_positive_strength"),
             "semantic_mismatch": issue.get("semantic_mismatch"),
             "dino_anomaly": issue.get("dino_anomaly"),
-            "foreground_status": issue.get("foreground_status"),
-            "foreground_coherence": issue.get("foreground_coherence"),
-            "foreground_risk": issue.get("foreground_risk"),
-            "foreground_occupancy": issue.get("foreground_occupancy"),
-            "foreground_containment": issue.get("foreground_containment"),
-            "foreground_component_count": issue.get("foreground_component_count"),
-            "foreground_backend": issue.get("foreground_backend"),
-            "foreground_adjustment": issue.get("foreground_adjustment"),
         }
         review_issue["issue_key"] = hashlib.sha256(
             ("dataset_health|" + health_key).encode("utf-8")
@@ -12053,7 +12018,7 @@ class ScanAnnotations(QObject):
                 titles.append("Possible false positives (DINOv3)")
                 if visual_class_verify_check.isChecked():
                     titles.append("Class verification (SigLIP 2)")
-                if visual_foreground_verify_check.isChecked():
+                if visual_shape_verify_check.isChecked():
                     titles.append("Shape verification (SAM3 + LLM)")
             return titles
 
@@ -12123,18 +12088,21 @@ class ScanAnnotations(QObject):
             "are removed from the queue. HUD, icons, nameplates, shadows, effects, and teammate "
             "markers remain reviewable. The model downloads once; unchanged results are cached."
         )
-        visual_foreground_verify_check = QtWidgets.QCheckBox(
+        visual_shape_verify_check = QtWidgets.QCheckBox(
             "Verify with SAM3 shape profile (4-layer: DINOv3 → SigLIP2 → SAM3 → LLM)", tools_group
         )
-        visual_foreground_verify_check.setObjectName(
-            "datasetAnalysisForegroundVerify"
+        visual_shape_verify_check.setObjectName(
+            "datasetAnalysisShapeVerify"
         )
-        visual_foreground_verify_check.setChecked(
+        visual_shape_verify_check.setChecked(
             str(
-                health_settings.value("visual_foreground_verify_enabled", "true")
+                health_settings.value(
+                    "visual_shape_verify_enabled",
+                    health_settings.value("visual_foreground_verify_enabled", "true"),
+                )
             ).lower() in ("1", "true", "yes")
         )
-        visual_foreground_verify_check.setToolTip(
+        visual_shape_verify_check.setToolTip(
             "Layer 1: DINOv3 finds visual outliers. "
             "Layer 2: SigLIP 2 checks if labeled class matches the object. "
             "Layer 3: SAM3 generates masks and verifies shape matches class profile. "
@@ -12144,7 +12112,7 @@ class ScanAnnotations(QObject):
         for checkbox in (
             sam_verify_check,
             visual_class_verify_check,
-            visual_foreground_verify_check,
+            visual_shape_verify_check,
         ):
             checkbox.setProperty(
                 "darkfusionReadyFocusPolicy", int(checkbox.focusPolicy())
@@ -12182,7 +12150,7 @@ class ScanAnnotations(QObject):
         deep_pass_note.setStyleSheet("color: #9aa4af;")
         tools_layout.addWidget(deep_pass_note, 3, 2, 1, 3)
         tools_layout.addWidget(visual_class_verify_check, 4, 0, 1, 5)
-        tools_layout.addWidget(visual_foreground_verify_check, 5, 0, 1, 5)
+        tools_layout.addWidget(visual_shape_verify_check, 5, 0, 1, 5)
         
         ollama_install_check = QtWidgets.QCheckBox("Auto-install Ollama for LLM verification (4th layer)", tools_group)
         ollama_install_check.setObjectName("datasetAnalysisOllamaInstall")
@@ -12590,7 +12558,7 @@ class ScanAnnotations(QObject):
             visual_outlier_threshold.setEnabled(bool(enabled) and not dialog._scan_running)
             visual_outlier_passes.setEnabled(bool(enabled) and not dialog._scan_running)
             visual_class_verify_check.setEnabled(bool(enabled) and not dialog._scan_running)
-            visual_foreground_verify_check.setEnabled(
+            visual_shape_verify_check.setEnabled(
                 bool(enabled) and not dialog._scan_running
             )
             visual_outlier_note.setText(
@@ -12633,8 +12601,8 @@ class ScanAnnotations(QObject):
                 bool(visual_class_verify_check.isChecked()),
             )
             health_settings.setValue(
-                "visual_foreground_verify_enabled",
-                bool(visual_foreground_verify_check.isChecked()),
+                "visual_shape_verify_enabled",
+                bool(visual_shape_verify_check.isChecked()),
             )
             
             # Auto-install Ollama if checkbox enabled
@@ -12818,12 +12786,12 @@ class ScanAnnotations(QObject):
         visual_class_verify_check.toggled.connect(
             lambda _checked: show_selected_checks()
         )
-        visual_foreground_verify_check.toggled.connect(
+        visual_shape_verify_check.toggled.connect(
             lambda checked: health_settings.setValue(
-                "visual_foreground_verify_enabled", bool(checked)
+                "visual_shape_verify_enabled", bool(checked)
             )
         )
-        visual_foreground_verify_check.toggled.connect(
+        visual_shape_verify_check.toggled.connect(
             lambda _checked: show_selected_checks()
         )
         refresh_scan_btn.clicked.connect(refresh_full_scan)
@@ -12857,7 +12825,7 @@ class ScanAnnotations(QObject):
             for checkbox in (
                 sam_verify_check,
                 visual_class_verify_check,
-                visual_foreground_verify_check,
+                visual_shape_verify_check,
             ):
                 checkbox.setAttribute(Qt.WA_TransparentForMouseEvents, bool(running))
                 checkbox.setFocusPolicy(
@@ -12876,7 +12844,7 @@ class ScanAnnotations(QObject):
             visual_outlier_threshold.setEnabled(visual_outliers_check.isChecked() and not running)
             visual_outlier_passes.setEnabled(visual_outliers_check.isChecked() and not running)
             visual_class_verify_check.setEnabled(visual_outliers_check.isChecked())
-            visual_foreground_verify_check.setEnabled(
+            visual_shape_verify_check.setEnabled(
                 visual_outliers_check.isChecked()
             )
             if running:
@@ -13097,8 +13065,11 @@ class ScanAnnotations(QObject):
         visual_class_verify_enabled = str(
             health_settings.value("visual_class_verify_enabled", "true")
         ).lower() in ("1", "true", "yes")
-        visual_foreground_verify_enabled = str(
-            health_settings.value("visual_foreground_verify_enabled", "true")
+        visual_shape_verify_enabled = str(
+            health_settings.value(
+                "visual_shape_verify_enabled",
+                health_settings.value("visual_foreground_verify_enabled", "true"),
+            )
         ).lower() in ("1", "true", "yes")
         needs_annotations = any(checks[key] for key in (
             "label_checks", "duplicate_checks", "tiny_checks", "statistics",
@@ -13172,7 +13143,7 @@ class ScanAnnotations(QObject):
             ),
             "visual_outlier_passes": max(1, min(100, visual_outlier_passes)),
             "visual_class_verify_enabled": visual_class_verify_enabled,
-            "visual_foreground_verify_enabled": visual_foreground_verify_enabled,
+            "visual_shape_verify_enabled": visual_shape_verify_enabled,
         }
 
         worker = DatasetAnalysisWorker(
@@ -13227,8 +13198,8 @@ class ScanAnnotations(QObject):
         self._scan_visual_class_verify_override = bool(
             scan_context.get("visual_class_verify_enabled", True)
         )
-        self._scan_foreground_verify_override = bool(
-            scan_context.get("visual_foreground_verify_enabled", False)
+        self._scan_shape_verify_override = bool(
+            scan_context.get("visual_shape_verify_enabled", True)
         )
         self._scan_checks_override = dict(scan_context.get("checks", {}) or {})
         self._scan_quality_thresholds = dict(QUALITY_DEFAULTS, **(scan_context.get("quality_thresholds") or {}))
@@ -22797,6 +22768,51 @@ class ROIEdgeSliders(QtCore.QObject):
         return super().eventFilter(watched, event)
 
 
+class ThemeHeaderBackdrop(QtWidgets.QWidget):
+    """Paint a theme panorama as a cropped, readable header backdrop."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._pixmap = QPixmap()
+        self._focal_y = 0.5
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setProperty("dfHeaderPanel", True)
+        if parent is not None:
+            parent.installEventFilter(self)
+            self.setGeometry(parent.rect())
+
+    def eventFilter(self, watched, event):
+        if watched is self.parentWidget() and event.type() in (QEvent.Resize, QEvent.Show):
+            self.setGeometry(watched.rect())
+        return super().eventFilter(watched, event)
+
+    def set_header(self, path="", focal_y=0.5):
+        pixmap = QPixmap(str(path or ""))
+        self._pixmap = pixmap if not pixmap.isNull() else QPixmap()
+        try:
+            self._focal_y = max(0.0, min(1.0, float(focal_y)))
+        except (TypeError, ValueError):
+            self._focal_y = 0.5
+        self.setVisible(not self._pixmap.isNull())
+        self.update()
+
+    def paintEvent(self, _event):
+        if self._pixmap.isNull() or self.width() <= 0 or self.height() <= 0:
+            return
+        pixmap_width = self._pixmap.width()
+        pixmap_height = self._pixmap.height()
+        scale = max(self.width() / pixmap_width, self.height() / pixmap_height)
+        source_width = min(pixmap_width, max(1, round(self.width() / scale)))
+        source_height = min(pixmap_height, max(1, round(self.height() / scale)))
+        source_x = max(0, (pixmap_width - source_width) // 2)
+        focal_center = round(self._focal_y * pixmap_height)
+        source_y = max(0, min(pixmap_height - source_height, focal_center - source_height // 2))
+        painter = QPainter(self)
+        painter.drawPixmap(self.rect(), self._pixmap, QRect(source_x, source_y, source_width, source_height))
+        # Keep labels and controls readable without losing the themed scenery.
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 112))
+
+
 class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
     MAX_SIZE=200
     keyboard_interrupt_signal = pyqtSignal()
@@ -22821,6 +22837,54 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         self.language_dropdown = dropdown
         return dropdown
+
+    def _theme_manifest_for_style(self, selected_style=None):
+        """Resolve a selected QSS name to its colocated artwork manifest."""
+        combo = getattr(self, "styleComboBox", None)
+        candidate_style = selected_style
+        if not candidate_style and combo is not None:
+            candidate_style = combo.currentText()
+        style_name = str(candidate_style or "").strip()
+        if not style_name:
+            return None
+        assets_root = Path(APP_DIR) / "styles" / "df-assets"
+        if not assets_root.is_dir():
+            return None
+        for manifest_path in assets_root.glob("*/theme.json"):
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                continue
+            if str(manifest.get("styleName", "")).strip() == style_name:
+                manifest["_directory"] = str(manifest_path.parent)
+                return manifest
+        return None
+
+    def _install_theme_header_backdrop(self):
+        host = getattr(self, "dockWidgetContents_3", None)
+        if not isinstance(host, QtWidgets.QWidget):
+            return
+        backdrop = getattr(self, "_theme_header_backdrop", None)
+        if not isinstance(backdrop, ThemeHeaderBackdrop):
+            backdrop = ThemeHeaderBackdrop(host)
+            backdrop.setObjectName("themeHeaderBackdrop")
+            self._theme_header_backdrop = backdrop
+        backdrop.setGeometry(host.rect())
+        backdrop.lower()
+
+    def _apply_theme_header_art(self, manifest=None):
+        self._install_theme_header_backdrop()
+        backdrop = getattr(self, "_theme_header_backdrop", None)
+        if not isinstance(backdrop, ThemeHeaderBackdrop):
+            return
+        manifest = manifest if isinstance(manifest, dict) else self._theme_manifest_for_style()
+        if not manifest:
+            backdrop.set_header()
+            return
+        header_name = str(manifest.get("header", "")).strip()
+        header_path = Path(manifest.get("_directory", "")) / header_name
+        backdrop.set_header(header_path, manifest.get("headerFocalY", 0.5))
+        backdrop.lower()
 
     def recommended_ui_scale_percent(self, screen=None):
         """Return an extra app scale based on Qt's available logical pixels."""
@@ -26937,6 +27001,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
     def __init__(self):
         super().__init__()
         self.setupUi(self)
+        self._install_theme_header_backdrop()
         self._apply_global_line_spacing()
         self._clean_restored_ui()
         self.video_playback_fps_limit = 240
@@ -61736,18 +61801,27 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
     def update_gif_to_match_theme(self):
         selected_style = self.styleComboBox.currentText()
-        gif_directory = "styles/gifs"
-        if selected_style == "Default":
-            selected_style = "darkfusion.gif"
-
-        # Automatically look for a GIF with the same name as the stylesheet
-        style_base_name = os.path.splitext(selected_style)[0]  # Remove extension from style file
-        corresponding_gif = f"{style_base_name}.gif"
-
-        gif_path = os.path.join(gif_directory, corresponding_gif)
+        manifest = self._theme_manifest_for_style(selected_style)
+        self._apply_theme_header_art(manifest)
+        corresponding_gif = ""
+        gif_path = ""
+        if manifest:
+            corresponding_gif = str(manifest.get("gif", "")).strip()
+            candidate = Path(manifest.get("_directory", "")) / corresponding_gif
+            if candidate.is_file():
+                gif_path = str(candidate)
+        if not gif_path:
+            gif_directory = "styles/gifs"
+            style_base_name = os.path.splitext(
+                "darkfusion.gif" if selected_style == "Default" else selected_style
+            )[0]
+            corresponding_gif = f"{style_base_name}.gif"
+            gif_path = os.path.join(gif_directory, corresponding_gif)
         if os.path.exists(gif_path):
             if hasattr(self, "gif_change"):
-                gif_index = self.gif_change.findText(corresponding_gif)
+                gif_index = self.gif_change.findData(gif_path)
+                if gif_index < 0:
+                    gif_index = self.gif_change.findText(corresponding_gif)
                 if gif_index >= 0:
                     self.gif_change.blockSignals(True)
                     self.gif_change.setCurrentIndex(gif_index)
@@ -67023,9 +67097,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 "class_semantic_backend": issue.get("class_semantic_backend"),
                 "false_positive_priority": issue.get("false_positive_priority"),
                 "false_positive_strength": issue.get("false_positive_strength"),
-                "foreground_status": issue.get("foreground_status"),
-                "foreground_coherence": issue.get("foreground_coherence"),
-                "foreground_risk": issue.get("foreground_risk"),
                 "updated_at": datetime.now().isoformat(timespec="seconds"),
             }
             os.makedirs(os.path.dirname(history_path), exist_ok=True)

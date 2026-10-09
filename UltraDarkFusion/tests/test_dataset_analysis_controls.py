@@ -135,7 +135,7 @@ class DatasetAnalysisControlsTests(unittest.TestCase):
         self.control("datasetAnalysisOutlierThreshold").setValue(.70)
         self.control("datasetAnalysisOutlierPasses").setValue(12)
         self.control("datasetAnalysisClassSemanticVerify").setChecked(False)
-        self.control("datasetAnalysisForegroundVerify").setChecked(False)
+        self.control("datasetAnalysisShapeVerify").setChecked(False)
         self.control("datasetAnalysisSamVerify").setChecked(True)
         self.control("datasetQuality_blur").setValue(135.0)
         self.qt.processEvents()
@@ -147,7 +147,7 @@ class DatasetAnalysisControlsTests(unittest.TestCase):
         self.assertAlmostEqual(float(self.settings.value("visual_outlier_threshold")), .70)
         self.assertEqual(int(self.settings.value("visual_outlier_passes")), 12)
         self.assertFalse(self.settings.value("visual_class_verify_enabled", True, type=bool))
-        self.assertFalse(self.settings.value("visual_foreground_verify_enabled", True, type=bool))
+        self.assertFalse(self.settings.value("visual_shape_verify_enabled", True, type=bool))
         self.assertTrue(self.settings.value("sam_duplicate_verify", False, type=bool))
         self.assertAlmostEqual(float(self.settings.value("quality_blur")), 135.0)
 
@@ -222,7 +222,7 @@ class DatasetAnalysisControlsTests(unittest.TestCase):
         self.control("datasetAnalysisOutlierThreshold").setValue(.65)
         self.control("datasetAnalysisOutlierPasses").setValue(9)
         self.control("datasetAnalysisClassSemanticVerify").setChecked(True)
-        self.control("datasetAnalysisForegroundVerify").setChecked(True)
+        self.control("datasetAnalysisShapeVerify").setChecked(True)
         started, release = threading.Event(), threading.Event()
         original = self.scanner._run_scan_background
         snapshots = []
@@ -244,9 +244,9 @@ class DatasetAnalysisControlsTests(unittest.TestCase):
                 )
             )
             self.assertTrue(self.control("datasetScan_file_checks").isChecked())
-            self.assertTrue(self.control("datasetAnalysisForegroundVerify").isEnabled())
+            self.assertTrue(self.control("datasetAnalysisShapeVerify").isEnabled())
             self.assertTrue(
-                self.control("datasetAnalysisForegroundVerify").testAttribute(
+                self.control("datasetAnalysisShapeVerify").testAttribute(
                     app.Qt.WA_TransparentForMouseEvents
                 )
             )
@@ -256,7 +256,7 @@ class DatasetAnalysisControlsTests(unittest.TestCase):
             self.assertIn("Missing/empty labels", active_checks.text())
             self.assertIn("Possible false positives (DINOv3)", active_checks.text())
             self.assertIn("Class verification (SigLIP 2)", active_checks.text())
-            self.assertIn("Foreground verification (SAM3)", active_checks.text())
+            self.assertIn("Shape verification (SAM3 + LLM)", active_checks.text())
             self.assertNotIn("Duplicate labels", active_checks.text())
             self.control("datasetAnalysisTabs").setCurrentIndex(1)
             self.assertTrue(active_checks.isVisible())
@@ -272,7 +272,7 @@ class DatasetAnalysisControlsTests(unittest.TestCase):
         self.assertEqual(snapshots[0]["visual_outlier_threshold"], .65)
         self.assertEqual(snapshots[0]["visual_outlier_passes"], 9)
         self.assertTrue(snapshots[0]["visual_class_verify_enabled"])
-        self.assertTrue(snapshots[0]["visual_foreground_verify_enabled"])
+        self.assertTrue(snapshots[0]["visual_shape_verify_enabled"])
         self.assertFalse(snapshots[0]["checks"]["duplicate_checks"])
         visual.assert_called_once()
         self.assertIs(self.scanner.health_report_dialog, dialog)
@@ -302,10 +302,10 @@ class DatasetAnalysisControlsTests(unittest.TestCase):
             self.control("datasetAnalysisClassSemanticVerify").isChecked()
         )
         self.assertTrue(
-            self.control("datasetAnalysisForegroundVerify").isChecked()
+            self.control("datasetAnalysisShapeVerify").isChecked()
         )
         self.assertFalse(
-            self.control("datasetAnalysisForegroundVerify").testAttribute(
+            self.control("datasetAnalysisShapeVerify").testAttribute(
                 app.Qt.WA_TransparentForMouseEvents
             )
         )

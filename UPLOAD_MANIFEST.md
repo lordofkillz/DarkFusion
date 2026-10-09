@@ -48,7 +48,6 @@ UltraDarkFusion v5.2.1 repository.
 - `UltraDarkFusion/darkfusion_ollama_auto_setup.py`
 - `UltraDarkFusion/darkfusion_review_feedback.py`
 - `UltraDarkFusion/darkfusion_shape_verifier.py`
-- `UltraDarkFusion/darkfusion_foreground_verifier.py`
 - `UltraDarkFusion/darkfusion_system_metrics.py`
 - `UltraDarkFusion/darkfusion_training_size.py`
 - `UltraDarkFusion/darkfusion_tune_monitor.py`
