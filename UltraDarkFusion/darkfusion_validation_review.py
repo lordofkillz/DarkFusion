@@ -172,37 +172,49 @@ def object_iou(first, second, task):
     return bbox_iou(first.get("bbox", [0, 0, 0, 0]), second.get("bbox", [0, 0, 0, 0]))
 
 
-def parse_ground_truth(image_path, task, class_names):
+def read_ground_truth(image_path, task, class_names):
+    """Read annotations and preserve why an image has no usable ground truth."""
     if task == "classify":
         folder_name = Path(image_path).parent.name
-        try:
-            class_id = class_names.index(folder_name)
-        except ValueError:
-            class_id = -1
-        return [{"class_id": class_id, "class_name": folder_name}]
+        class_id = class_names.index(folder_name) if folder_name in class_names else -1
+        return [{"class_id": class_id, "class_name": folder_name}], {"state": "classification", "invalid_lines": 0}
 
     label_path = label_path_for_image(image_path)
+    try:
+        with open(label_path, "r", encoding="utf-8", errors="strict") as handle:
+            lines = handle.readlines()
+    except FileNotFoundError:
+        return [], {"state": "missing", "invalid_lines": 0}
+    except (OSError, UnicodeError):
+        return [], {"state": "unreadable", "invalid_lines": 0}
     objects = []
-    if not os.path.isfile(label_path):
-        return objects
-    with open(label_path, "r", encoding="utf-8", errors="ignore") as handle:
-        for line_index, line in enumerate(handle):
-            parts = line.strip().split()
-            if len(parts) < 2:
-                continue
-            try:
-                class_id = int(float(parts[0]))
-                values = [float(value) for value in parts[1:]]
-            except Exception:
-                continue
+    invalid_lines = 0
+    for line_index, line in enumerate(lines):
+        parts = line.strip().split()
+        if not parts:
+            continue
+        try:
+            class_value = float(parts[0])
+            if not math.isfinite(class_value) or not class_value.is_integer() or class_value < 0:
+                raise ValueError("Invalid class")
+            class_id = int(class_value)
+            values = [float(value) for value in parts[1:]]
+            if not all(math.isfinite(value) for value in values):
+                raise ValueError("Non-finite coordinates")
+            if class_names and class_id >= len(class_names):
+                raise ValueError("Class outside dataset names")
             item = {
                 "class_id": class_id,
-                "class_name": class_names[class_id] if 0 <= class_id < len(class_names) else str(class_id),
+                "class_name": class_names[class_id] if class_id < len(class_names) else str(class_id),
                 "label_line": line_index,
             }
             if task in {"detect", "pose"} and len(values) >= 4:
+                if values[2] <= 0 or values[3] <= 0:
+                    raise ValueError("Empty box")
                 item["bbox"] = xywh_to_xyxy(values[:4])
-                if task == "pose" and len(values) > 4:
+                if task == "pose":
+                    if len(values) <= 4 or ((len(values) - 4) % 3 and (len(values) - 4) % 2):
+                        raise ValueError("Invalid keypoints")
                     stride = 3 if (len(values) - 4) % 3 == 0 else 2
                     item["keypoints"] = [
                         [clamp01(values[index]), clamp01(values[index + 1]), values[index + 2] if stride == 3 else 1.0]
@@ -211,13 +223,21 @@ def parse_ground_truth(image_path, task, class_names):
             elif task == "segment" and len(values) >= 6 and len(values) % 2 == 0:
                 item["points"] = [[clamp01(values[index]), clamp01(values[index + 1])] for index in range(0, len(values), 2)]
                 item["bbox"] = bbox_from_points(item["points"])
-            elif task == "obb" and len(values) >= 8:
+            elif task == "obb" and len(values) == 8:
                 item["points"] = [[clamp01(values[index]), clamp01(values[index + 1])] for index in range(0, 8, 2)]
                 item["bbox"] = bbox_from_points(item["points"])
             else:
-                continue
+                raise ValueError("Wrong annotation shape")
             objects.append(item)
-    return objects
+        except (ValueError, OverflowError, IndexError):
+            invalid_lines += 1
+    state = "partial" if objects and invalid_lines else "annotated" if objects else "invalid" if invalid_lines else "empty"
+    return objects, {"state": state, "invalid_lines": invalid_lines}
+
+
+def parse_ground_truth(image_path, task, class_names):
+    """Compatibility API for overlays and existing callers needing only objects."""
+    return read_ground_truth(image_path, task, class_names)[0]
 
 
 def tensor_list(value):
@@ -380,7 +400,7 @@ def make_issue(image_path, label_path, task, issue_type, gt=None, pred=None, ove
     return issue
 
 
-def compare_image(image_path, task, class_names, ground_truth, predictions, match_iou, good_iou):
+def compare_image(image_path, task, class_names, ground_truth, predictions, match_iou, good_iou, label_info=None):
     label_path = label_path_for_image(image_path)
     if task == "classify":
         gt = ground_truth[0] if ground_truth else None
@@ -392,6 +412,16 @@ def compare_image(image_path, task, class_names, ground_truth, predictions, matc
             detail=f"Expected {gt.get('class_name') if gt else 'unknown'}, predicted {pred.get('class_name') if pred else 'none'}.",
         )]
 
+    if label_info is None:
+        _objects, label_info = read_ground_truth(image_path, task, class_names)
+    label_state = label_info.get("state", "unknown")
+    uncertain_labels = label_state in {"missing", "unreadable", "invalid", "partial", "unknown"}
+    label_problem = {
+        "missing": ("missing_label_file", "No label file exists. This image has not been confirmed as background."),
+        "unreadable": ("unreadable_label_file", "The label file could not be read. Its contents were not treated as an empty background label."),
+        "invalid": ("invalid_label_file", "The label file contains no usable annotations. Correct its annotation format before judging model detections."),
+        "partial": ("invalid_label_file", f"{label_info.get('invalid_lines', 0)} annotation line(s) could not be parsed. Unmatched predictions need label review."),
+    }.get(label_state)
     unmatched_gt = set(range(len(ground_truth)))
     unmatched_pred = set(range(len(predictions)))
     matches = []
@@ -408,6 +438,11 @@ def compare_image(image_path, task, class_names, ground_truth, predictions, matc
         matches.append((gt_index, pred_index, overlap))
 
     issues = []
+    if label_problem:
+        issue_type, detail = label_problem
+        problem = make_issue(image_path, label_path, task, issue_type, detail=detail)
+        problem["severity"] = 1.0
+        issues.append(problem)
     # Pair spatially matching, differently classified leftovers as one class error.
     wrong_class_candidates = []
     for gt_index in unmatched_gt:
@@ -466,7 +501,8 @@ def compare_image(image_path, task, class_names, ground_truth, predictions, matc
         issue_type = (
             "duplicate_prediction"
             if duplicate
-            else "hard_negative" if not ground_truth else "false_positive"
+            else "unverified_prediction" if uncertain_labels
+            else "hard_negative" if label_state == "empty" and not ground_truth else "false_positive"
         )
         issues.append(make_issue(
             image_path,
@@ -479,11 +515,16 @@ def compare_image(image_path, task, class_names, ground_truth, predictions, matc
             detail=(
                 "Prediction duplicates an already matched object."
                 if duplicate
-                else "The model detected an object on an intentionally blank image. Keep the image blank to train this mistake as background."
-                if not ground_truth
-                else "Prediction was not matched to ground truth."
+                else "The model predicted an object, but the saved labels are missing or unusable. Check whether this is a real object before accepting the prediction or treating it as background."
+                if uncertain_labels
+                else "The model detected an object on an image with an empty label file. Confirm that it is background, or add the missing object label."
+                if label_state == "empty" and not ground_truth
+                else "Prediction was not matched to ground truth. Check for a missing annotation before deciding the prediction is false."
             ),
         ))
+    for issue in issues:
+        issue["label_state"] = label_state
+        issue["invalid_label_lines"] = int(label_info.get("invalid_lines", 0))
     return issues
 
 
@@ -573,7 +614,8 @@ def main():
 
     started = time.time()
     report = {
-        "version": 2,
+        "version": 3,
+        "label_state_counts": {},
         "status": "running",
         "source": "model_validation",
         "source_title": "Model Validation",
@@ -631,7 +673,9 @@ def main():
             # real dataset path instead of writing an unusable temporary name to
             # the validation review report.
             image_path = normalized(chunk[result_index]) if result_index < len(chunk) else normalized(result.path)
-            ground_truth = parse_ground_truth(image_path, args.task, class_names)
+            ground_truth, label_info = read_ground_truth(image_path, args.task, class_names)
+            state = label_info["state"]
+            report["label_state_counts"][state] = report["label_state_counts"].get(state, 0) + 1
             predictions = predictions_from_result(result, args.task, class_names)
             issues = compare_image(
                 image_path,
@@ -641,6 +685,7 @@ def main():
                 predictions,
                 max(0.0, min(1.0, args.match_iou)),
                 max(0.0, min(1.0, args.good_iou)),
+                label_info=label_info,
             )
             for issue in issues:
                 issue["source"] = "model_validation"

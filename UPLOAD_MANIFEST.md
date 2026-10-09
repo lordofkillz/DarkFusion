@@ -42,12 +42,22 @@ UltraDarkFusion v5.2.1 repository.
 - `UltraDarkFusion/darkfusion_teammate_review.py`
 - `UltraDarkFusion/darkfusion_onnx_runtime.py`
 - `UltraDarkFusion/darkfusion_negative_crops.py`
+- `UltraDarkFusion/darkfusion_dataset_statistics.py`
+- `UltraDarkFusion/darkfusion_class_semantics.py`
+- `UltraDarkFusion/darkfusion_borderline_llm_verifier.py`
+- `UltraDarkFusion/darkfusion_ollama_auto_setup.py`
+- `UltraDarkFusion/darkfusion_review_feedback.py`
+- `UltraDarkFusion/darkfusion_shape_verifier.py`
+- `UltraDarkFusion/darkfusion_foreground_verifier.py`
 - `UltraDarkFusion/darkfusion_system_metrics.py`
+- `UltraDarkFusion/darkfusion_training_size.py`
+- `UltraDarkFusion/darkfusion_tune_monitor.py`
+- `UltraDarkFusion/darkfusion_tune_settings.py`
+- `UltraDarkFusion/darkfusion_verified_images.py`
 - `UltraDarkFusion/training_eta.py`
 - `UltraDarkFusion/tools/ui/generate_ui_py.ps1`
 - `UltraDarkFusion/tools/model_inspection/inspect_model_skeleton.py`
 - `UltraDarkFusion/botsort.yaml`
-- `UltraDarkFusion/zlibwapi.dll` (legacy Darknet runtime support)
 
 - `UltraDarkFusion/darkfusion_dinov3/` (inference code, license, downloader)
 - `UltraDarkFusion/darkfusion_review_settings.py`

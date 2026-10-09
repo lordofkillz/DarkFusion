@@ -1515,7 +1515,7 @@ class Ui_mainWindow(object):
 "    width: 7px;\n"
 "    height: 7px;\n"
 "}")
-        self.box_size.setMinimum(6)
+        self.box_size.setMinimum(1)
         self.box_size.setMaximum(200)
         self.box_size.setObjectName("box_size")
         self.gridLayout_39.addWidget(self.box_size, 12, 1, 1, 1)
@@ -10355,7 +10355,7 @@ class Ui_mainWindow(object):
         self.crosshair_color.setShortcut(_translate("mainWindow", "F12"))
         self.auto_label.setText(_translate("mainWindow", "Label Current Image"))
         self.auto_label_yolo_button.setText(_translate("mainWindow", "Auto Label"))
-        self.auto_label_yolo_button.setToolTip(_translate("mainWindow", "Open weights, DINO/YOLO-World, and SAHI auto-label settings."))
+        self.auto_label_yolo_button.setToolTip(_translate("mainWindow", "Open weights, DINO/YOLOE, and SAHI auto-label settings."))
         self.dino_label.setText(_translate("mainWindow", "Grounding DINO"))
         self.dino_label.setToolTip(_translate("mainWindow", "Run automatic labeling with Grounding DINO."))
         self.super_resolution_Checkbox.setText(_translate("mainWindow", "Enhance Image"))

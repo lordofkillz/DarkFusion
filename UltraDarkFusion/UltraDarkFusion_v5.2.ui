@@ -2426,7 +2426,7 @@ QDoubleSpinBox::down-arrow, QSpinBox::down-arrow, QDateTimeEdit::down-arrow {
 }</string>
                          </property>
                          <property name="minimum">
-                          <number>4</number>
+                          <number>1</number>
                          </property>
                          <property name="maximum">
                           <number>200</number>
@@ -14826,7 +14826,7 @@ QPushButton:pressed {
     <string>Auto Label</string>
    </property>
    <property name="toolTip">
-    <string>Open weights, DINO/YOLO-World, and SAHI auto-label settings.</string>
+    <string>Open weights, DINO/YOLOE, and SAHI auto-label settings.</string>
    </property>
   </action>
   <action name="dino_label">

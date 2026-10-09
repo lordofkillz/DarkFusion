@@ -1,0 +1,69 @@
+/* DarkFusion / Fusion Core. Separate, scalable assets. Generated from themes.json. */
+QWidget {background-color:#0A1118;color:#E7F2F6;font-family:"Segoe UI";font-size:10pt;selection-background-color:#245D6B;selection-color:#E7F2F6;}
+QMainWindow,QDialog {background-color:#0A1118;}
+QLabel,QCheckBox,QRadioButton {background:transparent;border:none;}
+QFrame {border:none;}
+QMenuBar,QMenu,QToolBar,QStatusBar {background:#111D29;color:#E7F2F6;border:1px solid #345567;}
+QMenuBar::item {background:transparent;padding:5px 9px;}
+QMenuBar::item:selected,QMenu::item:selected {background:#234558;color:#55DCEB;}
+QMenu::item {padding:6px 26px 6px 22px;}
+QMenu::separator {height:1px;background:#345567;margin:4px 12px;}
+QDockWidget {color:#E7F2F6;titlebar-close-icon:url(styles/df-assets/fusion-core/icons/close.svg);}
+QDockWidget::title {background:#111D29;color:#55DCEB;padding:5px 9px;border-bottom:1px solid #345567;font-weight:600;}
+QGroupBox {background:#111D29;border:1px solid #345567;border-radius:6px;margin-top:12px;padding:12px 8px 8px;}
+QGroupBox::title {subcontrol-origin:margin;subcontrol-position:top left;left:12px;padding:0px 5px;color:#55DCEB;background:#0A1118;}
+QPushButton,QToolButton {background:qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 #182C3A,stop:1 #111D29);border:1px solid #345567;border-radius:4px;color:#E7F2F6;padding:4px 8px;}
+QPushButton:hover,QToolButton:hover {background:#234558;border-color:#55DCEB;}
+QPushButton:pressed,QToolButton:pressed,QPushButton:checked,QToolButton:checked {background:#245D6B;border-color:#55DCEB;color:#E7F2F6;}
+QPushButton:focus,QToolButton:focus {border:1px solid #55DCEB;background:#234558;}
+QPushButton:disabled,QToolButton:disabled {background:#0A1118;color:#92ADB9;border-color:#111D29;}
+QPushButton#extract_button,QPushButton#download_video,QPushButton#video_upload {border-color:#55DCEB;font-weight:600;}
+QLineEdit,QTextEdit,QPlainTextEdit,QSpinBox,QDoubleSpinBox,QComboBox {background:#0A1118;color:#E7F2F6;border:1px solid #345567;border-radius:4px;padding:4px 6px;}
+QLineEdit:focus,QTextEdit:focus,QPlainTextEdit:focus,QSpinBox:focus,QDoubleSpinBox:focus,QComboBox:focus {border-color:#55DCEB;}
+QComboBox::drop-down {width:20px;border:none;}
+QComboBox::down-arrow {image:url(styles/df-assets/fusion-core/icons/chevron-down.svg);width:12px;height:12px;}
+QSpinBox::up-arrow,QDoubleSpinBox::up-arrow {image:url(styles/df-assets/fusion-core/icons/chevron-up.svg);width:9px;height:9px;}
+QSpinBox::down-arrow,QDoubleSpinBox::down-arrow {image:url(styles/df-assets/fusion-core/icons/chevron-down.svg);width:9px;height:9px;}
+QComboBox QAbstractItemView {background:#111D29;color:#E7F2F6;selection-background-color:#245D6B;border:1px solid #55DCEB;}
+QTabWidget::pane {border:1px solid #345567;background:#0A1118;}
+QTabBar::tab {background:#111D29;color:#92ADB9;border:1px solid #345567;padding:6px 9px;margin-right:2px;}
+QTabBar::tab:selected {background:#182C3A;color:#55DCEB;border-bottom:2px solid #55DCEB;}
+QTabBar::tab:hover {background:#234558;color:#E7F2F6;}
+QTableView,QTreeView,QListView,QTableWidget,QTreeWidget,QListWidget {background:#0A1118;alternate-background-color:#111D29;color:#E7F2F6;border:1px solid #345567;gridline-color:#345567;selection-background-color:#245D6B;selection-color:#E7F2F6;}
+QAbstractItemView::item:hover {background:#234558;}
+QAbstractItemView::item:selected {background:#245D6B;color:#E7F2F6;}
+QHeaderView::section {background:#182C3A;color:#E7F2F6;padding:5px;border:none;border-bottom:1px solid #345567;font-weight:600;}
+QTableCornerButton::section {background:#182C3A;border:1px solid #345567;}
+QProgressBar {background:#0A1118;border:1px solid #345567;border-radius:4px;text-align:center;color:#E7F2F6;min-height:12px;}
+QProgressBar::chunk {background:#245D6B;border-radius:3px;}
+QSlider::groove:horizontal {background:#182C3A;height:6px;border-radius:3px;}
+QSlider::sub-page:horizontal {background:#245D6B;border-radius:3px;}
+QSlider::handle:horizontal {background:#55DCEB;width:14px;margin:-4px 0;border-radius:7px;border:1px solid #E8BA65;}
+QScrollBar:vertical {background:#0A1118;width:10px;margin:0;}
+QScrollBar:horizontal {background:#0A1118;height:10px;margin:0;}
+QScrollBar::handle {background:#345567;border-radius:4px;min-width:20px;min-height:20px;}
+QScrollBar::handle:hover {background:#55DCEB;}
+QScrollBar::add-line,QScrollBar::sub-line {height:0;width:0;}
+QScrollBar::add-page,QScrollBar::sub-page {background:transparent;}
+QCheckBox::indicator,QGroupBox::indicator {width:14px;height:14px;border:1px solid #345567;border-radius:3px;background:#0A1118;}
+QCheckBox::indicator:checked,QGroupBox::indicator:checked {background:#245D6B;border-color:#55DCEB;image:url(styles/df-assets/fusion-core/icons/check.svg);}
+QCheckBox::indicator:hover {border-color:#55DCEB;}
+QRadioButton::indicator {width:14px;height:14px;border:1px solid #345567;border-radius:7px;background:#0A1118;}
+QRadioButton::indicator:checked {border:4px solid #55DCEB;background:#0A1118;}
+QToolTip {background:#182C3A;color:#E7F2F6;border:1px solid #55DCEB;padding:5px;}
+QSplitter::handle {background:#111D29;}
+QSplitter::handle:hover {background:#345567;}
+QLabel#image_label_2 {background:#0A1118;border:1px solid #345567;border-radius:6px;}
+QCheckBox#zoom_lock,QCheckBox#image_quality_checkbox,QCheckBox#outline_Checkbox,QCheckBox#rapid_del_checkbox,QCheckBox#auto_scan_checkbox,QCheckBox#voice_mode_checkbox {padding:4px 8px;background:#182C3A;border:1px solid #345567;border-radius:4px;}
+QCheckBox#zoom_lock:checked,QCheckBox#image_quality_checkbox:checked,QCheckBox#outline_Checkbox:checked,QCheckBox#rapid_del_checkbox:checked,QCheckBox#auto_scan_checkbox:checked,QCheckBox#voice_mode_checkbox:checked {background:#245D6B;border-color:#55DCEB;}
+QCheckBox#zoom_lock::indicator,QCheckBox#image_quality_checkbox::indicator,QCheckBox#outline_Checkbox::indicator,QCheckBox#rapid_del_checkbox::indicator,QCheckBox#auto_scan_checkbox::indicator,QCheckBox#voice_mode_checkbox::indicator {width:0;height:0;border:none;}
+QWidget#dockWidgetContents_3,QFrame#frame_27 {background:transparent;}
+QWidget[dfHeaderPanel="true"] {background:transparent;border:none;}
+QPushButton#video_upload,QPushButton#download_video,QPushButton#remove_video_button {border:8px solid transparent;border-image:url(styles/df-assets/fusion-core/buttons/background-normal.png) 16 16 16 16 stretch stretch;padding:0px 4px;}
+QPushButton#video_upload:hover,QPushButton#download_video:hover,QPushButton#remove_video_button:hover {border-image:url(styles/df-assets/fusion-core/buttons/background-hover.png) 16 16 16 16 stretch stretch;}
+QPushButton#video_upload:pressed,QPushButton#download_video:pressed,QPushButton#remove_video_button:pressed {border-image:url(styles/df-assets/fusion-core/buttons/background-pressed.png) 16 16 16 16 stretch stretch;}
+QPushButton#video_upload:disabled,QPushButton#download_video:disabled,QPushButton#remove_video_button:disabled {border-image:url(styles/df-assets/fusion-core/buttons/background-disabled.png) 16 16 16 16 stretch stretch;}
+QPushButton#video_upload:focus,QPushButton#download_video:focus,QPushButton#remove_video_button:focus {border-image:url(styles/df-assets/fusion-core/buttons/background-focus.png) 16 16 16 16 stretch stretch;}
+/* FULL-WIDTH TOP BARS v2 */
+QMenuBar {border-image:url(styles/df-assets/fusion-core/menu-bar.png) 0 0 0 0 stretch stretch;border-bottom:1px solid #345567;}
+QDockWidget::title {border-image:url(styles/df-assets/fusion-core/status-bar.png) 0 0 0 0 stretch stretch;}

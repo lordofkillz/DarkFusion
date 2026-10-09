@@ -1,0 +1,69 @@
+/* DarkFusion / Lord of the Rings. Separate, scalable assets. Generated from themes.json. */
+QWidget {background-color:#100E0A;color:#F6EDD8;font-family:"Segoe UI";font-size:10pt;selection-background-color:#6C4C23;selection-color:#F6EDD8;}
+QMainWindow,QDialog {background-color:#100E0A;}
+QLabel,QCheckBox,QRadioButton {background:transparent;border:none;}
+QFrame {border:none;}
+QMenuBar,QMenu,QToolBar,QStatusBar {background:#211A13;color:#F6EDD8;border:1px solid #655336;}
+QMenuBar::item {background:transparent;padding:5px 9px;}
+QMenuBar::item:selected,QMenu::item:selected {background:#4B371E;color:#E8BD68;}
+QMenu::item {padding:6px 26px 6px 22px;}
+QMenu::separator {height:1px;background:#655336;margin:4px 12px;}
+QDockWidget {color:#F6EDD8;titlebar-close-icon:url(styles/df-assets/lord-of-the-rings/icons/close.svg);}
+QDockWidget::title {background:#211A13;color:#E8BD68;padding:5px 9px;border-bottom:1px solid #655336;font-weight:600;}
+QGroupBox {background:#211A13;border:1px solid #655336;border-radius:5px;margin-top:12px;padding:12px 8px 8px;}
+QGroupBox::title {subcontrol-origin:margin;subcontrol-position:top left;left:12px;padding:0px 5px;color:#E8BD68;background:#100E0A;}
+QPushButton,QToolButton {background:qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 #302419,stop:1 #211A13);border:1px solid #655336;border-radius:3px;color:#F6EDD8;padding:4px 8px;}
+QPushButton:hover,QToolButton:hover {background:#4B371E;border-color:#E8BD68;}
+QPushButton:pressed,QToolButton:pressed,QPushButton:checked,QToolButton:checked {background:#6C4C23;border-color:#E8BD68;color:#F6EDD8;}
+QPushButton:focus,QToolButton:focus {border:1px solid #E8BD68;background:#4B371E;}
+QPushButton:disabled,QToolButton:disabled {background:#100E0A;color:#BEB096;border-color:#211A13;}
+QPushButton#extract_button,QPushButton#download_video,QPushButton#video_upload {border-color:#E8BD68;font-weight:600;}
+QLineEdit,QTextEdit,QPlainTextEdit,QSpinBox,QDoubleSpinBox,QComboBox {background:#100E0A;color:#F6EDD8;border:1px solid #655336;border-radius:3px;padding:4px 6px;}
+QLineEdit:focus,QTextEdit:focus,QPlainTextEdit:focus,QSpinBox:focus,QDoubleSpinBox:focus,QComboBox:focus {border-color:#E8BD68;}
+QComboBox::drop-down {width:20px;border:none;}
+QComboBox::down-arrow {image:url(styles/df-assets/lord-of-the-rings/icons/chevron-down.svg);width:12px;height:12px;}
+QSpinBox::up-arrow,QDoubleSpinBox::up-arrow {image:url(styles/df-assets/lord-of-the-rings/icons/chevron-up.svg);width:9px;height:9px;}
+QSpinBox::down-arrow,QDoubleSpinBox::down-arrow {image:url(styles/df-assets/lord-of-the-rings/icons/chevron-down.svg);width:9px;height:9px;}
+QComboBox QAbstractItemView {background:#211A13;color:#F6EDD8;selection-background-color:#6C4C23;border:1px solid #E8BD68;}
+QTabWidget::pane {border:1px solid #655336;background:#100E0A;}
+QTabBar::tab {background:#211A13;color:#BEB096;border:1px solid #655336;padding:6px 9px;margin-right:2px;}
+QTabBar::tab:selected {background:#302419;color:#E8BD68;border-bottom:2px solid #E8BD68;}
+QTabBar::tab:hover {background:#4B371E;color:#F6EDD8;}
+QTableView,QTreeView,QListView,QTableWidget,QTreeWidget,QListWidget {background:#100E0A;alternate-background-color:#211A13;color:#F6EDD8;border:1px solid #655336;gridline-color:#655336;selection-background-color:#6C4C23;selection-color:#F6EDD8;}
+QAbstractItemView::item:hover {background:#4B371E;}
+QAbstractItemView::item:selected {background:#6C4C23;color:#F6EDD8;}
+QHeaderView::section {background:#302419;color:#F6EDD8;padding:5px;border:none;border-bottom:1px solid #655336;font-weight:600;}
+QTableCornerButton::section {background:#302419;border:1px solid #655336;}
+QProgressBar {background:#100E0A;border:1px solid #655336;border-radius:4px;text-align:center;color:#F6EDD8;min-height:12px;}
+QProgressBar::chunk {background:#6C4C23;border-radius:3px;}
+QSlider::groove:horizontal {background:#302419;height:6px;border-radius:3px;}
+QSlider::sub-page:horizontal {background:#6C4C23;border-radius:3px;}
+QSlider::handle:horizontal {background:#E8BD68;width:14px;margin:-4px 0;border-radius:7px;border:1px solid #FF8944;}
+QScrollBar:vertical {background:#100E0A;width:10px;margin:0;}
+QScrollBar:horizontal {background:#100E0A;height:10px;margin:0;}
+QScrollBar::handle {background:#655336;border-radius:4px;min-width:20px;min-height:20px;}
+QScrollBar::handle:hover {background:#E8BD68;}
+QScrollBar::add-line,QScrollBar::sub-line {height:0;width:0;}
+QScrollBar::add-page,QScrollBar::sub-page {background:transparent;}
+QCheckBox::indicator,QGroupBox::indicator {width:14px;height:14px;border:1px solid #655336;border-radius:3px;background:#100E0A;}
+QCheckBox::indicator:checked,QGroupBox::indicator:checked {background:#6C4C23;border-color:#E8BD68;image:url(styles/df-assets/lord-of-the-rings/icons/check.svg);}
+QCheckBox::indicator:hover {border-color:#E8BD68;}
+QRadioButton::indicator {width:14px;height:14px;border:1px solid #655336;border-radius:7px;background:#100E0A;}
+QRadioButton::indicator:checked {border:4px solid #E8BD68;background:#100E0A;}
+QToolTip {background:#302419;color:#F6EDD8;border:1px solid #E8BD68;padding:5px;}
+QSplitter::handle {background:#211A13;}
+QSplitter::handle:hover {background:#655336;}
+QLabel#image_label_2 {background:#100E0A;border:1px solid #655336;border-radius:5px;}
+QCheckBox#zoom_lock,QCheckBox#image_quality_checkbox,QCheckBox#outline_Checkbox,QCheckBox#rapid_del_checkbox,QCheckBox#auto_scan_checkbox,QCheckBox#voice_mode_checkbox {padding:4px 8px;background:#302419;border:1px solid #655336;border-radius:3px;}
+QCheckBox#zoom_lock:checked,QCheckBox#image_quality_checkbox:checked,QCheckBox#outline_Checkbox:checked,QCheckBox#rapid_del_checkbox:checked,QCheckBox#auto_scan_checkbox:checked,QCheckBox#voice_mode_checkbox:checked {background:#6C4C23;border-color:#E8BD68;}
+QCheckBox#zoom_lock::indicator,QCheckBox#image_quality_checkbox::indicator,QCheckBox#outline_Checkbox::indicator,QCheckBox#rapid_del_checkbox::indicator,QCheckBox#auto_scan_checkbox::indicator,QCheckBox#voice_mode_checkbox::indicator {width:0;height:0;border:none;}
+QWidget#dockWidgetContents_3,QFrame#frame_27 {background:transparent;}
+QWidget[dfHeaderPanel="true"] {background:transparent;border:none;}
+QPushButton#video_upload,QPushButton#download_video,QPushButton#remove_video_button {border:8px solid transparent;border-image:url(styles/df-assets/lord-of-the-rings/buttons/background-normal.png) 16 16 16 16 stretch stretch;padding:0px 4px;}
+QPushButton#video_upload:hover,QPushButton#download_video:hover,QPushButton#remove_video_button:hover {border-image:url(styles/df-assets/lord-of-the-rings/buttons/background-hover.png) 16 16 16 16 stretch stretch;}
+QPushButton#video_upload:pressed,QPushButton#download_video:pressed,QPushButton#remove_video_button:pressed {border-image:url(styles/df-assets/lord-of-the-rings/buttons/background-pressed.png) 16 16 16 16 stretch stretch;}
+QPushButton#video_upload:disabled,QPushButton#download_video:disabled,QPushButton#remove_video_button:disabled {border-image:url(styles/df-assets/lord-of-the-rings/buttons/background-disabled.png) 16 16 16 16 stretch stretch;}
+QPushButton#video_upload:focus,QPushButton#download_video:focus,QPushButton#remove_video_button:focus {border-image:url(styles/df-assets/lord-of-the-rings/buttons/background-focus.png) 16 16 16 16 stretch stretch;}
+/* LORD FULL-WIDTH TOP BARS v2 */
+QMenuBar {border-image:url(styles/df-assets/lord-of-the-rings/menu-bar.png) 0 0 0 0 stretch stretch;border-bottom:1px solid #655336;}
+QDockWidget::title {border-image:url(styles/df-assets/lord-of-the-rings/status-bar.png) 0 0 0 0 stretch stretch;}

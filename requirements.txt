@@ -13,7 +13,7 @@
 --extra-index-url https://download.pytorch.org/whl/cu128
 --extra-index-url https://pypi.nvidia.com
 
-# Build helpers used by native ML packages.
+# Build helpers used by direct ML packages.
 setuptools==78.1.1
 wheel==0.45.1
 ninja==1.13.0
@@ -30,13 +30,14 @@ GPUtil==1.4.0
 nvidia-ml-py==13.610.43
 tqdm==4.66.1
 
-# OpenCV for DarkFusion, Ultralytics, SAHI, GroundingDINO, and MediaPipe.
-# Keep these two pinned together. DarkFusion does not need opencv-python-headless.
+# OpenCV for DarkFusion, Ultralytics, SAHI, GroundingDINO, MediaPipe, and EasyOCR.
+# Keep all three pinned together. EasyOCR declares the headless package explicitly.
 opencv-python==4.9.0.80
 opencv-contrib-python==4.9.0.80
+opencv-python-headless==4.9.0.80
 
-# YOLO / SAHI / SAM / YOLO-World.
-ultralytics==8.4.113
+# YOLO / SAHI / SAM / YOLOE.
+ultralytics==8.4.144
 ray[tune]==2.52.1
 pydantic==2.7.1
 lap==0.5.12
@@ -65,8 +66,6 @@ onnx==1.17.0
 onnxruntime-gpu==1.22.0
 # ORT 1.22 TensorRT EP is built/tested against TensorRT 10.9 + CUDA 12.
 # Do not replace this with the unsuffixed latest package (currently CUDA 13).
-# Install onnxruntime-directml in a separate environment; its onnxruntime
-# module/DLLs conflict with this CUDA/TensorRT wheel in one Python environment.
 tensorrt-cu12==10.9.0.34
 
 # Desktop UI.
@@ -75,6 +74,7 @@ qt-material==2.14
 pyqtgraph==0.13.7
 
 # DarkFusion runtime features.
+easyocr==1.7.2
 pandas==2.2.3
 matplotlib==3.6.3
 plotly==6.1.2

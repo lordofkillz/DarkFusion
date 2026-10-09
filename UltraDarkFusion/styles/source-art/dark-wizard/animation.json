@@ -1,0 +1,14 @@
+{
+  "version": 3,
+  "sourceCopy": "status-source.png",
+  "sourceSha256": "4dffeb573c883e48b0c0662b04effd691b79513aab81461d4101c615758164b6",
+  "frames": 120,
+  "frameDelayMs": 40,
+  "durationMs": 4800,
+  "loop": 0,
+  "width": 288,
+  "height": 276,
+  "method": "emerald spell waves, a floating book and orbiting magical lights",
+  "sourceAspectPreserved": true,
+  "description": "Visible 2D light and wave effects over the supplied picture; this is not articulated character or 3D animation."
+}

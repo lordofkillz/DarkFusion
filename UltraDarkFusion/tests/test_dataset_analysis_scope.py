@@ -5,7 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 APP_DIR = Path(__file__).resolve().parents[1]
@@ -52,6 +52,176 @@ class FakeParent(app.QObject):
 
 
 class DatasetAnalysisScopeTests(unittest.TestCase):
+    def test_directory_scan_ignores_label_only_changes(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            image = root / "frame.png"
+            label = root / "frame.txt"
+            image.write_bytes(b"img")
+            label.write_text("0 0.5 0.5 0.2 0.2\n", encoding="utf-8")
+            received = []
+            worker = app.DatasetDirectoryScanWorker(root, 3, [image])
+            worker.completed.connect(lambda *args: received.append(args))
+
+            worker.run()
+
+            self.assertEqual(len(received), 1)
+            _directory, generation, scanned_files, changed = received[0]
+            self.assertEqual(generation, 3)
+            self.assertFalse(changed)
+            self.assertEqual(scanned_files, [])
+
+    def test_unchanged_directory_timestamp_does_not_start_a_scan(self):
+        with tempfile.TemporaryDirectory() as root:
+            window = app.MainWindow.__new__(app.MainWindow)
+            window.image_directory = root
+            window._dataset_directory_scan_worker = None
+            window._dataset_directory_refresh_pending = True
+            window._dataset_directory_last_mtime_ns = os.stat(root).st_mtime_ns
+            window.normalize_path = staticmethod(
+                lambda path: os.path.abspath(os.fspath(path)).replace("\\", "/")
+            )
+
+            window._start_dataset_directory_refresh()
+
+            self.assertIsNone(window._dataset_directory_scan_worker)
+            self.assertFalse(window._dataset_directory_refresh_pending)
+
+    def test_progress_update_does_not_rescan_every_dataset_file(self):
+        window = app.MainWindow.__new__(app.MainWindow)
+        window.image_files = [f"C:/dataset/frame_{index}.jpg" for index in range(50000)]
+        window.filtered_image_files = window.image_files
+        window.current_file = window.image_files[25000]
+        window.current_img_index = 25000
+        window.normalize_path = staticmethod(lambda path: str(path).replace("\\", "/"))
+        window.set_main_progress = Mock()
+        window._prune_missing_dataset_files = Mock(
+            side_effect=AssertionError("navigation progress must not scan the filesystem")
+        )
+
+        window.update_dataset_progress()
+
+        window._prune_missing_dataset_files.assert_not_called()
+        window.set_main_progress.assert_called_once_with(25001, 50000)
+
+    def test_directory_refresh_fixes_total_and_preserves_current_image(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            first = root / "frame_1.jpg"
+            current = root / "frame_3.jpg"
+            added = root / "frame_4.jpg"
+            missing = root / "frame_2.jpg"
+            for path in (first, current, added):
+                path.write_bytes(b"img")
+
+            normalize = lambda path: os.path.abspath(os.fspath(path)).replace("\\", "/")
+            old_files = [normalize(first), normalize(missing), normalize(current)]
+            window = app.MainWindow.__new__(app.MainWindow)
+            window.image_directory = normalize(root)
+            window.image_files = list(old_files)
+            window.filtered_image_files = list(old_files)
+            window.current_file = normalize(current)
+            window.current_img_index = 2
+            window.current_image_index = 2
+            window._dataset_directory_scan_generation = 7
+            window._image_file_index = {}
+            window._image_file_index_list_id = None
+            window._image_file_index_length = -1
+            window.normalize_path = staticmethod(normalize)
+            window.is_placeholder_file = staticmethod(lambda _path: False)
+            window.update_list_view = Mock()
+            window.sync_list_view_selection = Mock()
+            window.update_dataset_progress = Mock()
+            window.img_index_number = None
+            status_bar = Mock()
+            window.statusBar = Mock(return_value=status_bar)
+
+            window._apply_dataset_directory_refresh(
+                normalize(root),
+                7,
+                [normalize(current), normalize(first), normalize(added)],
+            )
+
+            expected = [normalize(first), normalize(current), normalize(added)]
+            self.assertEqual(window.image_files, expected)
+            self.assertEqual(window.filtered_image_files, expected)
+            self.assertEqual(window.current_file, normalize(current))
+            self.assertEqual(window.current_img_index, 1)
+            self.assertEqual(window.current_image_index, 1)
+            window.update_list_view.assert_called_once_with(expected)
+            self.assertIn("3 images (1 added, 1 removed)", status_bar.showMessage.call_args.args[0])
+
+    def test_directory_refresh_keeps_an_active_filter_filtered(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            visible = root / "visible.jpg"
+            hidden = root / "hidden.jpg"
+            added = root / "added.jpg"
+            for path in (visible, hidden, added):
+                path.write_bytes(b"img")
+
+            normalize = lambda path: os.path.abspath(os.fspath(path)).replace("\\", "/")
+            window = app.MainWindow.__new__(app.MainWindow)
+            window.image_directory = normalize(root)
+            window.image_files = [normalize(visible), normalize(hidden)]
+            window.filtered_image_files = [normalize(visible)]
+            window.current_file = normalize(visible)
+            window.current_img_index = 0
+            window.current_image_index = 0
+            window._dataset_directory_scan_generation = 2
+            window._image_file_index = {}
+            window._image_file_index_list_id = None
+            window._image_file_index_length = -1
+            window.normalize_path = staticmethod(normalize)
+            window.is_placeholder_file = staticmethod(lambda _path: False)
+            window.update_list_view = Mock()
+            window.sync_list_view_selection = Mock()
+            window.update_dataset_progress = Mock()
+            window.img_index_number = None
+            window.statusBar = Mock(return_value=Mock())
+
+            window._apply_dataset_directory_refresh(
+                normalize(root),
+                2,
+                [normalize(visible), normalize(hidden), normalize(added)],
+            )
+
+            self.assertEqual(
+                window.image_files,
+                [normalize(visible), normalize(hidden), normalize(added)],
+            )
+            self.assertEqual(window.filtered_image_files, [normalize(visible)])
+
+    def test_missing_dataset_files_are_pruned_and_counts_sync(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            still_there = root / "still.png"
+            still_there.write_bytes(b"img")
+            missing = root / "gone.png"
+            missing.write_bytes(b"img")
+            missing.unlink()
+
+            window = app.MainWindow.__new__(app.MainWindow)
+            window.image_files = [str(still_there), str(missing)]
+            window.filtered_image_files = [str(still_there), str(missing)]
+            window.current_file = str(missing)
+            window.current_img_index = 1
+            window.current_image_index = 1
+            window.List_view = None
+            window.img_index_number = None
+            window.normalize_path = staticmethod(lambda path: os.path.abspath(os.fspath(path)).replace("\\", "/"))
+            window.is_placeholder_file = staticmethod(lambda _path: False)
+
+            refreshed = window._prune_missing_dataset_files()
+            expected = [window.normalize_path(still_there)]
+
+            self.assertEqual(refreshed, expected)
+            self.assertEqual(window.image_files, expected)
+            self.assertEqual(window.filtered_image_files, expected)
+            self.assertEqual(window.current_img_index, 0)
+            self.assertEqual(window.current_image_index, 0)
+            self.assertEqual(window.current_file, expected[0])
+
     def test_active_dataset_wins_over_stale_output_and_last_directories(self):
         with tempfile.TemporaryDirectory() as root:
             root = Path(root)
@@ -205,6 +375,11 @@ class DatasetAnalysisScopeTests(unittest.TestCase):
                 1,
                 label_line,
             )
+            finding.update(
+                visual_similarity=0.453,
+                visual_scan_pass=2,
+                visual_cutoff=0.48,
+            )
             self.assertTrue(
                 scanner._open_health_review_queue(
                     finding, [finding], str(root)
@@ -212,6 +387,10 @@ class DatasetAnalysisScopeTests(unittest.TestCase):
             )
             _issue, bridge_path, queue = parent.opened_review
             self.assertEqual(len(queue), 1)
+            self.assertEqual(queue[0]["annotation_label_text"], label_line)
+            self.assertEqual(queue[0]["annotation_line_index"], 0)
+            self.assertEqual(queue[0]["visual_similarity"], 0.453)
+            self.assertEqual(queue[0]["visual_scan_pass"], 2)
             bridge = json.loads(Path(bridge_path).read_text(encoding="utf-8"))
             self.assertEqual(bridge["source"], "dataset_health")
             self.assertEqual(
@@ -219,6 +398,32 @@ class DatasetAnalysisScopeTests(unittest.TestCase):
             )
             self.assertEqual(Path(bridge["data"]).resolve(), root.resolve())
 
+    def test_visual_review_keys_survive_similarity_score_changes(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            scanner = app.ScanAnnotations(FakeParent(str(root)))
+            issue = {
+                "file": "frame.txt",
+                "line": 1,
+                "issue_type": "visual_class_outlier",
+                "label_line": "0 0.5 0.5 0.2 0.2",
+                "message": "Nearest match scored 41.2%.",
+            }
+            legacy_key = json.dumps([
+                issue["file"], issue["line"], issue["issue_type"],
+                issue["label_line"], issue["message"],
+            ], ensure_ascii=False)
+            state_path = Path(scanner._review_state_path(str(root)))
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            state_path.write_text(
+                json.dumps({"reviewed_issues": [legacy_key]}), encoding="utf-8"
+            )
+
+            issue["message"] = "Nearest match scored 47.8%."
+            self.assertIn(
+                scanner._issue_review_key(issue),
+                scanner._load_reviewed_issue_keys(str(root)),
+            )
 
 if __name__ == "__main__":
     unittest.main()

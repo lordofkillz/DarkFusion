@@ -1,6 +1,7 @@
 import os
 import json
 import math
+import hashlib
 import logging
 import shutil
 import gc
@@ -10,10 +11,11 @@ from pathlib import Path
 import torch
 from tqdm import tqdm
 from PIL import Image, ImageDraw, ImageFile
-from ultralytics import YOLO, YOLOWorld, SAM
+from ultralytics import YOLO, YOLOE, SAM
 import cv2
 import numpy as np
 import groundingdino
+import groundingdino.datasets.transforms as T
 from groundingdino.util.inference import load_model, load_image, predict
 from prediction_size_filter import prediction_size_allowed_xyxy
 
@@ -35,8 +37,10 @@ CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 THRESHOLD_FILE = BASE_DIR / "class_thresholds.json"
 
-WORLD_MODEL_NAME = os.getenv("WORLD_MODEL_NAME", "yolov8x-worldv2.pt")
-WORLD_FP16 = os.getenv("WORLD_FP16", "1").strip().lower() in {"1", "true", "yes", "y"}
+YOLOE_MODEL_NAME = os.getenv("YOLOE_MODEL_NAME", "yoloe-26s-seg.pt")
+YOLOE_FP16 = os.getenv("YOLOE_FP16", "1").strip().lower() in {"1", "true", "yes", "y"}
+YOLOE_ONNX_BACKEND = os.getenv("YOLOE_ONNX_BACKEND", "auto").strip().lower()
+YOLOE_ONNX_PROVIDER = os.getenv("YOLOE_ONNX_PROVIDER", "auto").strip().lower()
 DINO_FP16 = os.getenv("DINO_FP16", "1").strip().lower() in {"1", "true", "yes", "y"}
 DINO_FP16_FALLBACK = os.getenv("DINO_FP16_FALLBACK", "1").strip().lower() in {"1", "true", "yes", "y"}
 
@@ -56,8 +60,8 @@ IGNORE_TEAMMATES = os.getenv("IGNORE_TEAMMATES", "0").strip().lower() in {"1", "
 TEAMMATE_THRESHOLD = float(os.getenv("TEAMMATE_THRESHOLD", "0.90"))
 _TEAMMATE_CLASSIFIER = None
 
-WORLD_CONF = float(os.getenv("WORLD_CONF", "0.15"))
-WORLD_IOU = float(os.getenv("WORLD_IOU", "0.45"))
+YOLOE_CONF = float(os.getenv("YOLOE_CONF", "0.15"))
+YOLOE_IOU = float(os.getenv("YOLOE_IOU", "0.45"))
 MAX_DET = int(os.getenv("MAX_DET", "200"))
 
 TEXT_THRESHOLD = float(os.getenv("TEXT_THRESHOLD", "0.35"))
@@ -67,10 +71,10 @@ DEFAULT_THRESHOLD = float(os.getenv("DEFAULT_THRESHOLD", "0.45"))
 MIN_THRESHOLD = float(os.getenv("MIN_THRESHOLD", "0.25"))
 MAX_THRESHOLD = float(os.getenv("MAX_THRESHOLD", "0.65"))
 
-DEFAULT_ALPHA_WORLD = float(os.getenv("ALPHA_WORLD", "0.35"))
+DEFAULT_ALPHA_YOLOE = float(os.getenv("ALPHA_YOLOE", "0.35"))
 DEFAULT_ALPHA_DINO = float(os.getenv("ALPHA_DINO", "0.65"))
 
-DEFAULT_T_WORLD = float(os.getenv("T_WORLD", "1.00"))
+DEFAULT_T_YOLOE = float(os.getenv("T_YOLOE", "1.00"))
 DEFAULT_T_DINO = float(os.getenv("T_DINO", "1.05"))
 
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "2"))
@@ -87,9 +91,9 @@ VERIFY_IMAGES_FIRST = os.getenv("VERIFY_IMAGES_FIRST", "1").strip().lower() in {
 
 FUSION_DEFAULTS = {
     "thr": DEFAULT_THRESHOLD,
-    "alpha_world": DEFAULT_ALPHA_WORLD,
+    "alpha_yoloe": DEFAULT_ALPHA_YOLOE,
     "alpha_dino": DEFAULT_ALPHA_DINO,
-    "T_world": DEFAULT_T_WORLD,
+    "T_yoloe": DEFAULT_T_YOLOE,
     "T_dino": DEFAULT_T_DINO,
     "min_area_frac": 0.0005,
     "max_ar": 8.0,
@@ -98,7 +102,7 @@ FUSION_DEFAULTS = {
     "both_source_bonus": 0.08,
     "min_single_source_score": 0.50,
     "require_both_under": 0.40,
-    "min_world_score": 0.05,
+    "min_yoloe_score": 0.05,
     "min_dino_score": 0.05,
     "sam3_min_area": SAM3_MIN_MASK_AREA,
     "sam3_max_area_mult": SAM3_MAX_AREA_MULT,
@@ -179,6 +183,16 @@ def _calibrate_prob(p: float, T: float) -> float:
 def _ensure_class_cfg(class_thresholds: dict, cls: str) -> dict:
     if cls not in class_thresholds or not isinstance(class_thresholds[cls], dict):
         class_thresholds[cls] = dict(FUSION_DEFAULTS)
+    # Preserve tuned values from settings created before the YOLOE upgrade.
+    legacy_keys = {
+        "alpha_world": "alpha_yoloe",
+        "T_world": "T_yoloe",
+        "min_world_score": "min_yoloe_score",
+    }
+    for old_key, new_key in legacy_keys.items():
+        if new_key not in class_thresholds[cls] and old_key in class_thresholds[cls]:
+            class_thresholds[cls][new_key] = class_thresholds[cls][old_key]
+        class_thresholds[cls].pop(old_key, None)
     for k, v in FUSION_DEFAULTS.items():
         class_thresholds[cls].setdefault(k, v)
     return class_thresholds[cls]
@@ -405,15 +419,15 @@ def save_review_preview(image_path: Path, out_dir: Path, xyxy_list, scores, labe
 
 
 # -------------------------
-# YOLO-World model prep
+# YOLOE model prep
 # -------------------------
-def ensure_base_world_pt(model_name: str) -> Path:
+def ensure_base_yoloe_pt(model_name: str) -> Path:
     local_pt = SAM_DIR / model_name
     if local_pt.exists():
         return local_pt
 
     logger.info("Base model not found locally. Downloading with Ultralytics: %s", model_name)
-    model = YOLOWorld(model_name)
+    model = YOLOE(model_name)
 
     src = None
 
@@ -443,10 +457,33 @@ def ensure_base_world_pt(model_name: str) -> Path:
     return Path(model_name)
 
 
-def build_world_predictor(class_names):
+def _compiled_yoloe_class_names(model):
+    names = getattr(model, "names", None)
+    if isinstance(names, dict):
+        try:
+            return [str(names[key]).strip().lower() for key in sorted(names, key=lambda key: int(key))]
+        except (TypeError, ValueError):
+            return [str(value).strip().lower() for value in names.values()]
+    if isinstance(names, (list, tuple)):
+        return [str(value).strip().lower() for value in names]
+    return []
+
+
+def _validate_compiled_yoloe_classes(model, class_names, model_path):
+    embedded = _compiled_yoloe_class_names(model)
+    expected = _normalize_class_names(class_names)
+    if embedded and embedded != expected:
+        raise ValueError(
+            f"Compiled YOLOE model classes {embedded} do not match the selected DarkFusion "
+            f"classes {expected}: {model_path}. Export the YOLOE model after setting this "
+            "exact class list, or select the .pt model for live text prompts."
+        )
+
+
+def build_yoloe_predictor(class_names):
     class_names = _normalize_class_names(class_names)
 
-    requested_model = str(WORLD_MODEL_NAME or "yolov8x-worldv2.pt").strip()
+    requested_model = str(YOLOE_MODEL_NAME or "yoloe-26s-seg.pt").strip()
     requested_path = Path(requested_model).expanduser()
     local_path = SAM_DIR / requested_model
 
@@ -455,17 +492,39 @@ def build_world_predictor(class_names):
     elif local_path.exists():
         model_path = local_path
     elif requested_path.suffix.lower() == ".pt" or not requested_path.suffix:
-        model_path = ensure_base_world_pt(requested_model)
+        model_path = ensure_base_yoloe_pt(requested_model)
     else:
         model_path = requested_path
 
-    if str(model_path).lower().endswith((".engine", ".onnx")):
-        logger.info("Loading prebuilt YOLO-World runtime model: %s", model_path)
-        predictor = YOLO(str(model_path))
-        return predictor, "engine"
+    suffix = Path(model_path).suffix.lower()
+    if suffix == ".onnx" and YOLOE_ONNX_BACKEND != "ultralytics":
+        from darkfusion_onnx_runtime import DarkFusionOnnxModel
 
-    logger.info("Loading YOLO-World PyTorch model: %s", model_path)
-    predictor = YOLOWorld(str(model_path))
+        cache_key = hashlib.sha1(str(Path(model_path).resolve()).encode("utf-8")).hexdigest()[:12]
+        cache_dir = BASE_DIR / ".darkfusion_cache" / "onnx_runtime" / cache_key
+        logger.info(
+            "Loading compiled YOLOE ONNX model with DarkFusion backend (%s): %s",
+            YOLOE_ONNX_PROVIDER,
+            model_path,
+        )
+        predictor = DarkFusionOnnxModel(
+            str(model_path),
+            providers=YOLOE_ONNX_PROVIDER,
+            strict_provider=True,
+            include_cpu_fallback=True,
+            fp16=bool(YOLOE_FP16),
+            cache_dir=cache_dir,
+        )
+        _validate_compiled_yoloe_classes(predictor, class_names, model_path)
+        return predictor, "onnxruntime"
+
+    if suffix in {".engine", ".onnx"}:
+        logger.info("Loading prebuilt YOLOE runtime model with Ultralytics: %s", model_path)
+        predictor = YOLO(str(model_path))
+        return predictor, "engine" if suffix == ".engine" else "onnx"
+
+    logger.info("Loading YOLOE PyTorch model: %s", model_path)
+    predictor = YOLOE(str(model_path))
     predictor.set_classes(class_names)
     return predictor, "pt"
 
@@ -474,34 +533,40 @@ def build_world_predictor(class_names):
 # Detector inference
 # -------------------------
 @torch.inference_mode()
-def run_world_predict(predictor_model, predictor_kind, image_path: Path, class_names):
+def run_yoloe_predict(predictor_model, predictor_kind, image_path: Path, class_names, image_source=None):
+    source = image_source if image_source is not None else str(image_path)
     if predictor_kind == "pt":
         results = predictor_model.predict(
-            source=str(image_path),
+            source=source,
             imgsz=PREDICT_IMGSZ,
-            conf=WORLD_CONF,
-            iou=WORLD_IOU,
+            conf=YOLOE_CONF,
+            iou=YOLOE_IOU,
             max_det=MAX_DET,
             device=CUDA_DEVICE_STR,
             verbose=False,
-            **ultralytics_fp16_kwargs(WORLD_FP16 and DEVICE.type == "cuda"),
+            **ultralytics_fp16_kwargs(YOLOE_FP16 and DEVICE.type == "cuda"),
         )
     else:
         results = predictor_model.predict(
-            source=str(image_path),
+            source=source,
             imgsz=PREDICT_IMGSZ,
-            conf=WORLD_CONF,
-            iou=WORLD_IOU,
+            conf=YOLOE_CONF,
+            iou=YOLOE_IOU,
             max_det=MAX_DET,
             device=0 if DEVICE.type == "cuda" else "cpu",
             verbose=False,
-            **ultralytics_fp16_kwargs(WORLD_FP16 and DEVICE.type == "cuda"),
+            **ultralytics_fp16_kwargs(YOLOE_FP16 and DEVICE.type == "cuda"),
         )
 
     if not results:
         return []
 
     r = results[0]
+    if predictor_kind != "pt":
+        compiled_path = getattr(predictor_model, "model_path", None) or getattr(
+            predictor_model, "ckpt_path", "compiled YOLOE model"
+        )
+        _validate_compiled_yoloe_classes(r, class_names, compiled_path)
     if r.boxes is None or len(r.boxes) == 0:
         return []
 
@@ -517,7 +582,7 @@ def run_world_predict(predictor_model, predictor_kind, image_path: Path, class_n
                 "xyxy": [float(v) for v in b],
                 "score": float(s),
                 "cls_idx": cls_idx,
-                "source": "world"
+                "source": "yoloe"
             })
     return out
 
@@ -558,10 +623,19 @@ def dino_detect_one_class(model, image_tensor, cls_name, box_thresh, text_thresh
 
 
 @torch.inference_mode()
-def run_dino_predict(dino_model, image_path: Path, class_names):
-    W, H = safe_open_image(image_path)
-
-    _, image_tensor = load_image(str(image_path))
+def run_dino_predict(dino_model, image_path: Path, class_names, image_source=None):
+    if image_source is None:
+        W, H = safe_open_image(image_path)
+        _, image_tensor = load_image(str(image_path))
+    else:
+        image_pil = image_source.convert("RGB")
+        W, H = image_pil.size
+        transform = T.Compose([
+            T.RandomResize([800], max_size=1333),
+            T.ToTensor(),
+            T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+        ])
+        image_tensor, _ = transform(image_pil, None)
     if isinstance(image_tensor, torch.Tensor):
         image_tensor = image_tensor.to(DEVICE, non_blocking=True)
 
@@ -873,7 +947,7 @@ def _apply_single_source_policy(score, raw_score, cfg, source):
     Penalize detections seen by only one detector.
     This is the main false-positive guard: single-source detections must be strong.
     """
-    min_raw_key = "min_world_score" if source == "world" else "min_dino_score"
+    min_raw_key = "min_yoloe_score" if source == "yoloe" else "min_dino_score"
     if float(raw_score) < float(cfg.get(min_raw_key, 0.0)):
         return None
 
@@ -885,12 +959,12 @@ def _apply_single_source_policy(score, raw_score, cfg, source):
     return adjusted
 
 
-def merge_same_class_candidates(world_preds, dino_preds, class_names, class_thresholds, W, H):
-    by_class_world = {}
+def merge_same_class_candidates(yoloe_preds, dino_preds, class_names, class_thresholds, W, H):
+    by_class_yoloe = {}
     by_class_dino = {}
 
-    for p in world_preds:
-        by_class_world.setdefault(p["cls_idx"], []).append(p)
+    for p in yoloe_preds:
+        by_class_yoloe.setdefault(p["cls_idx"], []).append(p)
 
     for p in dino_preds:
         by_class_dino.setdefault(p["cls_idx"], []).append(p)
@@ -901,54 +975,54 @@ def merge_same_class_candidates(world_preds, dino_preds, class_names, class_thre
     for cls_idx, cls_name in enumerate(class_names):
         cfg = _ensure_class_cfg(class_thresholds, cls_name)
         thr = float(cfg["thr"])
-        alpha_world = float(cfg["alpha_world"])
+        alpha_yoloe = float(cfg["alpha_yoloe"])
         alpha_dino = float(cfg["alpha_dino"])
-        T_world = float(cfg["T_world"])
+        T_yoloe = float(cfg["T_yoloe"])
         T_dino = float(cfg["T_dino"])
         require_both_under = float(cfg.get("require_both_under", 0.40))
 
-        worlds = by_class_world.get(cls_idx, [])
+        yoloe_detections = by_class_yoloe.get(cls_idx, [])
         dinos = by_class_dino.get(cls_idx, [])
 
         used_dino = set()
 
-        for w in worlds:
+        for yoloe_detection in yoloe_detections:
             best_j = -1
             best_iou = 0.0
 
             for j, d in enumerate(dinos):
                 if j in used_dino:
                     continue
-                iou = box_iou(w["xyxy"], d["xyxy"])
+                iou = box_iou(yoloe_detection["xyxy"], d["xyxy"])
                 if iou > best_iou:
                     best_iou = iou
                     best_j = j
 
-            world_cal = _calibrate_prob(w["score"], T_world)
+            yoloe_cal = _calibrate_prob(yoloe_detection["score"], T_yoloe)
 
             if best_j >= 0 and best_iou >= PAIR_MERGE_IOU:
                 d = dinos[best_j]
                 used_dino.add(best_j)
                 dino_cal = _calibrate_prob(d["score"], T_dino)
 
-                fused = alpha_world * world_cal + alpha_dino * dino_cal
+                fused = alpha_yoloe * yoloe_cal + alpha_dino * dino_cal
                 fused = min(1.0, fused + float(cfg.get("both_source_bonus", 0.08)))
 
-                merged_xyxy = merge_boxes(w["xyxy"], d["xyxy"])
+                merged_xyxy = merge_boxes(yoloe_detection["xyxy"], d["xyxy"])
                 source = "both"
             else:
                 dino_cal = 0.0
                 fused = _apply_single_source_policy(
-                    score=world_cal,
-                    raw_score=w["score"],
+                    score=yoloe_cal,
+                    raw_score=yoloe_detection["score"],
                     cfg=cfg,
-                    source="world",
+                    source="yoloe",
                 )
                 if fused is None:
                     continue
 
-                merged_xyxy = w["xyxy"]
-                source = "world"
+                merged_xyxy = yoloe_detection["xyxy"]
+                source = "yoloe"
 
             if not _passes_geometry_filters(merged_xyxy, cfg, W, H):
                 continue
@@ -957,7 +1031,7 @@ def merge_same_class_candidates(world_preds, dino_preds, class_names, class_thre
                 "xyxy": merged_xyxy,
                 "fused": fused,
                 "cls_idx": cls_idx,
-                "world_cal": world_cal,
+                "yoloe_cal": yoloe_cal,
                 "dino_cal": dino_cal,
                 "source": source,
             }
@@ -994,7 +1068,7 @@ def merge_same_class_candidates(world_preds, dino_preds, class_names, class_thre
                 "xyxy": merged_xyxy,
                 "fused": fused,
                 "cls_idx": cls_idx,
-                "world_cal": 0.0,
+                "yoloe_cal": 0.0,
                 "dino_cal": dino_cal,
                 "source": "dino",
             }
@@ -1013,12 +1087,12 @@ def merge_same_class_candidates(world_preds, dino_preds, class_names, class_thre
 # Main image processing
 # -------------------------
 def filter_teammate_candidates(image_path, candidates, class_names, width, height):
-    """Remove likely friendly-player candidates before DINO/World labels are saved."""
+    """Remove likely friendly-player candidates before DINO/YOLOE labels are saved."""
     global _TEAMMATE_CLASSIFIER
     if not IGNORE_TEAMMATES or not candidates:
         return candidates
     try:
-        from darkfusion_teammate_review import TeammateMarkerClassifier, marker_crop
+        from darkfusion_teammate_review import TeammateMarkerClassifier
 
         if _TEAMMATE_CLASSIFIER is None:
             _TEAMMATE_CLASSIFIER = TeammateMarkerClassifier(
@@ -1026,7 +1100,7 @@ def filter_teammate_candidates(image_path, candidates, class_names, width, heigh
             )
         with Image.open(image_path) as source:
             image = source.convert("RGB")
-            crops = []
+            bounds = []
             candidate_indices = []
             for index, candidate in enumerate(candidates):
                 class_id = int(candidate.get("cls_idx", -1))
@@ -1036,22 +1110,31 @@ def filter_teammate_candidates(image_path, candidates, class_names, width, heigh
                 ):
                     continue
                 x1, y1, x2, y2 = [float(value) for value in candidate.get("xyxy", [])[:4]]
-                crop = marker_crop(image, {
-                    "bbox": [
-                        max(0.0, min(1.0, x1 / max(1, width))),
-                        max(0.0, min(1.0, y1 / max(1, height))),
-                        max(0.0, min(1.0, x2 / max(1, width))),
-                        max(0.0, min(1.0, y2 / max(1, height))),
-                    ]
-                })
-                if crop is not None:
-                    crops.append(crop)
-                    candidate_indices.append(index)
-        scores = _TEAMMATE_CLASSIFIER.score(crops, batch_size=96)
+                bounds.append([
+                    max(0.0, min(1.0, x1 / max(1, width))),
+                    max(0.0, min(1.0, y1 / max(1, height))),
+                    max(0.0, min(1.0, x2 / max(1, width))),
+                    max(0.0, min(1.0, y2 / max(1, height))),
+                ])
+                candidate_indices.append(index)
+        local_rejected = _TEAMMATE_CLASSIFIER.friendly_indices(
+            [image],
+            [bounds],
+            threshold=max(0.50, min(0.999, float(TEAMMATE_THRESHOLD))),
+            batch_size=96,
+            ocr=True,
+        )[0]
         rejected = {
-            index for index, score in zip(candidate_indices, scores)
-            if float(score) >= max(0.50, min(0.999, float(TEAMMATE_THRESHOLD)))
+            candidate_indices[local_index]
+            for local_index in local_rejected
+            if 0 <= int(local_index) < len(candidate_indices)
         }
+        if _TEAMMATE_CLASSIFIER.last_ocr_error:
+            logger.warning(
+                "Teammate OCR unavailable for %s; visual marker filtering remains active: %s",
+                image_path,
+                _TEAMMATE_CLASSIFIER.last_ocr_error,
+            )
         if rejected:
             logger.info(
                 "Ignored %d teammate prediction(s) in %s at certainty %.3f",
@@ -1063,10 +1146,88 @@ def filter_teammate_candidates(image_path, candidates, class_names, width, heigh
         return candidates
 
 
+def _scaled_roi_bounds(roi_bounds, roi_reference_size, image_width, image_height):
+    """Scale a DarkFusion display ROI into one dataset image's pixel space."""
+    if not isinstance(roi_bounds, (list, tuple)) or len(roi_bounds) != 4:
+        return None
+    try:
+        x, y, width, height = (float(value) for value in roi_bounds)
+        ref_width, ref_height = roi_reference_size or (image_width, image_height)
+        if ref_width <= 0 or ref_height <= 0:
+            return None
+        x *= image_width / float(ref_width)
+        width *= image_width / float(ref_width)
+        y *= image_height / float(ref_height)
+        height *= image_height / float(ref_height)
+        x = max(0.0, min(x, float(image_width)))
+        y = max(0.0, min(y, float(image_height)))
+        width = max(0.0, min(width, float(image_width) - x))
+        height = max(0.0, min(height, float(image_height) - y))
+        if width <= 0 or height <= 0:
+            return None
+        return x, y, x + width, y + height
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
+def _scaled_roi_bounds_list(roi_bounds, roi_reference_size, image_width, image_height):
+    if (isinstance(roi_bounds, (list, tuple)) and len(roi_bounds) == 4 and
+            all(isinstance(value, (int, float)) for value in roi_bounds)):
+        source_bounds = [roi_bounds]
+    else:
+        source_bounds = list(roi_bounds or [])
+    return [
+        scaled for scaled in (
+            _scaled_roi_bounds(bounds, roi_reference_size, image_width, image_height)
+            for bounds in source_bounds
+        ) if scaled is not None
+    ]
+
+
+def _candidate_intersects_roi(candidate, roi):
+    if roi is None:
+        return True
+    try:
+        x1, y1, x2, y2 = (float(value) for value in candidate["xyxy"])
+        left, top, right, bottom = roi
+        box_left, box_right = min(x1, x2), max(x1, x2)
+        box_top, box_bottom = min(y1, y2), max(y1, y2)
+        return not (
+            box_right < left or box_left > right or
+            box_bottom < top or box_top > bottom
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def _candidate_intersects_any_roi(candidate, rois):
+    return not rois or any(_candidate_intersects_roi(candidate, roi) for roi in rois)
+
+
+def _translate_and_clip_predictions(predictions, offset_x, offset_y, image_width, image_height):
+    """Map crop-relative detector boxes into the retained full image."""
+    mapped = []
+    for prediction in predictions or []:
+        try:
+            x1, y1, x2, y2 = (float(value) for value in prediction["xyxy"])
+            left = max(0.0, min(float(image_width), min(x1, x2) + float(offset_x)))
+            top = max(0.0, min(float(image_height), min(y1, y2) + float(offset_y)))
+            right = max(0.0, min(float(image_width), max(x1, x2) + float(offset_x)))
+            bottom = max(0.0, min(float(image_height), max(y1, y2) + float(offset_y)))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if right <= left or bottom <= top:
+            continue
+        mapped_prediction = dict(prediction)
+        mapped_prediction["xyxy"] = [left, top, right, bottom]
+        mapped.append(mapped_prediction)
+    return mapped
+
+
 def process_image(
     image_path: Path,
-    world_model,
-    world_kind,
+    yoloe_model,
+    yoloe_kind,
     dino_model,
     sam3_model,
     class_names,
@@ -1075,17 +1236,33 @@ def process_image(
     nms_iou=0.55,
     review_dir=None,
     preview_callback=None,
+    roi_enabled=False,
+    roi_bounds=None,
+    roi_reference_size=None,
 ):
     detected = set()
+    inference_image = None
 
     try:
         W, H = safe_open_image(image_path)
+        rois = (
+            _scaled_roi_bounds_list(roi_bounds, roi_reference_size, W, H)
+            if roi_enabled else []
+        )
+        offset_x = 0
+        offset_y = 0
 
-        world_preds = run_world_predict(world_model, world_kind, image_path, class_names)
-        dino_preds = run_dino_predict(dino_model, image_path, class_names)
+        yoloe_preds = run_yoloe_predict(
+            yoloe_model, yoloe_kind, image_path, class_names, image_source=inference_image
+        )
+        dino_preds = run_dino_predict(
+            dino_model, image_path, class_names, image_source=inference_image
+        )
+        yoloe_preds = _translate_and_clip_predictions(yoloe_preds, offset_x, offset_y, W, H)
+        dino_preds = _translate_and_clip_predictions(dino_preds, offset_x, offset_y, W, H)
 
         candidates, borderline = merge_same_class_candidates(
-            world_preds=world_preds,
+            yoloe_preds=yoloe_preds,
             dino_preds=dino_preds,
             class_names=class_names,
             class_thresholds=class_thresholds,
@@ -1103,28 +1280,6 @@ def process_image(
             H=H,
         )
 
-        if not candidates and borderline and review_dir and SAVE_REVIEW_PREVIEWS:
-            save_review_preview(
-                image_path,
-                Path(review_dir),
-                [b["xyxy"] for b in borderline],
-                [b["fused"] for b in borderline],
-                [b["cls_idx"] for b in borderline],
-                class_names,
-            )
-            if preview_callback is not None:
-                try:
-                    preview_callback(
-                        image_path,
-                        [b["xyxy"] for b in borderline],
-                        [b["fused"] for b in borderline],
-                        [b["cls_idx"] for b in borderline],
-                        class_names,
-                    )
-                except Exception as e:
-                    logger.warning("Preview callback failed for %s: %s", image_path, e)
-            return set()
-
         if not candidates:
             if preview_callback is not None and borderline:
                 try:
@@ -1137,6 +1292,17 @@ def process_image(
                     )
                 except Exception as e:
                     logger.warning("Preview callback failed for %s: %s", image_path, e)
+            if borderline and review_dir and SAVE_REVIEW_PREVIEWS:
+                save_review_preview(
+                    image_path,
+                    Path(review_dir),
+                    [b["xyxy"] for b in borderline],
+                    [b["fused"] for b in borderline],
+                    [b["cls_idx"] for b in borderline],
+                    class_names,
+                )
+            if overwrite:
+                write_to_disk(image_path.with_suffix(".txt"), [], [], True)
             return set()
 
         xyxy_list = [c["xyxy"] for c in candidates]
@@ -1148,23 +1314,31 @@ def process_image(
         candidates = cross_class_dedupe(candidates, iou_thresh=CROSS_CLASS_DEDUPE_IOU)
         candidates = filter_teammate_candidates(image_path, candidates, class_names, W, H)
 
+        # Preview the complete full-image inference result. ROI is only a
+        # write filter and must not hide otherwise valid detections in the UI.
+        preview_candidates = list(candidates)
+        label_candidates = (
+            [candidate for candidate in candidates if _candidate_intersects_any_roi(candidate, rois)]
+            if rois else candidates
+        )
+
         final_xywhn = []
         final_cls = []
 
-        for c in candidates:
+        for c in label_candidates:
             xywhn = xyxy_pix_to_xywhn(c["xyxy"], W, H)
             xywhn = [min(max(v, 0.0), 1.0) for v in xywhn]
             final_xywhn.append(xywhn)
             final_cls.append(c["cls_idx"])
             detected.add(class_names[c["cls_idx"]])
 
-        if final_xywhn:
+        if final_xywhn or overwrite:
             write_to_disk(image_path.with_suffix(".txt"), final_xywhn, final_cls, overwrite)
 
         if preview_callback is not None:
-            preview_xyxy = [c["xyxy"] for c in candidates] if candidates else [b["xyxy"] for b in borderline]
-            preview_scores = [c["fused"] for c in candidates] if candidates else [b["fused"] for b in borderline]
-            preview_labels = [c["cls_idx"] for c in candidates] if candidates else [b["cls_idx"] for b in borderline]
+            preview_xyxy = [c["xyxy"] for c in preview_candidates]
+            preview_scores = [c["fused"] for c in preview_candidates]
+            preview_labels = [c["cls_idx"] for c in preview_candidates]
             try:
                 preview_callback(image_path, preview_xyxy, preview_scores, preview_labels, class_names)
             except Exception as e:
@@ -1191,6 +1365,8 @@ def process_image(
         return set()
 
     finally:
+        if inference_image is not None:
+            inference_image.close()
         cleanup_memory()
         maybe_cooldown()
 
@@ -1227,8 +1403,8 @@ def collect_image_paths(image_directory: Path):
 
 def process_images(
     image_directory_path,
-    world_model,
-    world_kind,
+    yoloe_model,
+    yoloe_kind,
     dino_model,
     sam3_model,
     class_names,
@@ -1237,6 +1413,9 @@ def process_images(
     review_dir=None,
     progress_callback=None,
     preview_callback=None,
+    roi_enabled=False,
+    roi_bounds=None,
+    roi_reference_size=None,
 ):
     image_directory = Path(image_directory_path)
     image_paths = collect_image_paths(image_directory)
@@ -1267,8 +1446,8 @@ def process_images(
             detected_classes.update(
                 process_image(
                     image_path=p,
-                    world_model=world_model,
-                    world_kind=world_kind,
+                    yoloe_model=yoloe_model,
+                    yoloe_kind=yoloe_kind,
                     dino_model=dino_model,
                     sam3_model=sam3_model,
                     class_names=class_names,
@@ -1277,6 +1456,9 @@ def process_images(
                     nms_iou=0.55,
                     review_dir=review_dir,
                     preview_callback=preview_callback,
+                    roi_enabled=roi_enabled,
+                    roi_bounds=roi_bounds,
+                    roi_reference_size=roi_reference_size,
                 )
             )
             processed += 1
@@ -1304,25 +1486,31 @@ def run_groundingdino(
     class_names=None,
     dino_config_path=None,
     dino_weights_path=None,
-    world_model_name=None,
+    yoloe_model_name=None,
     runtime_overrides=None,
     progress_callback=None,
     preview_callback=None,
+    roi_enabled=False,
+    roi_bounds=None,
+    roi_reference_size=None,
 ):
-    global WORLD_MODEL_NAME, WORLD_FP16, DINO_FP16, DINO_FP16_FALLBACK
-    global WORLD_CONF, WORLD_IOU, TEXT_THRESHOLD, BBOX_THRESHOLD, BATCH_SIZE, PREDICT_IMGSZ
+    global YOLOE_MODEL_NAME, YOLOE_FP16, YOLOE_ONNX_BACKEND, YOLOE_ONNX_PROVIDER
+    global DINO_FP16, DINO_FP16_FALLBACK
+    global YOLOE_CONF, YOLOE_IOU, TEXT_THRESHOLD, BBOX_THRESHOLD, BATCH_SIZE, PREDICT_IMGSZ
     global PREDICTION_MIN_SIZE_PX, PREDICTION_MAX_PERCENT, IGNORE_TEAMMATES, TEAMMATE_THRESHOLD
     global _TEAMMATE_CLASSIFIER
     global PAIR_MERGE_IOU, CROSS_CLASS_DEDUPE_IOU, DEFAULT_THRESHOLD
 
     runtime_overrides = runtime_overrides or {}
     override_keys = [
-        "WORLD_MODEL_NAME",
-        "WORLD_FP16",
+        "YOLOE_MODEL_NAME",
+        "YOLOE_FP16",
+        "YOLOE_ONNX_BACKEND",
+        "YOLOE_ONNX_PROVIDER",
         "DINO_FP16",
         "DINO_FP16_FALLBACK",
-        "WORLD_CONF",
-        "WORLD_IOU",
+        "YOLOE_CONF",
+        "YOLOE_IOU",
         "TEXT_THRESHOLD",
         "BBOX_THRESHOLD",
         "BATCH_SIZE",
@@ -1345,8 +1533,8 @@ def run_groundingdino(
         if key in override_keys:
             globals()[key] = value
 
-    if world_model_name:
-        WORLD_MODEL_NAME = str(world_model_name)
+    if yoloe_model_name:
+        YOLOE_MODEL_NAME = str(yoloe_model_name)
 
     config_path = dino_config_path or os.path.join(groundingdino.__path__[0], "config", "GroundingDINO_SwinT_OGC.py")
     weights = Path(dino_weights_path) if dino_weights_path else SAM_DIR / "groundingdino_swint_ogc.pth"
@@ -1385,16 +1573,16 @@ def run_groundingdino(
     logger.info("Loaded %d classes.", len(class_names))
     logger.info("Using device: %s", DEVICE)
     logger.info(
-        "BATCH_SIZE=%d | WORLD_CONF=%.3f | TEXT_THRESHOLD=%.3f | BBOX_THRESHOLD=%.3f | WORLD_FP16=%s | DINO_FP16=%s",
-        BATCH_SIZE, WORLD_CONF, TEXT_THRESHOLD, BBOX_THRESHOLD, WORLD_FP16, DINO_FP16
+        "BATCH_SIZE=%d | YOLOE_CONF=%.3f | TEXT_THRESHOLD=%.3f | BBOX_THRESHOLD=%.3f | YOLOE_FP16=%s | DINO_FP16=%s",
+        BATCH_SIZE, YOLOE_CONF, TEXT_THRESHOLD, BBOX_THRESHOLD, YOLOE_FP16, DINO_FP16
     )
 
-    world_model = None
+    yoloe_model = None
     dino_model = None
     sam3_model = None
     try:
-        world_model, world_kind = build_world_predictor(class_names)
-        logger.info("YOLO-World predictor mode: %s", world_kind)
+        yoloe_model, yoloe_kind = build_yoloe_predictor(class_names)
+        logger.info("YOLOE predictor mode: %s", yoloe_kind)
 
         dino_model = load_model(config_path, str(weights), device=DEVICE)
         if hasattr(dino_model, "eval"):
@@ -1406,8 +1594,8 @@ def run_groundingdino(
 
         processed = process_images(
             image_directory_path=image_directory_path,
-            world_model=world_model,
-            world_kind=world_kind,
+            yoloe_model=yoloe_model,
+            yoloe_kind=yoloe_kind,
             dino_model=dino_model,
             sam3_model=sam3_model,
             class_names=class_names,
@@ -1416,11 +1604,14 @@ def run_groundingdino(
             review_dir=review_dir,
             progress_callback=progress_callback,
             preview_callback=preview_callback,
+            roi_enabled=roi_enabled,
+            roi_bounds=roi_bounds,
+            roi_reference_size=roi_reference_size,
         )
         return bool(processed)
     finally:
         try:
-            del world_model
+            del yoloe_model
         except Exception:
             pass
         try:

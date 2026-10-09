@@ -8,7 +8,10 @@ log beside the dataset metadata.
 from __future__ import annotations
 
 import argparse
+from difflib import SequenceMatcher
 import os
+import re
+import threading
 import time
 from pathlib import Path
 
@@ -53,6 +56,21 @@ NO_COLORED_SYMBOL_PROMPTS = (
     "a video game character partly covered by interface graphics or an overlay",
 )
 
+HUD_TEXT = {
+    "ammo", "apex", "assist", "bamboozled", "banner", "cancel", "care package",
+    "charging station", "close", "control", "damage", "decoy", "detected",
+    "eliminated", "elimination", "enemy", "evo orb", "final round", "games",
+    "get back", "hangar", "hold", "knocked", "locked on", "back", "low ammo",
+    "max level", "open", "ping", "position revealed", "recover", "reload",
+    "replicator", "respawn", "revive", "ring", "round", "scan", "shield",
+    "sonar", "squad", "supplies", "toggle", "underdog bonus", "wild card",
+    "safe zone", "weapon", "weapon upgrade", "upgrade", "objective", "capture",
+    "interact", "ultimate", "ability", "inventory", "health", "armory",
+}
+
+_OCR_READERS = {}
+_OCR_READER_LOCK = threading.Lock()
+
 
 class TeammateMarkerClassifier:
     """Reusable, lazily loaded CLIP classifier for auto-label post-filtering."""
@@ -72,6 +90,9 @@ class TeammateMarkerClassifier:
         self.text_features = averaged_text_features(
             self.model, self.processor, self.device
         )
+        self._ocr_reader = None
+        self.last_ocr_error = ""
+        self.last_evidence_counts = {"visual_marker": 0, "ocr_gamer_tag": 0}
 
     def score(self, crops, batch_size=96):
         if not crops:
@@ -84,6 +105,169 @@ class TeammateMarkerClassifier:
             list(crops),
             max(1, int(batch_size or 96)),
         )
+
+    def score_details(self, crops, batch_size=96):
+        if not crops:
+            return []
+        return score_crops(
+            self.model,
+            self.processor,
+            self.text_features,
+            self.device,
+            list(crops),
+            max(1, int(batch_size or 96)),
+            return_details=True,
+        )
+
+    def _easyocr_reader(self):
+        if self._ocr_reader is not None:
+            return self._ocr_reader
+        import easyocr
+        cache_key = "cuda" if self.device.type == "cuda" else "cpu"
+        with _OCR_READER_LOCK:
+            reader = _OCR_READERS.get(cache_key)
+            if reader is None:
+                reader = easyocr.Reader(
+                    ["en"],
+                    gpu=self.device.type == "cuda",
+                    download_enabled=True,
+                    verbose=False,
+                )
+                _OCR_READERS[cache_key] = reader
+        self._ocr_reader = reader
+        return self._ocr_reader
+
+    def friendly_indices(
+        self,
+        images,
+        bounds_batches,
+        *,
+        threshold=0.90,
+        batch_size=96,
+        ocr=True,
+        ocr_confidence=0.20,
+        ocr_name_semantic=0.15,
+        ocr_symbol_semantic=0.15,
+    ):
+        """Return friendly-player indices for each image using visual and OCR evidence.
+
+        The visual path keeps the existing shape-agnostic colored-marker plus
+        nameplate test. OCR is a second path for unfamiliar marker shapes: text
+        must look like a gamer tag, be spatially tied to the proposed player,
+        and have independent CLIP nameplate and colored-symbol evidence.
+        """
+        images = list(images or [])
+        bounds_batches = list(bounds_batches or [])
+        rejected = [set() for _image in images]
+        self.last_ocr_error = ""
+        self.last_evidence_counts = {"visual_marker": 0, "ocr_gamer_tag": 0}
+        crops = []
+        references = []
+        normalized_images = []
+        for image in images:
+            if isinstance(image, Image.Image):
+                normalized_images.append(image.convert("RGB"))
+            elif isinstance(image, (str, os.PathLike)) and os.path.isfile(image):
+                with Image.open(image) as opened:
+                    normalized_images.append(opened.convert("RGB"))
+            else:
+                normalized_images.append(None)
+
+        for image_index, image in enumerate(normalized_images):
+            if image is None:
+                continue
+            boxes = bounds_batches[image_index] if image_index < len(bounds_batches) else []
+            for box_index, bounds in enumerate(boxes or []):
+                crop = marker_crop(image, {"bbox": bounds})
+                if crop is not None:
+                    crops.append(crop)
+                    references.append((image_index, box_index, bounds))
+
+        # Most predictions have no friendly marker at all.  Run the cheap,
+        # local layout check first so ordinary auto-labeling never pays for a
+        # CLIP/OCR pass.  This is deliberately conservative: it only permits
+        # a candidate to advance when a compact colored symbol and a text-like
+        # row are both present over the predicted player's head.
+        screened = [
+            (reference, crop)
+            for reference, crop in zip(references, crops)
+            if has_paired_marker_layout(crop)
+        ]
+        if not screened:
+            return rejected
+
+        screened_references = [reference for reference, _crop in screened]
+        details = self.score_details(
+            [crop for _reference, crop in screened], batch_size=batch_size
+        )
+        ocr_candidates = []
+        threshold = max(0.50, min(0.999, float(threshold or 0.90)))
+        for reference, detail in zip(screened_references, details):
+            image_index, box_index, bounds = reference
+            score, name_score, symbol_score = [float(value) for value in detail]
+            if score >= threshold:
+                rejected[image_index].add(box_index)
+                self.last_evidence_counts["visual_marker"] += 1
+                continue
+            if (
+                ocr
+                and name_score >= float(ocr_name_semantic)
+                and symbol_score >= float(ocr_symbol_semantic)
+            ):
+                ocr_candidates.append((image_index, box_index, bounds))
+
+        if not ocr_candidates:
+            return rejected
+
+        ocr_crops = []
+        ocr_references = []
+        for image_index, box_index, bounds in ocr_candidates:
+            context = wide_nameplate_ocr_crop(
+                normalized_images[image_index], {"bbox": bounds}
+            )
+            if context is None:
+                continue
+            crop, anchor_x, anchor_y = context
+            ocr_crops.append(crop)
+            ocr_references.append((image_index, box_index, anchor_x, anchor_y))
+
+        if not ocr_crops:
+            return rejected
+        try:
+            reader = self._easyocr_reader()
+            outputs = reader.readtext_batched(
+                ocr_crops,
+                # OCR only needs the short player-name strip.  Keep its input
+                # deliberately small so it remains a quick post-filter rather
+                # than a second full-frame inference pass.
+                n_width=384,
+                n_height=112,
+                canvas_size=384,
+                batch_size=min(max(1, int(batch_size or 96)), 16),
+                workers=0,
+                detail=1,
+                paragraph=False,
+                allowlist="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_[]- ",
+            )
+        except Exception as error:
+            self.last_ocr_error = str(error)
+            return rejected
+
+        for (image_index, box_index, anchor_x, anchor_y), results in zip(
+            ocr_references, outputs
+        ):
+            text, _confidence = gamer_tag_from_ocr(
+                results,
+                112,
+                float(ocr_confidence),
+                image_width=384,
+                anchor_x=anchor_x,
+                anchor_y=anchor_y,
+            )
+            if text:
+                rejected[image_index].add(box_index)
+                self.last_evidence_counts["ocr_gamer_tag"] += 1
+        return rejected
 
 
 def marker_crop(image, ground_truth):
@@ -102,6 +286,109 @@ def marker_crop(image, ground_truth):
     if right - left < 8 or bottom - top < 8:
         return None
     return image.crop((left, top, right, bottom))
+
+
+def wide_nameplate_ocr_crop(image, ground_truth, output_size=(384, 112)):
+    """Return a compact nameplate strip directly above one predicted player.
+
+    The historical function name is retained for compatibility.  This crop is
+    intentionally narrow: teammate OCR reads a gamer tag, never the screen's
+    HUD or the rest of the game frame.
+    """
+    bounds = list(ground_truth.get("bbox", []) or [])
+    if len(bounds) < 4:
+        return None
+    x1, y1, x2, y2 = [float(value) for value in bounds[:4]]
+    width, height = image.size
+    box_width = max(1.0, (x2 - x1) * width)
+    box_height = max(1.0, (y2 - y1) * height)
+    center_x = (x1 + x2) * width / 2.0
+    top_y = y1 * height
+    # A nameplate is generally centered at the head and only modestly wider
+    # than the player box.  This is roughly one sixth of the previous OCR
+    # search area, which keeps EasyOCR latency and GPU pressure low.
+    left = max(0, round(center_x - max(box_width * 2.25, width * 0.10)))
+    right = min(width, round(center_x + max(box_width * 2.25, width * 0.10)))
+    top = max(0, round(top_y - max(box_height * 1.55, height * 0.09)))
+    bottom = min(height, round(top_y + max(box_height * 0.18, height * 0.015)))
+    if right - left < 8 or bottom - top < 8:
+        return None
+    output_width, output_height = output_size
+    crop = image.crop((left, top, right, bottom)).resize(
+        (output_width, output_height), Image.Resampling.LANCZOS
+    )
+    anchor_x = (center_x - left) / (right - left) * output_width
+    anchor_y = (top_y - top) / (bottom - top) * output_height
+    return np.asarray(crop), anchor_x, anchor_y
+
+
+def gamer_tag_from_ocr(
+    results,
+    image_height,
+    confidence_threshold,
+    *,
+    image_width=None,
+    anchor_x=None,
+    anchor_y=None,
+):
+    """Select readable player-name text close to the proposed player's head."""
+    best_text = ""
+    best_confidence = 0.0
+    for bounds, text, confidence in results:
+        cleaned = " ".join(str(text).split()).strip(" -_")
+        lowered = cleaned.lower()
+        letters = sum(character.isalpha() for character in cleaned)
+        if float(confidence) < float(confidence_threshold) or letters < 4:
+            continue
+        if looks_like_hud_text(lowered):
+            continue
+        center_y = sum(float(point[1]) for point in bounds) / max(1, len(bounds))
+        if center_y > image_height * 0.82:
+            continue
+        if anchor_x is not None and anchor_y is not None and image_width is not None:
+            xs = [float(point[0]) for point in bounds]
+            horizontal_gap = max(min(xs) - anchor_x, anchor_x - max(xs), 0.0)
+            vertical_gap = anchor_y - center_y
+            centered_above = (
+                horizontal_gap <= image_width * 0.125
+                and -image_height * 0.05 <= vertical_gap <= image_height * 0.48
+            )
+            adjacent_to_icon = (
+                horizontal_gap <= image_width * 0.23
+                and -image_height * 0.03 <= vertical_gap <= image_height * 0.25
+            )
+            if not (centered_above or adjacent_to_icon):
+                continue
+        if float(confidence) > best_confidence:
+            best_text = cleaned
+            best_confidence = float(confidence)
+    return best_text, best_confidence
+
+
+def looks_like_hud_text(text):
+    """Reject exact and slightly clipped OCR readings of common game HUD text."""
+    normalized = " ".join(re.findall(r"[a-z0-9]+", str(text or "").lower()))
+    if not normalized:
+        return False
+    padded = f" {normalized} "
+    if any(f" {phrase} " in padded for phrase in HUD_TEXT):
+        return True
+    hud_tokens = {
+        token
+        for phrase in HUD_TEXT
+        for token in re.findall(r"[a-z]+", phrase)
+        if len(token) >= 4
+    }
+    for token in normalized.split():
+        if len(token) < 4:
+            continue
+        for hud_token in hud_tokens:
+            length_gap = abs(len(token) - len(hud_token))
+            if length_gap > 1:
+                continue
+            if SequenceMatcher(None, token, hud_token).ratio() >= 0.84:
+                return True
+    return False
 
 
 def has_paired_marker_layout(crop):

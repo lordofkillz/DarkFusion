@@ -1,0 +1,14 @@
+{
+  "version": 3,
+  "sourceCopy": "status-source.png",
+  "sourceSha256": "e6ecc9ef51eb15b7ade90bc61f3656733ae9b1073ac75dd5fd3d69956fefac6e",
+  "frames": 120,
+  "frameDelayMs": 40,
+  "durationMs": 4800,
+  "loop": 0,
+  "width": 288,
+  "height": 237,
+  "method": "moving cyan plasma arcs, orbiting lights and expanding energy waves",
+  "sourceAspectPreserved": true,
+  "description": "Visible 2D light and wave effects over the supplied picture; this is not articulated character or 3D animation."
+}

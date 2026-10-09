@@ -1,0 +1,14 @@
+{
+  "version": 3,
+  "sourceCopy": "status-source.png",
+  "sourceSha256": "506527518236da05d0029faf2354c72bd8abd49d60d7af0831dac3af065b4435",
+  "frames": 120,
+  "frameDelayMs": 40,
+  "durationMs": 4800,
+  "loop": 0,
+  "width": 240,
+  "height": 288,
+  "method": "orange flame waves from the mouth, rising sparks and pulsing firelight",
+  "sourceAspectPreserved": true,
+  "description": "Visible 2D light and wave effects over the supplied picture; this is not articulated character or 3D animation."
+}

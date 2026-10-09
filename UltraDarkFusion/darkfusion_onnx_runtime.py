@@ -846,6 +846,7 @@ class DarkFusionOnnxModel:
         device_id: int = 0,
         cache_dir: str | os.PathLike | None = None,
         output_format: str = "auto",
+        framework: str = "auto",
     ):
         self.model_path = os.path.abspath(os.fspath(model_path))
         if not os.path.isfile(self.model_path):
@@ -865,6 +866,11 @@ class DarkFusionOnnxModel:
         if self.output_format not in {"auto", "ultralytics", "yolo_objectness", "end2end"}:
             raise ValueError(
                 "output_format must be auto, ultralytics, yolo_objectness, or end2end"
+            )
+        self.framework = str(framework).lower().strip()
+        if self.framework not in {"auto", "ultralytics", "darknet"}:
+            raise ValueError(
+                "framework must be auto, ultralytics, or darknet"
             )
         self.task_override = str(task).lower().strip() if task else ""
         self.names_override = _normalize_names(names)
@@ -886,6 +892,8 @@ class DarkFusionOnnxModel:
         self._darkfusion_inference_backend = "onnxruntime"
         self.overrides: dict[str, Any] = {}
         self.ckpt: dict[str, Any] = {}
+        self.darknet_confs_name: str = ""
+        self.darknet_boxes_name: str = ""
         self._create_session()
 
     def _session_options(self, chain: Sequence[str]) -> ort.SessionOptions:
@@ -974,6 +982,35 @@ class DarkFusionOnnxModel:
         self.input_shape = list(input_info.shape)
         self.input_type = str(input_info.type)
         self.output_names = [item.name for item in self.session.get_outputs()]
+        
+        # Auto-detect Darknet framework by looking for confs+boxes output pattern
+        if self.framework == "auto" and len(self.output_names) == 2:
+            outputs = self.session.get_outputs()
+            shapes = [list(out.shape) for out in outputs]
+            # Darknet pattern: two outputs where one has shape [B,N,classes] and other [B,N,1,4]
+            # This heuristic checks for the characteristic shapes
+            if len(shapes[0]) == 3 and len(shapes[1]) == 4:
+                self.framework = "darknet"
+                self.darknet_confs_name = outputs[0].name
+                self.darknet_boxes_name = outputs[1].name
+            elif len(shapes[0]) == 4 and len(shapes[1]) == 3:
+                self.framework = "darknet"
+                self.darknet_boxes_name = outputs[0].name
+                self.darknet_confs_name = outputs[1].name
+        elif self.framework == "darknet" and len(self.output_names) == 2:
+            # Explicit Darknet: look for confs and boxes
+            outputs = self.session.get_outputs()
+            for out in outputs:
+                name_lower = out.name.lower()
+                if "conf" in name_lower:
+                    self.darknet_confs_name = out.name
+                elif "box" in name_lower:
+                    self.darknet_boxes_name = out.name
+            # If not found by name, assume first is confs, second is boxes
+            if not self.darknet_confs_name:
+                self.darknet_confs_name = outputs[0].name
+                self.darknet_boxes_name = outputs[1].name
+        
         self.metadata = dict(self.session.get_modelmeta().custom_metadata_map or {})
         self.task = self.task_override or str(self.metadata.get("task", "detect")).lower().strip()
         if self.task not in self.SUPPORTED_TASKS:
@@ -1089,6 +1126,31 @@ class DarkFusionOnnxModel:
             return 5, 5 + class_count
         return 4, 4 + class_count
 
+    def _darknet_preprocess_image(
+        self, image: np.ndarray, target_size: tuple[int, int]
+    ) -> tuple[np.ndarray, LetterboxInfo]:
+        """Darknet preprocessing: direct resize (not letterbox), RGB, normalize, NCHW."""
+        # Direct resize to target size (no letterboxing)
+        resized = cv2.resize(image, target_size, interpolation=cv2.INTER_LINEAR)
+        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+        
+        # Store info for coordinate restoration (no padding, 1:1 ratio)
+        info = LetterboxInfo(
+            original_shape=image.shape[:2],
+            input_shape=target_size,
+            ratio=(1.0, 1.0),
+            pad=(0.0, 0.0)
+        )
+        
+        # Convert to float32, normalize by 255, and transpose to CHW if needed
+        if not self._input_is_nhwc():
+            rgb = rgb.transpose(2, 0, 1)
+        
+        tensor = np.asarray(rgb, dtype=np.float32, order="C")
+        tensor *= 1.0 / 255.0
+        
+        return tensor, info
+
     def _prepare_batch(
         self, sources: Sequence[Any], imgsz: int | Sequence[int] | None
     ) -> tuple[np.ndarray, list[np.ndarray], list[str], list[LetterboxInfo]]:
@@ -1102,20 +1164,29 @@ class DarkFusionOnnxModel:
         tensors: list[np.ndarray] = []
         for source in sources:
             image, path = _load_image(source)
-            if self.task == "classify":
+            if self.framework == "darknet":
+                # Darknet: direct resize (no letterbox)
+                tensor, info = self._darknet_preprocess_image(image, target)
+            elif self.task == "classify":
                 rgb = _classify_resize_crop(image, target)
                 info = LetterboxInfo(
                     original_shape=image.shape[:2], input_shape=target, ratio=(1.0, 1.0), pad=(0.0, 0.0)
                 )
+                if not self._input_is_nhwc():
+                    rgb = rgb.transpose(2, 0, 1)
+                tensor = np.asarray(
+                    rgb, dtype=np.float16 if "float16" in self.input_type else np.float32, order="C"
+                )
+                tensor *= 1.0 / 255.0
             else:
                 letterboxed, info = _letterbox(image, target, self.stride)
                 rgb = cv2.cvtColor(letterboxed, cv2.COLOR_BGR2RGB)
-            if not self._input_is_nhwc():
-                rgb = rgb.transpose(2, 0, 1)
-            tensor = np.asarray(
-                rgb, dtype=np.float16 if "float16" in self.input_type else np.float32, order="C"
-            )
-            tensor *= 1.0 / 255.0
+                if not self._input_is_nhwc():
+                    rgb = rgb.transpose(2, 0, 1)
+                tensor = np.asarray(
+                    rgb, dtype=np.float16 if "float16" in self.input_type else np.float32, order="C"
+                )
+                tensor *= 1.0 / 255.0
             tensors.append(tensor)
             images.append(image)
             paths.append(path)
@@ -1145,6 +1216,76 @@ class DarkFusionOnnxModel:
         if prediction.shape[1] < prediction.shape[2] and prediction.shape[1] <= 4096:
             prediction = prediction.transpose(0, 2, 1)
         return prediction.astype(np.float32, copy=False)
+
+    def _decode_darknet(
+        self,
+        confs: np.ndarray,
+        boxes: np.ndarray,
+        info: LetterboxInfo,
+        confidence: float,
+        iou: float,
+        classes: set[int] | None,
+        agnostic_nms: bool,
+        max_det: int,
+        max_nms: int,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Decode Darknet ONNX output (separate confs and boxes tensors)."""
+        confs = np.asarray(confs, dtype=np.float32)
+        boxes = np.asarray(boxes, dtype=np.float32)
+        
+        # confs shape: [N, num_classes] (already batch-extracted)
+        # boxes shape: [N, 1, 4] or [N, 4] -> ensure [N, 4]
+        if boxes.ndim == 3 and boxes.shape[1] == 1:
+            boxes = boxes.squeeze(1)  # Remove singleton dim: (N,1,4) -> (N,4)
+        elif boxes.ndim == 4:
+            boxes = boxes[0].squeeze(1)  # Remove batch and singleton dims: (B,N,1,4) -> (N,4)
+        
+        class_count = confs.shape[1] if confs.ndim >= 2 else len(self.names)
+        if class_count <= 0:
+            return _empty(0, 6), np.empty((0,), dtype=np.int64), np.empty((0, 0), dtype=np.float32)
+        
+        # Get highest class score for each prediction
+        class_ids = np.argmax(confs, axis=1).astype(np.int64)
+        confidences = confs[np.arange(len(confs)), class_ids]
+        
+        # Filter by confidence threshold
+        valid_boxes = np.isfinite(boxes[:, :4]).all(1)
+        valid_confs = np.isfinite(confidences)
+        valid_conf_thresh = confidences >= float(confidence)
+        valid = valid_boxes & valid_confs & valid_conf_thresh
+        if classes is not None:
+            valid &= np.isin(class_ids, list(classes))
+        
+        source_indices = np.flatnonzero(valid)
+        if not source_indices.size:
+            return _empty(0, 6), np.empty((0,), dtype=np.int64), np.empty((0, 0), dtype=np.float32)
+        
+        # Limit to max_nms before NMS
+        if source_indices.size > int(max_nms):
+            ranked = np.argsort(-confidences[source_indices], kind="stable")[: int(max_nms)]
+            source_indices = source_indices[ranked]
+        
+        selected_boxes = boxes[source_indices]
+        selected_classes = class_ids[source_indices]
+        selected_confidences = confidences[source_indices]
+        
+        # Darknet boxes are already in xyxy format, just need to scale
+        keep = numpy_nms(
+            selected_boxes,
+            selected_confidences,
+            selected_classes,
+            float(iou),
+            int(max_det),
+            agnostic=bool(agnostic_nms),
+        )
+        
+        source_indices = source_indices[keep]
+        boxes_scaled = _scale_xyxy(selected_boxes[keep], info)
+        detections = np.column_stack(
+            (boxes_scaled, selected_confidences[keep], selected_classes[keep].astype(np.float32))
+        ).astype(np.float32)
+        
+        return detections, source_indices, np.empty((len(source_indices), 0), dtype=np.float32)
 
     def _decode_end2end(
         self,
@@ -1299,18 +1440,54 @@ class DarkFusionOnnxModel:
             speed["postprocess"] = (time.perf_counter() - started) * 1000.0
             return result
 
-        if self.end2end and rows.shape[1] >= 6:
+        # Darknet: separate confs and boxes outputs
+        if self.framework == "darknet" and len(outputs) == 2:
+            # Find confs and boxes by name from output_names list
+            confs_data = None
+            boxes_data = None
+            
+            # Match outputs by their registered names in self.output_names
+            for idx, output_name in enumerate(self.output_names):
+                if idx < len(outputs):
+                    if self.darknet_confs_name and output_name == self.darknet_confs_name:
+                        confs_data = np.asarray(outputs[idx], dtype=np.float32)
+                    elif self.darknet_boxes_name and output_name == self.darknet_boxes_name:
+                        boxes_data = np.asarray(outputs[idx], dtype=np.float32)
+            
+            # Fallback: assume first is confs, second is boxes if names not set or not matched
+            if confs_data is None:
+                confs_data = np.asarray(outputs[0], dtype=np.float32)
+            if boxes_data is None:
+                boxes_data = np.asarray(outputs[1], dtype=np.float32)
+            
+            # Extract batch_index
+            if confs_data.ndim >= 2:
+                confs_batch = confs_data[batch_index]
+            else:
+                confs_batch = confs_data
+            
+            if boxes_data.ndim >= 2:
+                boxes_batch = boxes_data[batch_index]
+            else:
+                boxes_batch = boxes_data
+            
+            detections, source_indices, extras = self._decode_darknet(
+                confs_batch, boxes_batch, info, confidence, iou, classes, agnostic_nms, max_det, max_nms
+            )
+            result.boxes = OrtBoxes(detections, info.original_shape)
+        elif self.end2end and rows.shape[1] >= 6:
             detections, source_indices = self._decode_end2end(rows, info, confidence, classes, max_det)
             extras = rows[source_indices, 6:] if len(source_indices) and rows.shape[1] > 6 else _empty(len(source_indices), 0)
+            result.boxes = OrtBoxes(detections, info.original_shape)
         else:
             detections, source_indices, extras = self._decode_raw(
                 rows, info, confidence, iou, classes, agnostic_nms, max_det, max_nms
             )
-
-        if self.task in {"detect", "segment", "pose"}:
             result.boxes = OrtBoxes(detections, info.original_shape)
 
-        if self.task == "pose":
+        if self.task in {"detect"}:
+            pass  # boxes already set above
+        elif self.task == "pose":
             keypoint_shape = _literal_metadata(self.metadata.get("kpt_shape", ""), [])
             if isinstance(keypoint_shape, Sequence) and len(keypoint_shape) >= 2:
                 count, dimensions = int(keypoint_shape[0]), int(keypoint_shape[1])

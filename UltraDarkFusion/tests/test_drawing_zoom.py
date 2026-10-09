@@ -74,7 +74,7 @@ class DrawingZoomTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
-    def make_view(self, zoom=1.0):
+    def make_view(self, zoom=1.0, min_size=4):
         view = ViewHarness()
         view.resize(800, 600)
         scene = QGraphicsScene(0, 0, 640, 480, view)
@@ -87,7 +87,7 @@ class DrawingZoomTests(unittest.TestCase):
             is_segmentation_mode=lambda: False,
             get_current_class_id=lambda: 0,
             outline_Checkbox=SimpleNamespace(isChecked=lambda: False),
-            current_prediction_size_filter_values=lambda: (4, 1.0),
+            current_prediction_size_filter_values=lambda: (min_size, 1.0),
         )
         window.annotation_pixel_size_allowed = lambda *args: check_annotation_size(window, *args)
         view.main_window = window
@@ -130,6 +130,15 @@ class DrawingZoomTests(unittest.TestCase):
                 self.assertAlmostEqual(view.saved[0].height(), 4)
                 self.assertFalse(view.drawing)
                 self.assertIsNone(view.current_bbox)
+
+    def test_one_pixel_setting_allows_one_pixel_boxes_at_each_zoom(self):
+        for zoom in (1, 2, 4, 8, 12):
+            with self.subTest(zoom=zoom):
+                view = self.make_view(zoom, min_size=1)
+                self.drag(view, zoom, zoom)
+                self.assertEqual(len(view.saved), 1)
+                self.assertAlmostEqual(view.saved[0].width(), 1)
+                self.assertAlmostEqual(view.saved[0].height(), 1)
 
     def test_large_screen_box_still_rejects_three_image_pixels(self):
         for zoom in (2, 4, 8):

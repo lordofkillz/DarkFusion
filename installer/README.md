@@ -163,7 +163,7 @@ downloads and compile their manifest and setup scripts into the native EXE:
 python .\installer\prepare_download.py `
   --distribution D:\DarkFusionBuild\distribution `
   --output D:\DarkFusionBuild\online `
-  --release-tag v5.2.0-windows.1
+  --release-tag v5.2.1-windows.1
 .\installer\native\build.ps1 `
   -OutputDirectory D:\DarkFusionBuild\online\native `
   -OnlineManifest D:\DarkFusionBuild\online\download.json `

@@ -1,0 +1,99 @@
+{
+  "tool": "Built-in image_gen",
+  "individualAssets": [
+    {
+      "theme": "fusion-core",
+      "name": "idle-art",
+      "source": "C:\\Users\\neild\\.codex\\generated_images\\01a0b8ae-53aa-7e70-ba19-283fb7c6f552\\exec-9658d44b-c364-42e1-a744-1a176c54e23e.png",
+      "prompt": "Use case: stylized-concept. ONE standalone full-bleed production illustration, landscape 3:2. A sophisticated science-fiction fusion reactor suspended in a dark precision-engineering cathedral. Luminous cyan energy sphere with three exquisitely machined concentric orbital rings and restrained brushed gold accents. Blue-black titanium, dark glass, geometric circuit details, atmospheric dust, great architectural depth. Reactor center-left, dark negative space at right. Luxurious cinematic hard-surface science-fiction illustration, sleek premium instrument aesthetic, no people. Palette #0A1118 #111D29 cyan #55DCEB gold #E8BA65. Absolutely NO UI mockup, panels, buttons, borders, text, letters, title, watermark, collage.",
+      "tool": "built-in image_gen"
+    },
+    {
+      "theme": "fusion-core",
+      "name": "header",
+      "source": "C:\\Users\\neild\\.codex\\generated_images\\01a0b8ae-53aa-7e70-ba19-283fb7c6f552\\exec-f63bda40-b3e0-4028-9880-852d7d52db9b.png",
+      "prompt": "Use case: stylized-concept. ONE standalone panoramic header illustration, very wide 3:1. Blue-black titanium fusion-reactor observatory, a portion of huge illuminated cyan orbital ring and golden reactor machinery on the RIGHT third, subtle cyan conduits, tiny gold technical highlights, dark glass and atmospheric dust. Left 55% almost empty blue-black shadow for future real desktop controls. Main visual detail in middle horizontal band. Sophisticated high-end science-fiction engineering, not fantasy. Palette #0A1118 #111D29 cyan #55DCEB gold #E8BA65. NO UI, panels, buttons, borders, typography, letters, watermark or collage. Clean production background.",
+      "tool": "built-in image_gen"
+    },
+    {
+      "theme": "eclipse-knight",
+      "name": "idle-art",
+      "source": "C:\\Users\\neild\\.codex\\generated_images\\01a0b8ae-53aa-7e70-ba19-283fb7c6f552\\exec-d3ae74fc-fba6-4c9e-9922-0220e7aa03e1.png",
+      "prompt": "Use case: stylized-concept. ONE standalone full-bleed illustration asset, landscape 3:2. An original imposing obsidian-armored dark knight in an intricate closed angular helmet, subtle violet eyes, greatsword point down. An enormous spectral violet dragon behind his shoulder; eclipsed silver moon and distant gothic towers. Blackened metal with delicate silver etchings, flowing black cape, moonlit violet fog. Premium cinematic dark fantasy painted realism. Knight center-left with architectural depth right. Reference for STYLE and character only. Absolutely NO UI, panels, buttons, labels, frame, border, letters, title or watermark. Clean production artwork separate from all interface.",
+      "tool": "built-in image_gen"
+    },
+    {
+      "theme": "eclipse-knight",
+      "name": "header",
+      "source": "C:\\Users\\neild\\.codex\\generated_images\\01a0b8ae-53aa-7e70-ba19-283fb7c6f552\\exec-225fc046-6b29-4675-a49e-0126c5414919.png",
+      "prompt": "Use case: stylized-concept. ONE independent very wide 3:1 landscape header background. A moonlit gothic fortress below a bright silver eclipse, spectral violet dragon glides above the spires at RIGHT, silver atmospheric haze, black-purple night. Left 55% nearly empty black purple shadow for controls. Keep important skyline through center vertical band. Premium cinematic dark fantasy panorama. Reference establishes palette only. No foreground knight, NO UI, panels, buttons, borders, typography, letters, title, watermark or collage. Full-bleed production background.",
+      "tool": "built-in image_gen"
+    },
+    {
+      "theme": "dragonfire",
+      "name": "idle-art",
+      "source": "C:\\Users\\neild\\.codex\\generated_images\\01a0b8ae-53aa-7e70-ba19-283fb7c6f552\\exec-ae2da28b-eb15-498a-9ebd-a05a5bbbe4d3.png",
+      "prompt": "Use case: stylized-concept. ONE standalone full-bleed landscape 3:2 production illustration. Original black-armored dragon knight holding greatsword point down, immense ancient black dragon behind him with molten orange eyes and glowing fissures between its scales. Dark volcanic forge kingdom, distant lava falls, aged bronze filigree, orange embers on scorched steel. Knight center-left, dragon arcs across upper composition, landscape depth right. Premium cinematic dark fantasy painted realism, rich detailed materials, no gore. Reference establishes theme and character only. Absolutely NO UI, panels, buttons, borders, frame, labels, typography, watermark or collage.",
+      "tool": "built-in image_gen"
+    },
+    {
+      "theme": "dragonfire",
+      "name": "header",
+      "source": "C:\\Users\\neild\\.codex\\generated_images\\01a0b8ae-53aa-7e70-ba19-283fb7c6f552\\exec-c3278a83-5638-40d1-9fe4-e3765fafa15a.png",
+      "prompt": "Use case: stylized-concept. ONE separately generated panoramic header background, very wide 3:1. A volcanic forge fortress and distant lava falls, enormous black dragon flying over molten mountains at RIGHT. Fine glowing ember smoke, black iron, aged bronze, orange glow. Left 55% almost empty black-brown shadow to hold future controls. Keep key landscape detail in middle horizontal band. Premium cinematic fantasy panorama. Reference establishes palette only. NO foreground knight, no UI, no buttons, no borders, no text or letters, no watermark, no collage.",
+      "tool": "built-in image_gen"
+    },
+    {
+      "theme": "crimson-eye",
+      "name": "idle-art",
+      "source": "C:\\Users\\neild\\.codex\\generated_images\\01a0b8ae-53aa-7e70-ba19-283fb7c6f552\\exec-84ca4d69-fd96-493b-b326-8f97bd6dbfe7.png",
+      "prompt": "Use case: stylized-concept. ONE standalone full-bleed landscape 3:2 production illustration. Original mature anime dark guardian with long windswept black hair, black lower-face mask, charcoal samurai-inspired armor and black cloak. Intense crimson supernatural eye, a red lunar eclipse and delicate scarlet geometric eye sigil, spectral dragon in charcoal storm clouds behind. Sophisticated mature anime illustration with painterly shading, precise anatomy, black ruby silver palette, guardian center-left, dramatic depth right, no existing franchise character, no gore. Reference for character and palette only. NO UI, panels, frame, border, buttons, letters, labels, typography, watermark, collage.",
+      "tool": "built-in image_gen"
+    },
+    {
+      "theme": "crimson-eye",
+      "name": "header",
+      "source": "C:\\Users\\neild\\.codex\\generated_images\\01a0b8ae-53aa-7e70-ba19-283fb7c6f552\\exec-9d443eda-6c2f-40a8-b2e4-9bd822ead912.png",
+      "prompt": "Use case: stylized-concept. ONE independent panoramic 3:1 header background illustration. Dark anime fantasy skyline of angular black rooftops at RIGHT, immense blood-red lunar eclipse, a distant spectral dragon silhouette through charcoal clouds, restrained scarlet energy wisps. Most detail in right 45% and center horizontal band. Left 55% is nearly black empty atmospheric shadow so later native UI stays readable. Charcoal ruby silver palette. Reference is palette only. No foreground character, NO UI, buttons, panels, borders, labels, typography, letters or watermark. Full-bleed artwork.",
+      "tool": "built-in image_gen"
+    },
+    {
+      "theme": "lord-of-the-rings",
+      "name": "idle-art",
+      "source": "C:\\Users\\neild\\.codex\\generated_images\\01a0b8ae-53aa-7e70-ba19-283fb7c6f552\\exec-d4257154-5f1e-4ae1-8ea6-bbc2ef906943.png",
+      "prompt": "Use case: stylized-concept. Generate ONE standalone full-bleed illustration asset for a desktop app's idle canvas, landscape 3:2. Lord of the Rings dark fantasy fan art: Sauron in iconic towering black spiked armor holds the luminous golden One Ring between gauntleted fingers. Barad-dur with fiery Eye and Mount Doom behind, volcanic Mordor and ash clouds. Exquisite black steel engravings, antique gold, molten orange glow. Premium cinematic dark-fantasy painted realism. Balanced composition with Sauron from waist up center-left, architectural depth at right. Artwork ONLY. Absolutely no UI, no frame, no border, no panels, no title, no letters, no watermark, no collage. This is a separate production illustration, not a UI mockup. The reference is ONLY for palette and character style; remove ALL interface and text.",
+      "tool": "built-in image_gen"
+    },
+    {
+      "theme": "lord-of-the-rings",
+      "name": "header",
+      "source": "C:\\Users\\neild\\.codex\\generated_images\\01a0b8ae-53aa-7e70-ba19-283fb7c6f552\\exec-5630edec-a99f-4d34-8fdd-29cda41e7846.png",
+      "prompt": "Use case: stylized-concept. Generate ONE independent panoramic header background illustration, very wide 3:1 landscape. Lord of the Rings Mordor: Barad-dur and its fiery Eye plus erupting Mount Doom in the RIGHT third, orange lava and dark volcanic terrain, dramatic smoke and ancient gold light. Left 55% is almost black hazy negative space for later native UI controls. Keep important skyline in center horizontal strip, with dark sky above and dark terrain below. Seamless-looking high-end cinematic fantasy panorama. Artwork ONLY. No Sauron foreground, no UI, no frame, no borders, no buttons, no text, no letters, no watermark. Reference image ONLY establishes theme palette. Must be a separately generated header asset, NOT a cropped mockup.",
+      "tool": "built-in image_gen"
+    },
+    {
+      "theme": "dark-wizard",
+      "name": "idle-art",
+      "source": "C:\\Users\\neild\\.codex\\generated_images\\01a0b8ae-53aa-7e70-ba19-283fb7c6f552\\exec-0602406c-1c80-462a-b66c-e1dafbb530b3.png",
+      "prompt": "Use case: stylized-concept. ONE standalone production illustration for an idle canvas, landscape 3:2. An original dark wizard wearing beautifully detailed flowing black robes embroidered in aged gold, shadowed face with emerald eyes, holding a green luminous spell sphere and black staff. Floating ancient grimoire to one side, spectral raven above, gothic tower under green moon and forbidden library arches behind. Cinematic premium dark fantasy painted realism, intricate cloth and metal, emerald/black teal/aged gold. Composition wizard centered left, atmospheric depth right. Reference ONLY for character and palette. NO UI, panels, frames, borders, typography, letters, watermarks, labels or collage. Full bleed clean artwork.",
+      "tool": "built-in image_gen"
+    },
+    {
+      "theme": "dark-wizard",
+      "name": "header",
+      "source": "C:\\Users\\neild\\.codex\\generated_images\\01a0b8ae-53aa-7e70-ba19-283fb7c6f552\\exec-cc327835-fdde-4289-8ccd-4c7ae752ce02.png",
+      "prompt": "Use case: stylized-concept. ONE independent panoramic header illustration, very wide 3:1. A forbidden gothic wizard library, towering shadowed shelves, candles and antique gold astrolabe clustered at RIGHT, arched window reveals green moon and dark sorcerer's tower, subtle emerald mist. Left 55% almost empty black teal shadow for real UI controls to be added later. Detail centered in horizontal middle band. Palette black teal, emerald, antique gold. Reference ONLY establishes theme palette. NO foreground character, NO UI, buttons, frame, border, typography, letters, watermark, collage. Clean full-bleed background asset.",
+      "tool": "built-in image_gen"
+    }
+  ],
+  "previews": [
+    {
+      "theme": "Lord of the Rings",
+      "prompt": "Create a complete LORD OF THE RINGS themed skin preview for UltraDarkFusion desktop YOLO annotation app. Use attached Eclipse Knight app preview as exact layout and UI-structure reference, but replace all violet knight/dragon imagery with a dramatic LORD OF THE RINGS / MORDOR concept. Keep the same major controls and their readable functional text, same large left empty annotation canvas, top header controls, and right Workflow panel. Keep File, Annotate, Tools, System Monitor, Prev, Next, Delete, Auto Scan, Collect/Label/Review/Prepare-Split/Train-Export/Advanced, Add Video/Download/Remove, Playback, Capture/Display, Extract and Stop. This is a fan-themed visual concept, no claim of official affiliation.\nMain left idle-canvas art: Sauron in recognizable ominous black spiked armor and towering crown-like helmet, waist-up, a hand holding the small glowing One Ring, dramatic Mordor ash and Mount Doom lava landscape behind him, distant Barad-dur with fiery Eye overhead. Rich cinematic fantasy painting, exceptionally detailed dark forged armor, subdued antique gold and molten amber lighting. No gore. Leave peripheral atmospheric space for clean cropping later. Top header contains a seamless volcanic landscape panorama, with quiet nearly-black left side behind navigation and brighter Mount Doom on right. Top-right small square GIF emblem still: One Ring floating around an amber eye-like fusion sigil, deep black background. Distinct theme-specific buttons with tiny clean gold icons: film-plus Add Video, downward-arrow Download, engraved X Remove; clean readable center labels, beveled obsidian faces and fine gold etching on corners, amber focus states. Right controls remain dark and practical, subtle embossed metal panels. Avoid illustrated art directly behind small body text.\nPalette: #100D09 near black, #231A10 dark bronze, #D6AA53 antique gold, #EF6C32 lava orange, pale ivory text. Preserve native desktop layout, no fantasy game HUD replacement. The idle canvas art may disappear when real annotation media loads; tiny label 'IDLE CANVAS ARTWORK'. Bottom presentation strip outside app: 'DARK FUSION / LORD OF THE RINGS', subtitle 'MORDOR EDITION · SKIN PREVIEW', four palette swatches. Wide landscape1536x1024 or similar, crisp text, beautiful premium full character skin."
+    },
+    {
+      "theme": "Dark Wizard",
+      "prompt": "Use case: ui-mockup. Create a high-resolution desktop skin preview for UltraDarkFusion, a YOLO annotation application. Reference image is the approved Eclipse Knight preview: preserve its exact functional desktop layout, large left idle-art canvas, compact header controls, and right Workflow panel. New skin: DARK WIZARD / VOID GRIMOIRE. An original mysterious hooded dark wizard in layered black robes with silver runes, an obsidian staff and luminous emerald spell sphere, floating ancient grimoire, spectral raven, distant gothic wizard tower. Premium cinematic dark fantasy illustration, finely detailed with subtle mist, no gore. Palette near-black #080F12, deep teal #102329, emerald #5DDEAE, aged pale gold #C5AF76, offwhite #E5EEE9. The header has a panoramic forbidden library and green magical nebula fading very dark at left so toolbar text is readable. The side GIF placeholder is a beautiful emerald arcane seal on black. Controls have matching emerald/antique gold outlines, restrained corner rune details, distinct film-plus / download arrow / remove X icons next to Add Video, Download, Remove. Keep legible real labels: File, Annotate, Tools, System Monitor, Workflow; Collect, Label, Review, Prepare / Split, Train / Export, Advanced; Add Video, Download, Remove; Playback; Capture / Display; Extract; Stop. All panels must retain dark opaque readable control interiors. No glowing particle clutter behind input text. Artwork occupies only idle canvas and header. Bottom presentation strip says DARK FUSION / DARK WIZARD and VOID GRIMOIRE SKIN PREVIEW, with four color swatches. Ultra-polished functional UI concept, sharp text, wide landscape, no cropped application frame. Do not retain knight, dragon, purple eye motif from reference."
+    }
+  ]
+}

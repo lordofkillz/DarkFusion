@@ -3,6 +3,10 @@ import importlib.util
 import os
 import sys
 
+# Ensure output is unbuffered for real-time log streaming to the UI
+sys.stdout = open(sys.stdout.fileno(), mode='w', encoding='utf8', buffering=1)
+sys.stderr = open(sys.stderr.fileno(), mode='w', encoding='utf8', buffering=1)
+
 import torch
 import yaml
 from ultralytics import YOLO
@@ -157,20 +161,32 @@ def main():
     print("Train args:")
     for key, value in kwargs.items():
         print(f"  {key}={value}")
+    sys.stdout.flush()
 
+    print("\n[TUNING] Loading model and starting hyperparameter tuning...")
+    sys.stdout.flush()
     model = YOLO(args.model)
     tune_kwargs = {"use_ray": use_ray, "iterations": max(1, int(args.iterations)), **kwargs}
     if use_ray:
         tune_kwargs["gpu_per_trial"] = gpu_per_trial
+    print(f"[TUNING] Spawning {args.iterations} trials with Ultralytics {'Ray Tune' if use_ray else 'built-in tuner'}...")
+    sys.stdout.flush()
     result = model.tune(**tune_kwargs)
 
-    print("\nTune finished.")
+    print("\n[TUNING] Completed all trials.")
+    sys.stdout.flush()
     if use_ray:
         best_path = save_ray_best_hyperparameters(result, model, tune_output_dir(kwargs))
         if best_path:
-            print(f"Best hyperparameters saved: {best_path}")
+            print(f"[TUNING] Best hyperparameters saved: {best_path}")
+            sys.stdout.flush()
     if result is not None:
+        print("[TUNING] Results:")
+        sys.stdout.flush()
         print(result)
+        sys.stdout.flush()
+    print("\n[TUNING] Tuning finished. The UI will load the best hyperparameters automatically.")
+    sys.stdout.flush()
 
 
 if __name__ == "__main__":

@@ -20,7 +20,6 @@ REQUIRED_FILES = (
     "prediction_size_filter.py",
     "splash_utils.py",
     "darkfusion_command_runner.py",
-    "darkfusion_console_runner.py",
     "darkfusion_ultralytics_batch.py",
     "darkfusion_ultralytics_cli.py",
     "darkfusion_ultralytics_train.py",
@@ -29,9 +28,20 @@ REQUIRED_FILES = (
     "darkfusion_teammate_review.py",
     "darkfusion_onnx_runtime.py",
     "darkfusion_negative_crops.py",
+    "darkfusion_dataset_statistics.py",
+    "darkfusion_class_semantics.py",
+    "darkfusion_borderline_llm_verifier.py",
+    "darkfusion_ollama_auto_setup.py",
+    "darkfusion_review_feedback.py",
+    "darkfusion_shape_verifier.py",
+    "darkfusion_foreground_verifier.py",
     "darkfusion_review_similarity.py",
     "darkfusion_review_settings.py",
     "darkfusion_translation.py",
+    "darkfusion_training_size.py",
+    "darkfusion_tune_monitor.py",
+    "darkfusion_tune_settings.py",
+    "darkfusion_verified_images.py",
     "darkfusion_dinov3/config.py",
     "darkfusion_dinov3/loader.py",
     "darkfusion_dinov3/download.py",
@@ -51,6 +61,7 @@ REQUIRED_IMPORTS = (
     "GPUtil",
     "PIL",
     "cv2",
+    "clip",
     "diffusers",
     "dotenv",
     "groundingdino",
@@ -123,6 +134,11 @@ def main() -> int:
             importlib.import_module(module_name)
         except Exception as exc:  # report every missing/broken binary binding
             import_failures.append(f"{module_name}: {exc}")
+
+    try:
+        from ultralytics import YOLOE  # noqa: F401
+    except Exception as exc:
+        import_failures.append(f"ultralytics.YOLOE: {exc}")
 
     translation_failures: list[str] = []
     translation_dir = APP_ROOT / "translations"

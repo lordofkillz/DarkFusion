@@ -1,24 +1,16 @@
 @echo off
 setlocal
-cd /d "%~dp0"
-set "PYTHONNOUSERSITE=1"
-set "DF_ENV=%~1"
-if not defined DF_ENV set "DF_ENV=fusion"
-
-set "DF_CONDA="
-for /f "delims=" %%C in ('where conda.exe 2^>nul') do if not defined DF_CONDA set "DF_CONDA=%%C"
-if not defined DF_CONDA if exist "%USERPROFILE%\miniconda3\Scripts\conda.exe" set "DF_CONDA=%USERPROFILE%\miniconda3\Scripts\conda.exe"
-if not defined DF_CONDA if exist "%USERPROFILE%\anaconda3\Scripts\conda.exe" set "DF_CONDA=%USERPROFILE%\anaconda3\Scripts\conda.exe"
-if not defined DF_CONDA if exist "C:\ProgramData\miniconda3\Scripts\conda.exe" set "DF_CONDA=C:\ProgramData\miniconda3\Scripts\conda.exe"
-if not defined DF_CONDA if exist "C:\ProgramData\anaconda3\Scripts\conda.exe" set "DF_CONDA=C:\ProgramData\anaconda3\Scripts\conda.exe"
-if not defined DF_CONDA (
-    echo [ERROR] Conda was not found. Install Miniconda or Anaconda first.
-    pause
-    exit /b 1
+call "%~dp0activate_fusion.bat"
+if errorlevel 1 exit /b 1
+cd /d "%~dp0UltraDarkFusion"
+if /i "%~1"=="--check" (
+    "%CONDA_PREFIX%\python.exe" -s -c "import json,sys,site,shutil,os; print(json.dumps(dict(python=sys.executable,prefix=sys.prefix,pip=shutil.which('pip'),user_site_enabled=site.ENABLE_USER_SITE,conda_env=os.environ.get('CONDA_DEFAULT_ENV'),cwd=os.getcwd()),indent=2)); assert sys.prefix.lower()==os.environ['CONDA_PREFIX'].lower(); assert not site.ENABLE_USER_SITE; assert shutil.which('pip').lower().startswith(sys.prefix.lower())"
+    exit /b
 )
-
-pushd "%~dp0UltraDarkFusion"
-"%DF_CONDA%" run --name "%DF_ENV%" --no-capture-output python "UltraDarkFusion_v5.2.py"
-set "DF_EXIT=%ERRORLEVEL%"
-popd
-exit /b %DF_EXIT%
+"%CONDA_PREFIX%\python.exe" -s "UltraDarkFusion_v5.2.py" %*
+set "DF_LAUNCH_EXIT=%ERRORLEVEL%"
+if not "%DF_LAUNCH_EXIT%"=="0" (
+    echo DarkFusion stopped with error %DF_LAUNCH_EXIT%.
+    pause
+)
+exit /b %DF_LAUNCH_EXIT%

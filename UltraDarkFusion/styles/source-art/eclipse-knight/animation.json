@@ -1,0 +1,14 @@
+{
+  "version": 3,
+  "sourceCopy": "status-source.png",
+  "sourceSha256": "6d2a13e3d6fe5cc3d45eca08c65f19da756799f30d146fd43744dfbd0d55cfd1",
+  "frames": 120,
+  "frameDelayMs": 40,
+  "durationMs": 4800,
+  "loop": 0,
+  "width": 163,
+  "height": 288,
+  "method": "flowing violet energy ribbons, drifting particles and a stronger visor glow",
+  "sourceAspectPreserved": true,
+  "description": "Visible 2D light and wave effects over the supplied picture; this is not articulated character or 3D animation."
+}

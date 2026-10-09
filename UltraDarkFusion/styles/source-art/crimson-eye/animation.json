@@ -1,0 +1,14 @@
+{
+  "version": 3,
+  "sourceCopy": "status-source.png",
+  "sourceSha256": "de8d8d5fc9366dd9d617696cbcf36a4a821141b1e3a426f033c4a2eaeec0d707",
+  "frames": 120,
+  "frameDelayMs": 40,
+  "durationMs": 4800,
+  "loop": 0,
+  "width": 227,
+  "height": 288,
+  "method": "scarlet energy waves and rising red embers",
+  "sourceAspectPreserved": true,
+  "description": "Visible 2D light and wave effects over the supplied picture; this is not articulated character or 3D animation."
+}
