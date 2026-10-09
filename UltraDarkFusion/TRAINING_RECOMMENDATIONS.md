@@ -1,7 +1,8 @@
 # Generate Files + Parameters
 
-The Trainer estimates a **starting setup**, then saves its explanation and
-measurements in `train_recommendations.yaml` beside the dataset YAML. Only the
+The Trainer estimates a **starting setup**, then saves a valid Ultralytics
+training configuration in `train_recommendations.yaml` beside the dataset YAML.
+The explanation and measurements remain in the evaluation report. Only the
 training split drives these estimates. Validation remains available to measure
 accuracy independently.
 

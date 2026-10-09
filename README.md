@@ -26,9 +26,9 @@ progress appears in the setup window; interrupted downloads can resume when you
 run setup again.
 
 Requires Windows 10 version 1903 or later, or Windows 11 x64, an internet connection,
-and approximately **35 GB free during setup**. The combined download is about
-**10.2 GB**; the application, runtime, and included models occupy about **15.2 GB**
-after setup. NVIDIA drivers are needed for GPU features.
+and approximately **35 GB free during setup**. Setup shows download progress
+and verifies the runtime and model files before installing them. NVIDIA drivers
+are needed for GPU features.
 
 ### Prefer to manage Python yourself?
 
@@ -38,6 +38,16 @@ recommended setup experience, use the **Download DarkFusionSetup.exe** link abov
 
 ## What changed in 5.2.1
 
+- Teammate-ignore auto labeling uses conditional, compact nameplate OCR; its
+  CLIP and OCR models are cached after their first-use downloads.
+- SAM3 shape analysis uses existing annotations as its reference, with
+  conservative handling when there is not enough reference data.
+- Six new DF themes have matching names, GIFs, icons, and panorama artwork
+  behind the upper Status dock controls. Idle artwork disappears when an image
+  is displayed.
+- The updated Windows installer removes duplicate runtime archive entries,
+  and source installation uses one consistent pinned dependency list.
+- Video renderer changes apply immediately from Settings.
 - DINOv3 Base/Large visual matching and DINOv3 visual class outlier analysis,
   with verified model downloads on first use. Base downloads 343 MB; Large
   downloads 1.21 GB. See [model setup](MODEL_SETUP.md).

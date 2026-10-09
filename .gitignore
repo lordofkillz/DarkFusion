@@ -102,6 +102,77 @@ mobileclip2_b.ts
 UltraDarkFusion/styles/gifs/darkfusion (2).gif
 
 # Local development/scratch directories
+# Theme exports/source variants remain local; retain only runtime artwork.
+UltraDarkFusion/styles/df-assets/**
+!UltraDarkFusion/styles/df-assets/**/
+!UltraDarkFusion/styles/df-assets/*/theme.json
+!UltraDarkFusion/styles/df-assets/*/header.png
+!UltraDarkFusion/styles/df-assets/*/idle-art.png
+!UltraDarkFusion/styles/df-assets/*/status.gif
+!UltraDarkFusion/styles/df-assets/*/menu-bar.png
+!UltraDarkFusion/styles/df-assets/*/status-bar.png
+!UltraDarkFusion/styles/df-assets/*/buttons/background-*.png
+!UltraDarkFusion/styles/df-assets/*/icons/check.svg
+!UltraDarkFusion/styles/df-assets/*/icons/close.svg
+!UltraDarkFusion/styles/df-assets/*/icons/chevron-down.svg
+!UltraDarkFusion/styles/df-assets/*/icons/chevron-up.svg
+!UltraDarkFusion/styles/df-assets/*/icons/add-video.svg
+!UltraDarkFusion/styles/df-assets/*/icons/annotate.svg
+!UltraDarkFusion/styles/df-assets/*/icons/clear.svg
+!UltraDarkFusion/styles/df-assets/*/icons/download.svg
+!UltraDarkFusion/styles/df-assets/*/icons/extract.svg
+!UltraDarkFusion/styles/df-assets/*/icons/folder.svg
+!UltraDarkFusion/styles/df-assets/*/icons/help.svg
+!UltraDarkFusion/styles/df-assets/*/icons/link.svg
+!UltraDarkFusion/styles/df-assets/*/icons/monitor.svg
+!UltraDarkFusion/styles/df-assets/*/icons/next.svg
+!UltraDarkFusion/styles/df-assets/*/icons/play.svg
+!UltraDarkFusion/styles/df-assets/*/icons/previous.svg
+!UltraDarkFusion/styles/df-assets/*/icons/remove.svg
+!UltraDarkFusion/styles/df-assets/*/icons/review.svg
+!UltraDarkFusion/styles/df-assets/*/icons/save.svg
+!UltraDarkFusion/styles/df-assets/*/icons/scan.svg
+!UltraDarkFusion/styles/df-assets/*/icons/settings.svg
+!UltraDarkFusion/styles/df-assets/*/icons/shortcut.svg
+!UltraDarkFusion/styles/df-assets/*/icons/split.svg
+!UltraDarkFusion/styles/df-assets/*/icons/stop.svg
+!UltraDarkFusion/styles/df-assets/*/icons/tools.svg
+!UltraDarkFusion/styles/df-assets/*/icons/train.svg
+# Maintainer build/publishing records are not user installation inputs.
+UPLOAD_MANIFEST.md
+installer/build_distribution.py
+installer/prepare_download.py
+installer/pack-runtime.ps1
+installer/publish_release.py
+scripts/build_readme_media.ps1
+UltraDarkFusion/diagnose_training_status.py
+UltraDarkFusion/tools/model_inspection/
+UltraDarkFusion/tools/standalone/
+UltraDarkFusion/tools/ui/
+UltraDarkFusion/styles/previews/
+UltraDarkFusion/styles/source-art/
+# Keep personal audit/comparison notes and QA fixtures in the working directory.
+AGENTS.md
+tests/
+test_*.py
+installer/native/native-smoke.cpp
+installer/native/test-*.ps1
+installer/windows/test-*.ps1
+UltraDarkFusion/AUGMENTATION_OLLAMA_ASSESSMENT.md
+UltraDarkFusion/CAPTURE_VIDEO_LABELING_AUDIT.md
+UltraDarkFusion/CODEBASE_AUDIT_OLLAMA_INTEGRATION.md
+UltraDarkFusion/COMPLETE_WORKFLOW_WITH_AUTO_VERIFICATION.md
+UltraDarkFusion/COPY_PASTE_GAME_FOOTAGE_SOLUTION.md
+UltraDarkFusion/GPU_PIPELINE_ANALYSIS.md
+UltraDarkFusion/GRID_THUMBNAIL_SIZE_FEATURE.md
+UltraDarkFusion/IMPLEMENTATION_COMPLETE.md
+UltraDarkFusion/INFERENCE_PIPELINE_AUDIT.md
+UltraDarkFusion/MULTI_PASS_STRATEGY.md
+UltraDarkFusion/PIPELINE_AUDIT.md
+UltraDarkFusion/PREPROCESSING_STATUS.md
+UltraDarkFusion/QUICK_START_YOUR_WORKFLOW.md
+UltraDarkFusion/ULTRALYTICS_COMPARISON.md
+UltraDarkFusion/YOLO_AUTOLABEL_WORKFLOW.md
 eagle/
 unfinished_Scripts/
 low_latency_vision_app/

@@ -64,35 +64,8 @@ unrelated output schemas identical. Faster R-CNN, DETR, custom Darknet heads,
 or other architectures need a decoder adapter that maps their outputs into
 DarkFusion's result contract.
 
-For the current YOLO path, export with `nms=False`. Python postprocessing was
-faster in local testing than the tested ONNX graph containing NMS, and it keeps
-confidence/IoU settings adjustable at runtime.
-
-## Parity testing
-
-`UltraDarkFusion/tools/model_inspection/darkfusion_onnx_parity.py` is development-only and imports Ultralytics solely
-as a reference implementation. It disables Ultralytics automatic dependency
-installation before importing it.
-
-```powershell
-python UltraDarkFusion/tools/model_inspection/darkfusion_onnx_parity.py `
-  --model best.onnx `
-  --source image.png `
-  --preload `
-  --provider cuda `
-  --task detect `
-  --warmup 3 `
-  --runs 20
-```
-
-Use `--preload` for video-like benchmarking where DarkFusion already owns the
-decoded OpenCV frame. Omit it to include disk image decoding.
-
-Fast unit tests:
-
-```powershell
-python -m unittest discover -s UltraDarkFusion/tests -p "test_*.py" -v
-```
+For the current YOLO path, export with `nms=False` to keep confidence and IoU
+settings adjustable at runtime.
 
 ## DarkFusion UI integration
 

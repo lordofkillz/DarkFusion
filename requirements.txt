@@ -24,6 +24,7 @@ torchvision==0.22.0+cu128
 numpy==1.26.4
 scipy==1.15.3
 Pillow==12.2.0
+pi-heif==1.4.0
 PyYAML==6.0.2
 psutil==7.0.0
 GPUtil==1.4.0

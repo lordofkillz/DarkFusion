@@ -22768,49 +22768,6 @@ class ROIEdgeSliders(QtCore.QObject):
         return super().eventFilter(watched, event)
 
 
-class ThemeHeaderBackdrop(QtWidgets.QWidget):
-    """Paint a theme panorama as a cropped, readable header backdrop."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._pixmap = QPixmap()
-        self._focal_y = 0.5
-        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self.setProperty("dfHeaderPanel", True)
-        if parent is not None:
-            parent.installEventFilter(self)
-            self.setGeometry(parent.rect())
-
-    def eventFilter(self, watched, event):
-        if watched is self.parentWidget() and event.type() in (QEvent.Resize, QEvent.Show):
-            self.setGeometry(watched.rect())
-        return super().eventFilter(watched, event)
-
-    def set_header(self, path="", focal_y=0.5):
-        pixmap = QPixmap(str(path or ""))
-        self._pixmap = pixmap if not pixmap.isNull() else QPixmap()
-        try:
-            self._focal_y = max(0.0, min(1.0, float(focal_y)))
-        except (TypeError, ValueError):
-            self._focal_y = 0.5
-        self.setVisible(not self._pixmap.isNull())
-        self.update()
-
-    def paintEvent(self, _event):
-        if self._pixmap.isNull() or self.width() <= 0 or self.height() <= 0:
-            return
-        pixmap_width = self._pixmap.width()
-        pixmap_height = self._pixmap.height()
-        scale = max(self.width() / pixmap_width, self.height() / pixmap_height)
-        source_width = min(pixmap_width, max(1, round(self.width() / scale)))
-        source_height = min(pixmap_height, max(1, round(self.height() / scale)))
-        source_x = max(0, (pixmap_width - source_width) // 2)
-        focal_center = round(self._focal_y * pixmap_height)
-        source_y = max(0, min(pixmap_height - source_height, focal_center - source_height // 2))
-        painter = QPainter(self)
-        painter.drawPixmap(self.rect(), self._pixmap, QRect(source_x, source_y, source_width, source_height))
-        # Keep labels and controls readable without losing the themed scenery.
-        painter.fillRect(self.rect(), QColor(0, 0, 0, 112))
 
 
 class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
@@ -22860,31 +22817,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 return manifest
         return None
 
-    def _install_theme_header_backdrop(self):
-        host = getattr(self, "dockWidgetContents_3", None)
-        if not isinstance(host, QtWidgets.QWidget):
-            return
-        backdrop = getattr(self, "_theme_header_backdrop", None)
-        if not isinstance(backdrop, ThemeHeaderBackdrop):
-            backdrop = ThemeHeaderBackdrop(host)
-            backdrop.setObjectName("themeHeaderBackdrop")
-            self._theme_header_backdrop = backdrop
-        backdrop.setGeometry(host.rect())
-        backdrop.lower()
-
     def _apply_theme_header_art(self, manifest=None):
-        self._install_theme_header_backdrop()
-        backdrop = getattr(self, "_theme_header_backdrop", None)
-        if not isinstance(backdrop, ThemeHeaderBackdrop):
-            return
-        manifest = manifest if isinstance(manifest, dict) else self._theme_manifest_for_style()
-        if not manifest:
-            backdrop.set_header()
-            return
-        header_name = str(manifest.get("header", "")).strip()
-        header_path = Path(manifest.get("_directory", "")) / header_name
-        backdrop.set_header(header_path, manifest.get("headerFocalY", 0.5))
-        backdrop.lower()
+        """Apply the original theme package's top-dock and idle-canvas artwork."""
+        from darkfusion_theme_assets import apply_theme_assets
+
+        style_name = self.styleComboBox.currentText()
+        apply_theme_assets(self, style_name, Path(APP_DIR) / "styles")
 
     def recommended_ui_scale_percent(self, screen=None):
         """Return an extra app scale based on Qt's available logical pixels."""
@@ -27001,7 +26939,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
     def __init__(self):
         super().__init__()
         self.setupUi(self)
-        self._install_theme_header_backdrop()
         self._apply_global_line_spacing()
         self._clean_restored_ui()
         self.video_playback_fps_limit = 240
@@ -42398,6 +42335,17 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
     def get_frame_interval_ms(self, fps=None):
         fps = float(fps or 30.0)
         return max(1, int(round(1000.0 / max(1.0, fps))))
+
+    def set_video_playback_renderer(self, mode, save=True):
+        """Apply the selected renderer immediately and persist the preference."""
+        mode = video_playback_renderer_key(mode)
+        self.settings["videoPlaybackRenderer"] = mode
+        viewer = getattr(self, "frame_viewer", None)
+        if viewer is not None:
+            viewer.set_renderer_mode(mode)
+        if save:
+            self.queue_settings_save(delay_ms=100)
+        return mode
 
     def get_video_playback_fps_limit(self):
         """Return a safety ceiling for local decoding, independent of output FPS.
@@ -61748,6 +61696,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         except Exception:
             pass
 
+        self._apply_theme_header_art()
+
     def _apply_default_item_view_palette(self):
         """
         Keep Qt item views from falling back to Fusion's light Base/AlternateBase
@@ -61806,8 +61756,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         corresponding_gif = ""
         gif_path = ""
         if manifest:
-            corresponding_gif = str(manifest.get("gif", "")).strip()
-            candidate = Path(manifest.get("_directory", "")) / corresponding_gif
+            corresponding_gif = f"{Path(selected_style).stem}.gif"
+            candidate = Path(manifest.get("_directory", "")) / str(manifest.get("gif", "")).strip()
             if candidate.is_file():
                 gif_path = str(candidate)
         if not gif_path:

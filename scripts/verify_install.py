@@ -26,6 +26,7 @@ REQUIRED_FILES = (
     "darkfusion_ultralytics_tune.py",
     "darkfusion_validation_review.py",
     "darkfusion_teammate_review.py",
+    "darkfusion_theme_assets.py",
     "darkfusion_onnx_runtime.py",
     "darkfusion_negative_crops.py",
     "darkfusion_dataset_statistics.py",

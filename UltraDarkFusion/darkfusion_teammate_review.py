@@ -80,23 +80,40 @@ class TeammateMarkerClassifier:
         self.device = torch.device(
             "cuda" if requested != "cpu" and torch.cuda.is_available() else "cpu"
         )
-        model_name = "openai/clip-vit-base-patch32"
-        self.processor = CLIPProcessor.from_pretrained(
-            model_name, local_files_only=True, use_fast=True
-        )
-        self.model = CLIPModel.from_pretrained(
-            model_name, local_files_only=True
-        ).to(self.device).eval()
-        self.text_features = averaged_text_features(
-            self.model, self.processor, self.device
-        )
+        self.processor = None
+        self.model = None
+        self.text_features = None
+        self._model_lock = threading.Lock()
         self._ocr_reader = None
         self.last_ocr_error = ""
         self.last_evidence_counts = {"visual_marker": 0, "ocr_gamer_tag": 0}
 
+    def _ensure_model(self):
+        if self.model is not None:
+            return
+        with self._model_lock:
+            if self.model is not None:
+                return
+            model_name = "openai/clip-vit-base-patch32"
+
+            def load_cached_or_download(loader, **kwargs):
+                try:
+                    return loader.from_pretrained(model_name, local_files_only=True, **kwargs)
+                except OSError:
+                    # Only the first uncached marker candidate needs internet.
+                    return loader.from_pretrained(model_name, local_files_only=False, **kwargs)
+
+            processor = load_cached_or_download(CLIPProcessor, use_fast=True)
+            model = load_cached_or_download(CLIPModel).to(self.device).eval()
+            features = averaged_text_features(model, processor, self.device)
+            self.processor = processor
+            self.text_features = features
+            self.model = model
+
     def score(self, crops, batch_size=96):
         if not crops:
             return []
+        self._ensure_model()
         return score_crops(
             self.model,
             self.processor,
@@ -109,6 +126,7 @@ class TeammateMarkerClassifier:
     def score_details(self, crops, batch_size=96):
         if not crops:
             return []
+        self._ensure_model()
         return score_crops(
             self.model,
             self.processor,
@@ -619,11 +637,8 @@ def main():
     output = normalized(args.output)
     write_report(output, report)
 
-    model_name = "openai/clip-vit-base-patch32"
-    print(f"Loading local CLIP teammate scanner on {device}", flush=True)
-    processor = CLIPProcessor.from_pretrained(model_name, local_files_only=True, use_fast=True)
-    model = CLIPModel.from_pretrained(model_name, local_files_only=True).to(device).eval()
-    text_features = averaged_text_features(model, processor, device)
+    print(f"Preparing lazy CLIP teammate scanner on {device}", flush=True)
+    classifier = TeammateMarkerClassifier(str(device))
     report["stage"] = "finding_teammate_labels"
     write_report(output, report)
 
@@ -649,9 +664,7 @@ def main():
             except Exception as error:
                 print(f"Skipped {image_path}: {error}", flush=True)
 
-        scores = score_crops(
-            model, processor, text_features, device, crops, clip_batch, return_details=True
-        ) if crops else []
+        scores = classifier.score_details(crops, batch_size=clip_batch)
         for (image_path, gt), (score, name_score, symbol_score) in zip(candidates, scores):
             if score < threshold:
                 continue

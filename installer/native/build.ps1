@@ -76,6 +76,9 @@ try {
         & $compiler @common $target.Source "/Fo$obj" "/Fe$exe" @targetResources /link /SUBSYSTEM:WINDOWS /MANIFEST:EMBED "/MANIFESTINPUT:$manifest" @libraries
         if ($LASTEXITCODE -ne 0) { throw "Native build failed: $($target.Name)" }
     }
+    if ($RunTests -and -not (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'native-smoke.cpp'))) {
+        throw 'QA fixtures are local-only and are not distributed on GitHub. Build without -RunTests, or run QA from the maintainer working directory.'
+    }
     if ($RunTests) {
         $testExe = Join-Path $OutputDirectory 'native smoke.exe'
         & $compiler @common 'native-smoke.cpp' "/Fo$(Join-Path $OutputDirectory 'native-smoke.obj')" "/Fe$testExe" /link /SUBSYSTEM:CONSOLE @libraries

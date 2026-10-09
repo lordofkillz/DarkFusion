@@ -88,6 +88,19 @@ The matcher preserves object crops and aspect ratio, with a small margin. It
 compares annotations of the same class. A similarity percentage means visual
 resemblance, not confidence that a label is wrong; inspect matches before removal.
 
+## Teammate-ignore models
+
+The teammate filter downloads `openai/clip-vit-base-patch32` from Hugging Face
+only when an uncached candidate needs visual confirmation. Subsequent batches
+reuse the model. Batches without paired overhead marker/name evidence skip
+model loading, CLIP inference, and OCR entirely.
+
+EasyOCR downloads its English reader models automatically on the first OCR
+candidate and caches the reader. It reads only a compact 384 x 112 player-name
+strip; visual confirmations do not require OCR. First-use downloads/loading
+can take longer than normal inference. These models do not need a Google Drive
+bundle update. SAM3 shape analysis uses the existing `Sam/sam3.pt` checkpoint.
+
 ## TensorRT engines
 
 Do not distribute one `.engine` as a universal model. TensorRT engines depend
