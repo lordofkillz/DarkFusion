@@ -115,9 +115,18 @@ def main() -> None:
         assert work.parent == output  # Temporary cleanup stays inside this new build folder.
         with zipfile.ZipFile(runtime_archive) as source, zipfile.ZipFile(payload, "w", allowZip64=True) as target:
             python = unicode_python(source, work, manifest_tool)
-            for entry in source.infolist():
-                if not entry.filename.startswith("runtime/"):
-                    continue  # Replace every old app file with the new tracked source.
+            runtime_entries = [
+                entry for entry in source.infolist() if entry.filename.startswith("runtime/")
+            ]
+            # Conda-pack can retain duplicate compatibility DLL entries. Windows
+            # extracts the last one, but the standalone installer intentionally
+            # rejects ambiguous archives, so preserve that final entry once.
+            final_entry_index = {
+                entry.filename: index for index, entry in enumerate(runtime_entries)
+            }
+            for index, entry in enumerate(runtime_entries):
+                if final_entry_index[entry.filename] != index:
+                    continue
                 encoded = copy.copy(entry)
                 encoded.compress_type = zipfile.ZIP_DEFLATED
                 encoded._compresslevel = 1
