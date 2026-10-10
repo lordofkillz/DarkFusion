@@ -57,8 +57,10 @@ PROVIDER_ALIASES = {
 }
 
 AUTO_PROVIDER_PRIORITY = (
-    "CUDAExecutionProvider",
+    # The Windows distribution uses DirectML for ONNX inference. Prefer it
+    # whenever available, without changing explicit choices or PyTorch CUDA.
     "DmlExecutionProvider",
+    "CUDAExecutionProvider",
     "MIGraphXExecutionProvider",
     "ROCMExecutionProvider",
     "OpenVINOExecutionProvider",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import importlib.metadata
 import json
 import sys
 from pathlib import Path
@@ -122,6 +123,35 @@ TRANSLATION_CODES = (
 )
 
 
+def verify_onnx_backend() -> list[str]:
+    """Reject missing/overlapping ORT variants in the standard Windows runtime."""
+    if sys.platform != "win32":
+        return []
+    failures: list[str] = []
+    try:
+        import onnxruntime
+
+        version = importlib.metadata.version("onnxruntime-directml")
+        for variant in ("onnxruntime", "onnxruntime-gpu", "onnxruntime-openvino"):
+            try:
+                importlib.metadata.version(variant)
+            except importlib.metadata.PackageNotFoundError:
+                continue
+            failures.append(
+                f"{variant} overlaps onnxruntime-directml; use only the DirectML variant."
+            )
+        if onnxruntime.__version__ != version:
+            failures.append("ONNX Runtime module and DirectML package versions do not match.")
+        providers = onnxruntime.get_available_providers()
+        if "DmlExecutionProvider" not in providers:
+            failures.append("DirectML execution provider is missing from ONNX Runtime.")
+        if not failures:
+            print(f"ONNX Runtime: {version}; backend: DirectML; providers: {', '.join(providers)}")
+    except Exception as exc:
+        failures.append(f"Windows ONNX backend requires onnxruntime-directml: {exc}")
+    return failures
+
+
 def main() -> int:
     if sys.version_info[:2] != (3, 12):
         print(f"ERROR: Python 3.12 is required; found {sys.version.split()[0]}.")
@@ -139,6 +169,8 @@ def main() -> int:
         from ultralytics import YOLOE  # noqa: F401
     except Exception as exc:
         import_failures.append(f"ultralytics.YOLOE: {exc}")
+
+    import_failures.extend(verify_onnx_backend())
 
     translation_failures: list[str] = []
     translation_dir = APP_ROOT / "translations"

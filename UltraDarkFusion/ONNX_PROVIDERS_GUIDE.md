@@ -8,8 +8,13 @@ python -c "import onnxruntime as ort; print(ort.get_available_providers())"
 ```
 
 The pinned Windows source installation and tested standalone runtime use
-`onnxruntime-directml==1.22.0`, matching the working local version. ONNX
-CUDA/TensorRT requires replacing it with `onnxruntime-gpu==1.22.0` in a separate
+`onnxruntime-directml==1.22.0`, matching the working local version.
+The **Automatic** provider prefers DirectML; select **DirectML** to
+require it explicitly. CPU remains available as a compatibility fallback.
+The installer and `DarkFusion.exe --verify` check the Windows DirectML package
+and provider registration, not just whether `import onnxruntime` succeeds.
+
+ONNX CUDA/TensorRT requires replacing it with `onnxruntime-gpu==1.22.0` in a separate
 tested environment. Select a supported provider in DarkFusion's inference
 settings; provider availability depends on that runtime and installed drivers.
 

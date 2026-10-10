@@ -62,13 +62,13 @@ yapf==0.43.0
 diffusers==0.33.1
 accelerate>=0.31.0,<2.0.0
 
-# ONNX / TensorRT model support.
+# ONNX inference: DirectML on Windows; PyTorch training still uses CUDA.
 onnx==1.17.0
 onnxruntime-directml==1.22.0; platform_system == "Windows"
 onnxruntime==1.22.0; platform_system != "Windows"
-# Match the tested Windows runtime. To use CUDA/TensorRT ONNX providers instead,
-# replace DirectML with onnxruntime-gpu==1.22.0; never install both variants.
-# ORT 1.22 TensorRT EP is built/tested against TensorRT 10.9 + CUDA 12.
+# Install only ONE ONNX Runtime distribution: the variants share native files.
+# DirectML is the Windows default, including in the standalone EXE runtime.
+# Native TensorRT export/engine support is separate from the ONNX backend.
 # Do not replace this with the unsuffixed latest package (currently CUDA 13).
 tensorrt-cu12==10.9.0.34
 

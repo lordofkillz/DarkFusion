@@ -9,7 +9,7 @@ image paths, OpenCV BGR arrays, or lists of either.
 ```python
 from darkfusion_onnx_runtime import DarkFusionOnnxModel
 
-model = DarkFusionOnnxModel("best.onnx", providers="cuda")
+model = DarkFusionOnnxModel("best.onnx", providers="directml")
 results = model.predict(frame, conf=0.25, iou=0.7)
 
 # Recreate the session with another installed execution provider.
@@ -35,14 +35,17 @@ Run an isolated prediction:
 python darkfusion_onnx_runtime.py `
   --model best.onnx `
   --source image.png `
-  --provider cuda `
+  --provider directml `
   --conf 0.25
 ```
 
 TensorRT uses a persistent engine and timing cache. Its first model load may
-take several minutes. The tested Windows package includes DirectML; Automatic
-selects from providers actually installed. ONNX CUDA/TensorRT requires replacing
-that ONNX Runtime variant with the GPU build, not installing both. TensorRT is
+take several minutes. The Windows package uses `onnxruntime-directml==1.22.0`;
+Automatic prefers DirectML when available, with CPU fallback for unsupported
+graph operations. DirectML sessions use sequential execution and disable memory
+patterns, as required by that provider. ONNX CUDA/TensorRT requires replacing
+that ONNX Runtime variant with the GPU build in a separate tested environment,
+not installing both. TensorRT is
 opt-in. This provider choice does not change PyTorch's CUDA support.
 
 ```python
