@@ -111,7 +111,6 @@ class _ThemeAdapter(QtCore.QObject):
         self.asset_dir = None
         self.palette_data = None
         self.header = None
-        self.idle = None
         self.scene = None
         self.icons = weakref.WeakKeyDictionary()
         self.tabs = weakref.WeakKeyDictionary()
@@ -151,19 +150,6 @@ class _ThemeAdapter(QtCore.QObject):
             self.header.lower()
         view = getattr(window, "screen_view", None)
         if isinstance(view, QtWidgets.QGraphicsView) and _alive(view):
-            if not _alive(self.idle):
-                self.idle = _ArtLayer(view.viewport(), "idle")
-            self.idle.set_art(self.asset_dir / "idle-art.png", self.palette_data)
-            current_scene = view.scene()
-            if current_scene is not self.scene:
-                if _alive(self.scene):
-                    try:
-                        self.scene.changed.disconnect(self._scene_changed)
-                    except (TypeError, RuntimeError):
-                        pass
-                self.scene = current_scene
-                if current_scene is not None:
-                    current_scene.changed.connect(self._scene_changed)
             self.update_idle()
         candidates = window.findChildren(QtWidgets.QPushButton)
         candidates += window.findChildren(QtWidgets.QToolButton)
@@ -206,17 +192,44 @@ class _ThemeAdapter(QtCore.QObject):
             self.scene_timer.start(0)
 
     def update_idle(self):
-        if not _alive(self.idle):
+        """Update only the actual placeholder; never paint over a viewport."""
+        view = getattr(self.window, "screen_view", None)
+        if not _alive(view):
             return
-        empty = _alive(self.scene) and len(self.scene.items()) == 0
-        self.idle.setVisible(self.asset_dir is not None and empty)
-        if self.idle.isVisible():
-            self.idle.raise_()
+        current_scene = view.scene()
+        if current_scene is not self.scene:
+            if _alive(self.scene):
+                try:
+                    self.scene.changed.disconnect(self._scene_changed)
+                except (TypeError, RuntimeError):
+                    pass
+            self.scene = current_scene
+            if _alive(current_scene):
+                current_scene.changed.connect(self._scene_changed)
+        if not _alive(current_scene):
+            return
+        placeholder = bool(current_scene.property("darkfusion_placeholder_scene"))
+        if placeholder:
+            # A capture path can add a frame to an existing scene. Decorative
+            # scene metadata must never authorize replacing that real frame.
+            if any(isinstance(item, QtWidgets.QGraphicsPixmapItem)
+                   and item.data(0) != "placeholder_image" for item in current_scene.items()):
+                return
+        else:
+            if current_scene.items() or getattr(self.window, "_live_display_active", False):
+                return
+            current_file = getattr(self.window, "current_file", None)
+            if current_file and not self.window.is_placeholder_file(current_file):
+                return
+        path = self.window.placeholder_image_path()
+        if placeholder and current_scene.property("darkfusion_placeholder_path") == path:
+            return  # Do not turn scene-change notifications into a rebuild loop.
+        self.window.display_placeholder()
 
     def restore(self):
         self.timer.stop()
         self.scene_timer.stop()
-        for layer in (self.header, self.idle):
+        for layer in (self.header,):
             if _alive(layer):
                 layer.hide()
         for obj, (icon, size, minimum_width) in list(self.icons.items()):
@@ -240,6 +253,7 @@ class _ThemeAdapter(QtCore.QObject):
                 panel.style().unpolish(panel)
                 panel.style().polish(panel)
         self.header_panels.clear()
+        self.update_idle()
 
 
 def apply_theme_assets(window, selected_style, style_folder):

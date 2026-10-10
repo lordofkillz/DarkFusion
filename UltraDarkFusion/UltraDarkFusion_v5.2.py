@@ -51285,6 +51285,49 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         except Exception as e:
             logger.error(f"Natural sort failed: {e}")
 
+    def placeholder_image_path(self):
+        """Theme artwork replaces the empty-view placeholder, never the viewport."""
+        manifest = self._theme_manifest_for_style()
+        if manifest:
+            candidate = Path(manifest["_directory"]) / str(manifest.get("art", "idle-art.png"))
+            if candidate.is_file():
+                return str(candidate)
+        return str(Path(APP_DIR) / "styles" / "images" / "default.png")
+
+    def display_placeholder(self):
+        """Display a non-annotatable empty-view image using the normal scene path."""
+        path = self.placeholder_image_path()
+        pixmap = QPixmap(path)
+        if pixmap.isNull():
+            path = str(Path(APP_DIR) / "styles" / "images" / "default.png")
+            pixmap = QPixmap(path)
+        if pixmap.isNull():
+            logger.warning("No usable GraphicsView placeholder image.")
+            return False
+        was_loading = getattr(self, "_loading_image", False)
+        self._loading_image = True
+        try:
+            scene = QGraphicsScene(0, 0, pixmap.width(), pixmap.height())
+            scene.setProperty("darkfusion_placeholder_scene", True)
+            scene.setProperty("darkfusion_placeholder_path", path)
+            item = QGraphicsPixmapItem(pixmap)
+            item.setData(0, "placeholder_image")
+            item.setTransformationMode(Qt.SmoothTransformation)
+            item.setZValue(-1000)
+            scene.addItem(item)
+            self.image = pixmap
+            self.original_pixmap_size = pixmap.size()
+            self.current_file = None
+            self.label_file = None
+            self.processed_image = None
+            self.current_display_image = None
+            self.annotation_scene_active = False
+            self.train_view_active = False
+            self.set_screen_view_scene_and_rect(scene)
+            return True
+        finally:
+            self._loading_image = was_loading
+
     def preprocess_placeholder_image(self, image_path):
         """
         Preprocess the placeholder image to ensure it's in a valid format.
@@ -51322,10 +51365,16 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             return False
 
         try:
-            file_path = os.path.abspath(str(file_path))
-            placeholder_path = os.path.abspath("styles/images/default.png")
-            placeholder_temp_path = os.path.abspath("styles/images/default_temp.png")
-            return file_path in {placeholder_path, placeholder_temp_path}
+            file_path = os.path.normcase(os.path.abspath(str(file_path)))
+            image_root = Path(APP_DIR) / "styles" / "images"
+            placeholders = {image_root / "default.png", image_root / "default_temp.png"}
+            if file_path in {os.path.normcase(os.path.abspath(str(path))) for path in placeholders}:
+                return True
+            # No filesystem scan in this hot-path dataset check. Decorative art
+            # stays a placeholder even after selecting a different theme.
+            theme_root = os.path.normcase(os.path.abspath(str(Path(APP_DIR) / "styles" / "df-assets")))
+            candidate = Path(file_path)
+            return candidate.name == "idle-art.png" and candidate.parent.parent == Path(theme_root)
         except Exception:
             return False
 
@@ -52980,6 +53029,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         - Does not rebuild a second blank scene when no labels exist.
         - Preserves zoom lock through set_screen_view_scene_and_rect().
         """
+        if file_name and self.is_placeholder_file(file_name):
+            self.display_placeholder()
+            return None
         if (
             file_name
             and not self.is_placeholder_file(file_name)
@@ -53044,18 +53096,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
                 if image is None:
                     logger.error(f"Failed to load image: {file_name}. Falling back to placeholder.")
-
-                    placeholder_path = "styles/images/default.png"
-                    if os.path.exists(placeholder_path):
-                        image = cv2.imread(placeholder_path)
-                        self.annotation_scene_active = False
-
-                        if image is None:
-                            logger.error("Failed to load placeholder image.")
-                            return None
-                    else:
-                        logger.warning("Placeholder image missing.")
-                        return None
+                    self.display_placeholder()
+                    return None
 
             # ---- 6. Validate image array ----
             if image is None:
