@@ -591,7 +591,7 @@ try {
     Invoke-PrivatePython $python @((Join-Path $script:Destination 'app\scripts\verify_install.py'))
     Write-InstallLog 'STAGE: Checking application startup'
     $env:QT_QPA_PLATFORM = 'offscreen'
-    Invoke-PrivatePython $python @('-c', "from PyQt5.QtWidgets import QApplication; app = QApplication([]); import mediapipe as mp; segment = mp.solutions.selfie_segmentation.SelfieSegmentation(model_selection=1); segment.close(); print('Qt and image-processing startup verified.')")
+    Invoke-PrivatePython $python @('-c', "from PyQt5.QtWidgets import QApplication; import cv2; import numpy as np; app = QApplication([]); assert cv2.resize(np.zeros((2, 2, 3), dtype=np.uint8), (1, 1)).shape == (1, 1, 3); print('Qt and OpenCV startup verified.')")
 
     $state = [ordered]@{
         schema_version = 1
