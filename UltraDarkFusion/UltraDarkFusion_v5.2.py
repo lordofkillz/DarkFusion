@@ -98,10 +98,11 @@ from PyQt5.QtWidgets import (QDialog, QLineEdit,QPushButton, QSpinBox, QComboBox
 from ui_ultradarkfusion_v5_2 import Ui_mainWindow
 from PyQt5.QtCore import QItemSelectionModel
 import uuid
+from darkfusion_model_security import install_checkpoint_guard
+install_checkpoint_guard()
 from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_inpaint import StableDiffusionInpaintPipeline
 from yt_dlp import YoutubeDL
 from collections import defaultdict
-import mediapipe as mp
 try:
     import sip
 except ModuleNotFoundError:
@@ -15514,6 +15515,7 @@ class ImageProcessingThread(QThread):
         try:
             pipe = StableDiffusionInpaintPipeline.from_pretrained(
                 "runwayml/stable-diffusion-inpainting",
+                trust_remote_code=False,
                 torch_dtype=torch.float16 if DEVICE.type == "cuda" else torch.float32
             )
             pipe.to(DEVICE)
@@ -27425,7 +27427,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         # --- Dataset import paths and CFG state ---
         self.weights_file_path = None
         self.cfg_file_path = None
-        self.segment = mp.solutions.selfie_segmentation.SelfieSegmentation(model_selection=1)
 
         self.extracting_frames = False
         self.custom_size = None

@@ -5,11 +5,14 @@ Choose a new writable folder. Setup installs a private runtime and the required
 SAM3/GroundingDINO models without changing existing Python environments.
 
 For a source installation, follow the [repository installation guide](../README.md).
-The supported environment is Python 3.12 with the pinned root requirements.
+The supported environment is a security-patched Python 3.12 (3.12.15 or newer)
+with the pinned root requirements. The standalone installer includes its own
+runtime. ONNX uses DirectML on Windows; CUDA training requires NVIDIA driver
+branch 580 or newer. Do not install another ONNX Runtime variant alongside it.
 From the repository root, in a new conda environment:
 
 ```powershell
-conda create -n fusion python=3.12 -y
+conda create -n fusion python=3.12.15 -y
 conda activate fusion
 python -m pip install --no-user -r requirements.txt
 python scripts/verify_install.py

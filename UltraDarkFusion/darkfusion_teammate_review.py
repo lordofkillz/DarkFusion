@@ -19,7 +19,10 @@ import cv2
 import numpy as np
 import torch
 from PIL import Image
+from darkfusion_model_security import install_checkpoint_guard
+install_checkpoint_guard()
 from transformers import CLIPModel, CLIPProcessor
+from darkfusion_model_compat import pooled_features
 
 from darkfusion_validation_review import (
     apply_review_decisions,
@@ -97,6 +100,7 @@ class TeammateMarkerClassifier:
             model_name = "openai/clip-vit-base-patch32"
 
             def load_cached_or_download(loader, **kwargs):
+                kwargs["trust_remote_code"] = False
                 try:
                     return loader.from_pretrained(model_name, local_files_only=True, **kwargs)
                 except OSError:
@@ -521,7 +525,7 @@ def averaged_text_features(model, processor, device):
     encoded = processor(text=prompts, return_tensors="pt", padding=True)
     encoded = {key: value.to(device) for key, value in encoded.items()}
     with torch.inference_mode():
-        features = model.get_text_features(**encoded)
+        features = pooled_features(model.get_text_features(**encoded))
         features = features / features.norm(dim=-1, keepdim=True)
         classes = []
         offset = 0
@@ -543,7 +547,7 @@ def score_crops(model, processor, text_features, device, crops, batch_size, retu
                     features = model.get_image_features(pixel_values=pixels)
             else:
                 features = model.get_image_features(pixel_values=pixels)
-            features = features.float()
+            features = pooled_features(features).float()
             features = features / features.norm(dim=-1, keepdim=True)
             similarities = 100.0 * features @ text_features.T
             name_probabilities = torch.softmax(similarities[:, 0:2], dim=1)[:, 0]

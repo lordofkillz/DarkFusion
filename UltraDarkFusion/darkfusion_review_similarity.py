@@ -136,6 +136,8 @@ class ReviewEmbeddingMatcher:
             ) from exc
 
     def _load_dinov2(self):
+        from darkfusion_model_security import install_checkpoint_guard
+        install_checkpoint_guard()
         from transformers import AutoImageProcessor, AutoModel
         model_cache = self.cache_dir / "models"
         model_cache.mkdir(parents=True, exist_ok=True)

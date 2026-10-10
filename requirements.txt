@@ -10,28 +10,28 @@
 # Keep --no-user in the install command so packages land in the active fusion
 # env instead of per-user site-packages.
 
---extra-index-url https://download.pytorch.org/whl/cu128
+--extra-index-url https://download.pytorch.org/whl/cu130
 --extra-index-url https://pypi.nvidia.com
 
 # Build helpers used by direct ML packages.
-setuptools==78.1.1
-wheel==0.45.1
+setuptools==83.0.0
+wheel==0.46.2
 ninja==1.13.0
 
 # Core ML / vision stack.
-torch==2.7.0+cu128
-torchvision==0.22.0+cu128
+torch==2.13.0+cu130
+torchvision==0.28.0+cu130
 numpy==1.26.4
 scipy==1.15.3
-Pillow==12.2.0
+Pillow==12.3.0
 pi-heif==1.4.0
 PyYAML==6.0.2
 psutil==7.0.0
 GPUtil==1.4.0
 nvidia-ml-py==13.610.43
-tqdm==4.66.1
+tqdm==4.66.3
 
-# OpenCV for DarkFusion, Ultralytics, SAHI, GroundingDINO, MediaPipe, and EasyOCR.
+# OpenCV for DarkFusion, Ultralytics, SAHI, GroundingDINO, and EasyOCR.
 # Keep all three pinned together. EasyOCR declares the headless package explicitly.
 opencv-python==4.9.0.80
 opencv-contrib-python==4.9.0.80
@@ -39,7 +39,7 @@ opencv-python-headless==4.9.0.80
 
 # YOLO / SAHI / SAM / YOLOE.
 ultralytics==8.4.144
-ray[tune]==2.52.1
+ray[tune]==2.56.0
 pydantic==2.7.1
 lap==0.5.12
 sahi==0.11.36
@@ -48,10 +48,10 @@ clip @ git+https://github.com/ultralytics/CLIP.git@88ade288431a46233f1556d1e1419
 # Direct GroundingDINO path used by dinov5_2.py.
 # Keep local model weights separately, especially Sam/groundingdino_swint_ogc.pth.
 groundingdino-py==0.4.0
-transformers==4.57.1
-tokenizers==0.22.0
-safetensors==0.5.3
-huggingface-hub==0.36.2
+transformers==5.17.0
+tokenizers==0.23.3
+safetensors==0.8.0
+huggingface-hub==1.5.0
 supervision==0.6.0
 timm==1.0.15
 pycocotools==2.0.6
@@ -59,11 +59,11 @@ addict==2.4.0
 yapf==0.43.0
 
 # Stable Diffusion inpainting.
-diffusers==0.33.1
-accelerate>=0.31.0,<2.0.0
+diffusers==0.38.0
+accelerate==1.15.0
 
 # ONNX inference: DirectML on Windows; PyTorch training still uses CUDA.
-onnx==1.17.0
+onnx==1.22.0
 onnxruntime-directml==1.22.0; platform_system == "Windows"
 onnxruntime==1.22.0; platform_system != "Windows"
 # Install only ONE ONNX Runtime distribution: the variants share native files.
@@ -83,15 +83,32 @@ pandas==2.2.3
 matplotlib==3.6.3
 plotly==6.1.2
 scikit-learn==1.7.0
-mediapipe==0.10.21
 mss==10.0.0
 PyAutoGUI==0.9.54
 SpeechRecognition==3.14.3
-python-dotenv==1.1.0
+python-dotenv==1.2.2
 requests==2.34.2
 # The default extra installs yt-dlp-ejs. YouTube also requires Deno >=2.3;
 # on Windows install it with: winget install --id DenoLand.Deno --exact
 yt-dlp[default]==2026.8.19
-deep-translator==1.9.1
+beautifulsoup4==4.13.4
 shapely==2.1.1
 perlin-noise==1.14
+
+# Security-patched shared dependencies and optional runtime model/export helpers.
+# Keep these explicit so a fresh install has the same reviewed feature support.
+protobuf==5.29.6
+anyio==4.14.2
+filelock==3.20.3
+fonttools==4.60.2
+fsspec==2026.6.0
+idna==3.15
+pip==26.2.1
+pygments==2.20.0
+soupsieve==2.9.0
+urllib3==2.8.0
+sentencepiece==0.2.1
+onnxslim==0.1.87
+py-cpuinfo==9.0.0
+einops==0.8.2
+seaborn==0.12.2

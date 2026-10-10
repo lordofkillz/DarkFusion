@@ -41,8 +41,8 @@ $environmentPath = $environmentList.envs |
     Select-Object -First 1
 
 if (-not $environmentPath) {
-    Write-Host "Creating conda environment '$EnvironmentName' with Python 3.12..."
-    & $conda create --name $EnvironmentName "python=3.12" --yes
+    Write-Host "Creating conda environment '$EnvironmentName' with security-patched Python 3.12..."
+    & $conda create --name $EnvironmentName "python=3.12.15" --yes
     if ($LASTEXITCODE -ne 0) {
         throw "Conda could not create the '$EnvironmentName' environment."
     }

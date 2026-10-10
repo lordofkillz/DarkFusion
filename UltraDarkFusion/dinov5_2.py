@@ -16,7 +16,8 @@ import cv2
 import numpy as np
 import groundingdino
 import groundingdino.datasets.transforms as T
-from groundingdino.util.inference import load_model, load_image, predict
+from groundingdino.util.inference import load_image, predict
+from darkfusion_model_compat import load_groundingdino_model as load_model
 from prediction_size_filter import prediction_size_allowed_xyxy
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True

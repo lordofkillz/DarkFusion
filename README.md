@@ -135,12 +135,15 @@ Analysis, training, tuning, and validation review.
 - For the standalone package: Windows 10 version 1903 or later, or Windows 11;
   Python and its dependencies are included.
 - NVIDIA GPU and current driver recommended.
-- The pinned PyTorch build uses CUDA 12.8 and supports modern NVIDIA GPUs,
-  including Blackwell/RTX 50-series.
+- The pinned PyTorch build uses CUDA 13.0 and supports modern NVIDIA GPUs,
+  including Blackwell/RTX 50-series. CUDA training requires an NVIDIA driver
+  from branch 580 or newer; update the driver before using the new runtime.
+- Windows ONNX inference uses DirectML, separately from PyTorch/CUDA training.
 
 The normal Python installation does not require compiling OpenCV or installing
 a separate CUDA Toolkit. The PyTorch wheel provides its matching CUDA runtime.
 A locally installed CUDA Toolkit is only needed for specialized source builds.
+Use only trusted models and configuration files; see [model safety](SECURITY.md).
 
 ## Python installation
 
@@ -197,7 +200,7 @@ pip configuration for the installation, without changing that configuration.
 Manual installation is also supported:
 
 ```powershell
-conda create -n fusion python=3.12 -y
+conda create -n fusion python=3.12.15 -y
 conda activate fusion
 $env:PYTHONNOUSERSITE = "1"
 python -m pip install --upgrade pip setuptools wheel

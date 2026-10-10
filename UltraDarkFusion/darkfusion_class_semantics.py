@@ -15,6 +15,8 @@ import sqlite3
 from pathlib import Path
 
 from PIL import Image
+from darkfusion_model_compat import pooled_features
+from darkfusion_model_security import install_checkpoint_guard
 
 
 MODEL_NAME = "google/siglip2-base-patch16-224"
@@ -170,6 +172,7 @@ class ClassSemanticVerifier:
         self._prepare_cache()
         import torch
         from huggingface_hub import snapshot_download
+        install_checkpoint_guard()
         from transformers import AutoModel, AutoProcessor
 
         self._torch = torch
@@ -365,7 +368,7 @@ class ClassSemanticVerifier:
         encoded = self.processor(text=prompts, return_tensors="pt", padding=True)
         encoded = {key: value.to(self.device) for key, value in encoded.items()}
         with torch.inference_mode():
-            text = self.model.get_text_features(**encoded).float()
+            text = pooled_features(self.model.get_text_features(**encoded)).float()
             text = text / text.norm(dim=-1, keepdim=True)
         for class_name, (positive_slice, negative_slices) in layout.items():
             positive = text[slice(*positive_slice)].mean(dim=0)
@@ -448,7 +451,7 @@ class ClassSemanticVerifier:
                             image_features = self.model.get_image_features(pixel_values=pixels)
                     else:
                         image_features = self.model.get_image_features(pixel_values=pixels)
-                    image_features = image_features.float()
+                    image_features = pooled_features(image_features).float()
                     image_features = image_features / image_features.norm(dim=-1, keepdim=True)
             except torch.cuda.OutOfMemoryError:
                 del pixels
