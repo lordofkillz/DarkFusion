@@ -9,7 +9,9 @@ $PythonPath = (Resolve-Path -LiteralPath $PythonPath).Path
 if (-not $CacheDirectory) {
     $CacheDirectory = Join-Path (Split-Path -Parent $PSScriptRoot) 'UltraDarkFusion\.darkfusion_cache\windows-ml-setup'
 }
-$probe = 'from winui3.microsoft.windows.applicationmodel.dynamicdependency.bootstrap import initialize; runtime = initialize(); runtime(); print("Windows App SDK runtime is ready.")'
+# Windows PowerShell 5.1 strips embedded double quotes from native arguments.
+# Python single quotes survive both 5.1 and PowerShell 7 argument passing.
+$probe = 'from winui3.microsoft.windows.applicationmodel.dynamicdependency.bootstrap import initialize; runtime = initialize(); runtime(); print(''Windows App SDK runtime is ready.'')'
 $probeReady = $false
 try {
     & $PythonPath -I -c $probe *> $null
@@ -25,7 +27,12 @@ $installerPath = Join-Path $CacheDirectory ('WindowsAppRuntimeInstall-x64-' + [G
 # Microsoft installer deploys the shared runtime, not Python packages/drivers.
 $download = 'https://aka.ms/windowsappsdk/2.3/latest/windowsappruntimeinstall-x64.exe'
 Invoke-WebRequest -Uri $download -OutFile $installerPath -UseBasicParsing
-$signature = Get-AuthenticodeSignature -LiteralPath $installerPath
+# A native setup launched from PowerShell 7 can inherit its PSModulePath while
+# running Windows PowerShell 5.1. Load this shell's built-in security module,
+# rather than an incompatible module selected from the parent's search path.
+$securityModule = Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1'
+Import-Module -Name $securityModule -ErrorAction Stop
+$signature = Microsoft.PowerShell.Security\Get-AuthenticodeSignature -LiteralPath $installerPath
 if ($signature.Status -ne 'Valid' -or -not $signature.SignerCertificate -or
     $signature.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation(?:,|$)') {
     throw 'The Windows App SDK installer does not have a valid Microsoft signature.'
