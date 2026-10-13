@@ -587,6 +587,11 @@ try {
     $python = Join-Path $runtime 'python.exe'
     Write-InstallLog 'STAGE: Preparing the private application runtime'
     Invoke-PrivatePython $python @((Join-Path $script:Destination $unpackRelative.Replace('/', '\')))
+    $windowsMLSetup = Join-Path $script:Destination 'app\scripts\install-windows-ml-runtime.ps1'
+    if (Test-Path -LiteralPath $windowsMLSetup) {
+        Write-InstallLog 'STAGE: Preparing the Windows ML shared runtime'
+        & $windowsMLSetup -PythonPath $python -CacheDirectory (Join-Path $script:Destination '.darkfusion_cache\windows-ml-setup')
+    }
     Write-InstallLog 'STAGE: Verifying DarkFusion'
     Invoke-PrivatePython $python @((Join-Path $script:Destination 'app\scripts\verify_install.py'))
     Write-InstallLog 'STAGE: Checking application startup'

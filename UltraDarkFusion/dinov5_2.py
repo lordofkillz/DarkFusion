@@ -473,11 +473,11 @@ def _compiled_yoloe_class_names(model):
 def _validate_compiled_yoloe_classes(model, class_names, model_path):
     embedded = _compiled_yoloe_class_names(model)
     expected = _normalize_class_names(class_names)
-    if embedded and embedded != expected:
+    if not embedded or not set(expected).issubset(embedded):
         raise ValueError(
             f"Compiled YOLOE model classes {embedded} do not match the selected DarkFusion "
             f"classes {expected}: {model_path}. Export the YOLOE model after setting this "
-            "exact class list, or select the .pt model for live text prompts."
+            "class names, or select the .pt model for live text prompts."
         )
 
 
@@ -499,22 +499,18 @@ def build_yoloe_predictor(class_names):
 
     suffix = Path(model_path).suffix.lower()
     if suffix == ".onnx" and YOLOE_ONNX_BACKEND != "ultralytics":
-        from darkfusion_onnx_runtime import DarkFusionOnnxModel
-
-        cache_key = hashlib.sha1(str(Path(model_path).resolve()).encode("utf-8")).hexdigest()[:12]
-        cache_dir = BASE_DIR / ".darkfusion_cache" / "onnx_runtime" / cache_key
+        from darkfusion_inference import load_inference_model
         logger.info(
             "Loading compiled YOLOE ONNX model with DarkFusion backend (%s): %s",
             YOLOE_ONNX_PROVIDER,
             model_path,
         )
-        predictor = DarkFusionOnnxModel(
+        predictor = load_inference_model(
             str(model_path),
-            providers=YOLOE_ONNX_PROVIDER,
-            strict_provider=True,
-            include_cpu_fallback=True,
+            backend=YOLOE_ONNX_BACKEND,
+            provider=YOLOE_ONNX_PROVIDER,
             fp16=bool(YOLOE_FP16),
-            cache_dir=cache_dir,
+            runtime_options=globals().get("YOLOE_ONNX_RUNTIME_OPTIONS"),
         )
         _validate_compiled_yoloe_classes(predictor, class_names, model_path)
         return predictor, "onnxruntime"
@@ -576,8 +572,12 @@ def run_yoloe_predict(predictor_model, predictor_kind, image_path: Path, class_n
     classes = r.boxes.cls.detach().cpu().tolist()
 
     out = []
+    compiled_names = _compiled_yoloe_class_names(r) if predictor_kind != "pt" else []
+    selected_ids = {name: index for index, name in enumerate(_normalize_class_names(class_names))}
     for b, s, c in zip(xyxy, confs, classes):
         cls_idx = int(c)
+        if predictor_kind != "pt":
+            cls_idx = selected_ids.get(compiled_names[cls_idx], -1) if 0 <= cls_idx < len(compiled_names) else -1
         if 0 <= cls_idx < len(class_names):
             out.append({
                 "xyxy": [float(v) for v in b],
@@ -719,31 +719,27 @@ def _pad_bbox_xyxy(bbox_xyxy, img_w, img_h, pad_ratio=0.05):
 
 
 def _image_for_sam3(image_path: Path):
+    """Read OpenCV BGR pixels; Ultralytics performs the RGB conversion."""
     image_bgr = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
     if image_bgr is None:
         return None
     if image_bgr.ndim == 2:
-        image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_GRAY2RGB)
+        image_bgr = cv2.cvtColor(image_bgr, cv2.COLOR_GRAY2BGR)
     elif image_bgr.ndim == 3 and image_bgr.shape[2] == 4:
-        image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGRA2RGB)
-    elif image_bgr.ndim == 3 and image_bgr.shape[2] == 3:
-        image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-    else:
-        image_rgb = image_bgr
+        image_bgr = cv2.cvtColor(image_bgr, cv2.COLOR_BGRA2BGR)
 
-    return np.ascontiguousarray(image_rgb.copy())
+    return np.ascontiguousarray(image_bgr.copy())
 
 
 @torch.inference_mode()
-def sam3_snap_bbox_to_mask(sam3_model, image_rgb, bbox_xyxy, class_name="", imgsz=1036):
-    if sam3_model is None or image_rgb is None:
+def sam3_snap_bbox_to_mask(sam3_model, image_bgr, bbox_xyxy, class_name="", imgsz=1036):
+    """Prompt SAM3 with BGR pixels, matching Ultralytics' NumPy input contract."""
+    if sam3_model is None or image_bgr is None:
         return None
 
-    image_rgb = np.ascontiguousarray(image_rgb.copy())
+    image_bgr = np.ascontiguousarray(image_bgr.copy())
 
-    img_h, img_w = image_rgb.shape[:2]
-
-    img_h, img_w = image_rgb.shape[:2]
+    img_h, img_w = image_bgr.shape[:2]
     x1, y1, x2, y2 = [int(round(float(v))) for v in bbox_xyxy]
     x1 = max(0, min(x1, img_w - 1))
     y1 = max(0, min(y1, img_h - 1))
@@ -755,7 +751,7 @@ def sam3_snap_bbox_to_mask(sam3_model, image_rgb, bbox_xyxy, class_name="", imgs
 
     try:
         results = sam3_model.predict(
-            source=image_rgb,
+            source=image_bgr,
             bboxes=[[x1, y1, x2, y2]],
             imgsz=int(imgsz),
             device=0 if DEVICE.type == "cuda" else "cpu",
@@ -874,8 +870,8 @@ def refine_candidates_with_sam3(sam3_model, image_path: Path, candidates, class_
     if sam3_model is None or not candidates:
         return candidates
 
-    image_rgb = _image_for_sam3(image_path)
-    if image_rgb is None:
+    image_bgr = _image_for_sam3(image_path)
+    if image_bgr is None:
         logger.warning("Could not read image for SAM3 refinement: %s", image_path)
         return candidates
 
@@ -891,7 +887,7 @@ def refine_candidates_with_sam3(sam3_model, image_path: Path, candidates, class_
 
         mask = sam3_snap_bbox_to_mask(
             sam3_model=sam3_model,
-            image_rgb=image_rgb,
+            image_bgr=image_bgr,
             bbox_xyxy=prompt_xyxy,
             imgsz=SAM3_IMGSZ,
         )
@@ -1240,6 +1236,7 @@ def process_image(
     roi_enabled=False,
     roi_bounds=None,
     roi_reference_size=None,
+    project_class_ids=None,
 ):
     detected = set()
     inference_image = None
@@ -1329,8 +1326,9 @@ def process_image(
         for c in label_candidates:
             xywhn = xyxy_pix_to_xywhn(c["xyxy"], W, H)
             xywhn = [min(max(v, 0.0), 1.0) for v in xywhn]
+            project_id = c["cls_idx"] if project_class_ids is None else project_class_ids[c["cls_idx"]]
             final_xywhn.append(xywhn)
-            final_cls.append(c["cls_idx"])
+            final_cls.append(project_id)
             detected.add(class_names[c["cls_idx"]])
 
         if final_xywhn or overwrite:
@@ -1417,6 +1415,7 @@ def process_images(
     roi_enabled=False,
     roi_bounds=None,
     roi_reference_size=None,
+    project_class_ids=None,
 ):
     image_directory = Path(image_directory_path)
     image_paths = collect_image_paths(image_directory)
@@ -1460,6 +1459,7 @@ def process_images(
                     roi_enabled=roi_enabled,
                     roi_bounds=roi_bounds,
                     roi_reference_size=roi_reference_size,
+                    project_class_ids=project_class_ids,
                 )
             )
             processed += 1
@@ -1494,6 +1494,7 @@ def run_groundingdino(
     roi_enabled=False,
     roi_bounds=None,
     roi_reference_size=None,
+    project_class_names=None,
 ):
     global YOLOE_MODEL_NAME, YOLOE_FP16, YOLOE_ONNX_BACKEND, YOLOE_ONNX_PROVIDER
     global DINO_FP16, DINO_FP16_FALLBACK
@@ -1508,6 +1509,7 @@ def run_groundingdino(
         "YOLOE_FP16",
         "YOLOE_ONNX_BACKEND",
         "YOLOE_ONNX_PROVIDER",
+        "YOLOE_ONNX_RUNTIME_OPTIONS",
         "DINO_FP16",
         "DINO_FP16_FALLBACK",
         "YOLOE_CONF",
@@ -1547,7 +1549,7 @@ def run_groundingdino(
 
     # Prefer passed-in class names from DarkFusion dropdown
     if class_names:
-        class_names = [str(name).strip().lower() for name in class_names if str(name).strip()]
+        class_names = _normalize_class_names(class_names)
     else:
         dataset_path = Path(image_directory_path)
         classes_file = dataset_path / ".darkfusion" / "classes.txt"
@@ -1582,6 +1584,17 @@ def run_groundingdino(
     dino_model = None
     sam3_model = None
     try:
+        project_class_ids = None
+        if project_class_names is not None:
+            project_lookup = {}
+            for index, name in enumerate(project_class_names):
+                key = str(name).strip().lower()
+                if key in project_lookup:
+                    raise ValueError("Project classes have ambiguous duplicate prompt names; no labels were written.")
+                project_lookup[key] = index
+            if any(name not in project_lookup for name in class_names):
+                raise ValueError("Selected auto-label classes are missing from the project class list; no labels were written.")
+            project_class_ids = [project_lookup[name] for name in class_names]
         yoloe_model, yoloe_kind = build_yoloe_predictor(class_names)
         logger.info("YOLOE predictor mode: %s", yoloe_kind)
 
@@ -1608,6 +1621,7 @@ def run_groundingdino(
             roi_enabled=roi_enabled,
             roi_bounds=roi_bounds,
             roi_reference_size=roi_reference_size,
+            project_class_ids=project_class_ids,
         )
         return bool(processed)
     finally:

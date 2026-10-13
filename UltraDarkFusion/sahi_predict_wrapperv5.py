@@ -2,6 +2,8 @@ import logging
 import inspect
 import hashlib
 import tempfile
+import cv2
+import numpy as np
 
 from sahi.predict import get_sliced_prediction
 from sahi.postprocess.combine import (
@@ -16,7 +18,8 @@ from sahi.utils.cv import read_image
 import os
 from PIL import Image, UnidentifiedImageError
 from sahi import AutoDetectionModel
-from prediction_size_filter import prediction_size_allowed_xyxy
+from prediction_size_filter import prediction_size_allowed_xyxy, polygon_touches_roi_rect
+from darkfusion_inference import load_inference_model
 
 logger = logging.getLogger(__name__)
 
@@ -43,10 +46,12 @@ class SahiPredictWrapper:
         roi_enabled=False,
         roi_bounds=None,
         roi_reference_size=None,
+        onnx_runtime_options=None,
     ):
         self.fp16 = bool(fp16)
         self.inference_backend = str(inference_backend or "auto").strip().lower()
         self.onnx_provider = str(onnx_provider or "auto").strip().lower()
+        self.onnx_runtime_options = None if onnx_runtime_options is None else dict(onnx_runtime_options)
         self.confidence_threshold = max(0.0, min(1.0, float(confidence_threshold)))
         self._uses_darkfusion_onnx = False
         self.onnx_runtime_model = None
@@ -56,6 +61,13 @@ class SahiPredictWrapper:
             confidence_threshold=confidence_threshold,
             device=device,
         )
+        native_model = getattr(self.detection_model, "model", None)
+        self.task = str(getattr(self.onnx_runtime_model if self._uses_darkfusion_onnx else native_model, "task", "detect") or "detect")
+        if self.task not in {"detect", "segment", "pose", "obb"}:
+            raise ValueError("SAHI auto-label requires an object-annotation model; classification/ReID models cannot write object labels.")
+        # SAHI's generic object adapter can discard pose/OBB data. Keep its
+        # slicing/merging, but read the native Ultralytics results for these.
+        self.geometry_model = native_model if self.task in {"pose", "obb"} else None
         self.postprocess_type = postprocess_type
         self.postprocess_match_metric = postprocess_match_metric
         self.postprocess_match_threshold = float(postprocess_match_threshold)
@@ -147,23 +159,15 @@ class SahiPredictWrapper:
         )
 
         if use_darkfusion_onnx:
-            from darkfusion_onnx_runtime import DarkFusionOnnxModel
-
-            cache_key = hashlib.sha1(os.path.abspath(model_path).encode("utf-8")).hexdigest()[:12]
-            cache_dir = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)),
-                ".darkfusion_cache",
-                "sahi_onnx",
-                cache_key,
-            )
-            runtime_model = DarkFusionOnnxModel(
+            runtime_model = load_inference_model(
                 model_path,
-                providers=self.onnx_provider,
-                strict_provider=True,
-                include_cpu_fallback=True,
+                backend=self.inference_backend,
+                provider=self.onnx_provider,
                 fp16=self.fp16,
-                cache_dir=cache_dir,
+                runtime_options=self.onnx_runtime_options,
             )
+            if runtime_model.task not in {"detect", "segment", "pose", "obb"}:
+                raise ValueError("SAHI auto-label requires a detection, segmentation, pose or OBB model; this model does not predict object annotations.")
             logger.info(
                 "SAHI is using DarkFusion ONNX Runtime (%s): %s",
                 runtime_model.provider,
@@ -211,6 +215,23 @@ class SahiPredictWrapper:
         """Apply the selected native SAHI postprocessor to ONNX tile results."""
         if not predictions:
             return []
+        if len(predictions) == 1:
+            # SAHI's tensor adapter can squeeze a single prediction to a
+            # scalar during class-wise NMS. There is nothing to suppress.
+            return predictions
+        if all(prediction.get("obb") is not None for prediction in predictions):
+            from darkfusion_onnx_runtime import numpy_rotated_nms
+            rotated = []
+            for prediction in predictions:
+                if prediction.get("xywhr") is not None:
+                    rotated.append(prediction["xywhr"])
+                else:
+                    (cx, cy), (width, height), angle = cv2.minAreaRect(np.asarray(prediction["obb"], dtype=np.float32))
+                    rotated.append([cx, cy, width, height, np.deg2rad(angle)])
+            keep = numpy_rotated_nms(rotated, [prediction["confidence"] for prediction in predictions],
+                [prediction["class_id"] for prediction in predictions], self.postprocess_match_threshold,
+                300, agnostic=self.postprocess_class_agnostic)
+            return [predictions[index] for index in keep]
         processors = {
             "GREEDYNMM": GreedyNMMPostprocess,
             "NMM": NMMPostprocess,
@@ -218,6 +239,10 @@ class SahiPredictWrapper:
             "LSNMS": LSNMSPostprocess,
         }
         processor_class = processors.get(str(self.postprocess_type or "GREEDYNMM").upper(), GreedyNMMPostprocess)
+        # Merging axis-aligned boxes cannot reconstruct an oriented box or a
+        # skeleton. For these tasks keep the winning original geometry intact.
+        if any(prediction.get("obb") is not None or prediction.get("keypoints") is not None for prediction in predictions):
+            processor_class = NMSPostprocess
         processor = processor_class(
             match_threshold=max(0.05, min(0.95, float(self.postprocess_match_threshold))),
             match_metric=str(self.postprocess_match_metric or "IOS").upper(),
@@ -229,14 +254,20 @@ class SahiPredictWrapper:
                 score=float(prediction["confidence"]),
                 category_id=int(prediction["class_id"]),
                 category_name=str(prediction["class_id"]),
+                segmentation=prediction.get("segmentation") or None,
+                full_shape=prediction.get("full_shape"),
             )
             for prediction in predictions
         ]
+        for item, prediction in zip(object_predictions, predictions):
+            item._darkfusion_geometry = {key: prediction[key] for key in ("obb", "keypoints") if key in prediction}
         return [
             {
                 "bbox": tuple(float(value) for value in prediction.bbox.to_voc_bbox()),
                 "confidence": float(prediction.score.value),
                 "class_id": int(prediction.category.id),
+                "segmentation": prediction.mask.segmentation if prediction.mask else None,
+                **getattr(prediction, "_darkfusion_geometry", {}),
             }
             for prediction in processor(object_predictions)
         ]
@@ -249,8 +280,18 @@ class SahiPredictWrapper:
         overlap_height_ratio,
         overlap_width_ratio,
     ):
-        if self.onnx_runtime_model is None:
-            raise RuntimeError("DarkFusion ONNX Runtime was not initialized for SAHI.")
+        model = self._direct_model()
+        if model is None:
+            raise RuntimeError("The selected SAHI inference model was not initialized.")
+
+        def array(value):
+            if value is None:
+                return np.empty((0, 6))
+            if hasattr(value, "detach"):
+                value = value.detach()
+            if hasattr(value, "cpu"):
+                value = value.cpu()
+            return np.asarray(value.numpy() if hasattr(value, "numpy") else value)
         slices = slice_image(
             image=image_rgb,
             slice_height=max(1, int(slice_height)),
@@ -269,28 +310,68 @@ class SahiPredictWrapper:
             inference_inputs.append((image_rgb, (0, 0)))
 
         for inference_image, (offset_x, offset_y) in inference_inputs:
-            result_list = self.onnx_runtime_model.predict(
-                inference_image,
+            native_kwargs = {} if self._uses_darkfusion_onnx else {"device": self.detection_model.device, "verbose": False}
+            result_list = model.predict(
+                cv2.cvtColor(inference_image, cv2.COLOR_RGB2BGR),
                 conf=self.confidence_threshold,
                 iou=self.postprocess_match_threshold,
                 max_det=300,
+                **native_kwargs,
             )
             if not result_list:
                 continue
-            boxes = getattr(result_list[0], "boxes", None)
-            rows = getattr(getattr(boxes, "data", None), "numpy", lambda: [])()
-            for row in rows:
+            result = result_list[0]
+            boxes = getattr(result, "boxes", None)
+            rows = array(getattr(boxes, "data", None))
+            obb = getattr(result, "obb", None)
+            if obb is not None:
+                rows = np.column_stack((array(obb.xyxy), array(obb.conf), array(obb.cls)))
+            masks = getattr(result, "masks", None)
+            polygons = masks.xy if masks is not None else []
+            keypoints = getattr(result, "keypoints", None)
+            pose_points = array(keypoints.data) if keypoints is not None else []
+            for index, row in enumerate(rows):
                 if len(row) < 6:
                     continue
                 x1, y1, x2, y2, confidence, class_id = (float(value) for value in row[:6])
                 if x2 <= x1 or y2 <= y1:
                     continue
-                predictions.append({
+                prediction = {
                     "bbox": (x1 + offset_x, y1 + offset_y, x2 + offset_x, y2 + offset_y),
                     "confidence": confidence,
                     "class_id": int(class_id),
-                })
+                }
+                if obb is not None:
+                    points = np.array(array(obb.xyxyxyxy)[index], dtype=np.float32, copy=True)
+                    points += [offset_x, offset_y]
+                    prediction["obb"] = points.tolist()
+                    rotated = np.array(array(obb.xywhr)[index], dtype=np.float32, copy=True)
+                    rotated[:2] += [offset_x, offset_y]
+                    prediction["xywhr"] = rotated.tolist()
+                elif index < len(polygons) and len(polygons[index]) >= 3:
+                    points = np.array(polygons[index], dtype=np.float32, copy=True)
+                    points += [offset_x, offset_y]
+                    prediction["segmentation"] = [points.reshape(-1).tolist()]
+                    prediction["full_shape"] = list(image_rgb.shape[:2])
+                if index < len(pose_points):
+                    points = np.array(pose_points[index], dtype=np.float32, copy=True)
+                    visible = points[:, 2] > .01 if points.shape[1] > 2 else np.any(points[:, :2] != 0, axis=1)
+                    points[visible, :2] += [offset_x, offset_y]
+                    points[~visible, :2] = 0
+                    prediction["keypoints"] = points.tolist()
+                predictions.append(prediction)
         return self._merge_onnx_tile_predictions(predictions)
+
+    def _direct_model(self):
+        return self.onnx_runtime_model if self._uses_darkfusion_onnx else getattr(self, "geometry_model", None)
+
+    def _onnx_class_name(self, class_id):
+        names = getattr(self._direct_model(), "names", {}) or {}
+        if isinstance(names, dict):
+            return str(names.get(class_id, names.get(str(class_id), str(class_id)))).strip()
+        if isinstance(names, (list, tuple)) and 0 <= class_id < len(names):
+            return str(names[class_id]).strip()
+        return str(class_id)
 
     def _onnx_teammate_rejected_indices(self, image_rgb, predictions, class_names):
         """Apply the normal teammate filter to DarkFusion ONNX tile detections."""
@@ -301,10 +382,10 @@ class SahiPredictWrapper:
 
             if self._teammate_classifier is None:
                 provider_names = " ".join(
-                    str(provider) for provider in getattr(self.onnx_runtime_model, "providers", [])
+                    str(provider) for provider in getattr(self._direct_model(), "providers", [])
                 ).lower()
                 self._teammate_classifier = TeammateMarkerClassifier(
-                    "cuda" if "cuda" in provider_names else "cpu"
+                    "cuda" if "cuda" in provider_names or str(getattr(getattr(self, "detection_model", None), "device", "")).startswith("cuda") else "cpu"
                 )
             image = Image.fromarray(image_rgb).convert("RGB")
             image_h, image_w = image_rgb.shape[:2]
@@ -312,10 +393,7 @@ class SahiPredictWrapper:
             indices = []
             for index, prediction in enumerate(predictions):
                 class_id = int(prediction["class_id"])
-                category_name = (
-                    class_names[class_id].strip().lower()
-                    if 0 <= class_id < len(class_names) else str(class_id)
-                )
+                category_name = self._onnx_class_name(class_id).lower()
                 if not any(token in category_name for token in ("person", "player", "enemy", "character")):
                     continue
                 x1, y1, x2, y2 = (float(value) for value in prediction["bbox"])
@@ -496,7 +574,8 @@ class SahiPredictWrapper:
             logger.warning("ROI is empty for %s; skipping image", image_path)
             return 0
 
-        if self._uses_darkfusion_onnx:
+        direct_results = self._uses_darkfusion_onnx or getattr(self, "geometry_model", None) is not None
+        if direct_results:
             try:
                 predictions = self._darkfusion_onnx_sliced_predictions(
                     inference_image,
@@ -506,7 +585,7 @@ class SahiPredictWrapper:
                     overlap_width_ratio,
                 )
             except Exception as error:
-                raise RuntimeError(f"DarkFusion ONNX SAHI inference failed for {image_path}: {error}") from error
+                raise RuntimeError(f"DarkFusion SAHI inference failed for {image_path}: {error}") from error
             teammate_rejected = self._onnx_teammate_rejected_indices(
                 inference_image, predictions, class_names
             )
@@ -538,14 +617,20 @@ class SahiPredictWrapper:
         for prediction_index, obj in enumerate(predictions):
             if prediction_index in teammate_rejected:
                 continue
-            if self._uses_darkfusion_onnx:
+            if direct_results:
                 class_id = int(obj["class_id"])
-                category_name = class_names[class_id] if 0 <= class_id < len(class_names) else str(class_id)
+                category_name = self._onnx_class_name(class_id)
                 bbox = obj["bbox"]
+                polygons = obj.get("segmentation") or []
+                oriented_points = obj.get("obb")
+                keypoints = obj.get("keypoints")
             else:
                 category_name = str(obj.category.name).strip()
                 class_id = int(obj.category.id)
                 bbox = obj.bbox.to_voc_bbox()
+                polygons = obj.mask.segmentation if getattr(obj, "mask", None) else []
+                oriented_points = None
+                keypoints = None
             category_key = category_name.lower()
 
             if desired_lookup and category_key not in desired_lookup:
@@ -554,6 +639,12 @@ class SahiPredictWrapper:
             if not self._roi_prediction_allowed(
                 bbox, selected_rois, inference_roi, image_w, image_h
             ):
+                continue
+            geometry = [np.asarray(oriented_points).reshape(-1, 2)] if oriented_points is not None else [
+                np.asarray(polygon).reshape(-1, 2) for polygon in polygons if len(polygon) >= 6]
+            if selected_rois and geometry and not any(
+                    polygon_touches_roi_rect(points + [roi_x, roi_y], roi)
+                    for points in geometry for roi in selected_rois):
                 continue
 
             raw_x1 = float(bbox[0]) + roi_x
@@ -585,8 +676,31 @@ class SahiPredictWrapper:
             w = (bbox[2] - bbox[0]) / image_w
             h = (bbox[3] - bbox[1]) / image_h
 
-            class_id = class_to_id.get(category_key, class_id)
-            yolo_lines.append(f"{class_id} {xc:.6f} {yc:.6f} {w:.6f} {h:.6f}")
+            # The dropdown owns dataset IDs. Never assign an unknown model
+            # class to an unrelated project class by falling back to its ID.
+            class_id = class_to_id.get(category_key)
+            if class_id is None:
+                continue
+            if oriented_points is not None or polygons:
+                if oriented_points is not None:
+                    points = np.asarray(oriented_points, dtype=np.float32).reshape(-1, 2)
+                else:
+                    contours = [np.asarray(polygon, dtype=np.float32).reshape(-1, 2) for polygon in polygons if len(polygon) >= 6]
+                    if not contours:
+                        continue
+                    points = max(contours, key=cv2.contourArea)
+                points = points.copy()
+                points[:, 0] = np.clip((points[:, 0] + roi_x) / image_w, 0., 1.)
+                points[:, 1] = np.clip((points[:, 1] + roi_y) / image_h, 0., 1.)
+                yolo_lines.append(str(class_id) + " " + " ".join(f"{value:.6f}" for value in points.reshape(-1)))
+            else:
+                line = f"{class_id} {xc:.6f} {yc:.6f} {w:.6f} {h:.6f}"
+                for point in keypoints or []:
+                    visible = (len(point) < 3 or point[2] > .01) and any(value != 0 for value in point[:2])
+                    px = np.clip((point[0] + roi_x) / image_w, 0., 1.) if visible else 0.
+                    py = np.clip((point[1] + roi_y) / image_h, 0., 1.) if visible else 0.
+                    line += f" {px:.6f} {py:.6f} {2 if visible else 0}"
+                yolo_lines.append(line)
 
         self._write_yolo_lines(txt_file_path, yolo_lines, overwrite=overwrite)
         self.size_filtered_count += skipped_size_count

@@ -50,12 +50,24 @@ if (-not $environmentPath) {
 
 $pythonArgs = @("run", "--name", $EnvironmentName, "--no-capture-output", "python")
 $env:PYTHONNOUSERSITE = "1"
+if ($environmentPath) {
+    $activePython = Join-Path $environmentPath 'python.exe'
+    $activeProcesses = @(Get-CimInstance Win32_Process | Where-Object {
+        $_.ExecutablePath -eq $activePython
+    })
+    if ($activeProcesses.Count -gt 0) {
+        throw "The '$EnvironmentName' environment has running Python jobs. Close DarkFusion and finish training, then rerun this installer to update the same environment safely."
+    }
+}
 
 $previousPipConfigFile = $env:PIP_CONFIG_FILE
 try {
     # --isolated skips user settings, but still reads machine-wide pip.ini.
     # Use only this repository's indexes, including in build subprocesses.
     $env:PIP_CONFIG_FILE = "nul"
+
+    $privatePython = (& $conda @pythonArgs -c 'import sys; print(sys.executable)' | Select-Object -Last 1).Trim()
+    & (Join-Path $repoRoot 'scripts\update-windows-ml.ps1') -PythonPath $privatePython
 
     Write-Host "Upgrading pip build tools..."
     & $conda @pythonArgs -m pip --isolated install --index-url https://pypi.org/simple --upgrade pip setuptools wheel
@@ -74,6 +86,8 @@ finally {
 }
 
 Write-Host "Verifying the application environment..."
+$privatePython = (& $conda @pythonArgs -c 'import sys; print(sys.executable)' | Select-Object -Last 1).Trim()
+& (Join-Path $repoRoot 'scripts\install-windows-ml-runtime.ps1') -PythonPath $privatePython
 & $conda @pythonArgs $verifyScript
 if ($LASTEXITCODE -ne 0) {
     throw "Installation verification failed."

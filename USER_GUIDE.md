@@ -99,6 +99,22 @@ Confirm the preview is showing the intended source before saving frames. Use
 the same aspect ratio and visual conditions expected during inference whenever
 possible.
 
+With video detection enabled, each completed prediction is displayed on the
+exact frame that was analyzed. Capture continues normally with at most one
+latest pending inference frame. New frames replace older pending work, not
+the frame already being analyzed, and never accumulate in a backlog. The
+annotated view therefore refreshes at the model's result rate; disabling
+detection restores ordinary playback updates. Saved
+labels, the frame position, and **Label Frame** refer to the displayed image.
+Pausing or seeking refreshes that frame when needed, without an extra preview.
+
+The playback bar reports capture, inference, and render **FPS**; its tooltip
+also reports processing times in milliseconds. **Drop** includes superseded
+pending inference frames. GPU memory remains available in **System Monitor**
+without additional VRAM polling from the playback bar. High display quality
+retains its existing Area/Lanczos scaling; display resizing does not change
+the model input or saved images.
+
 ## 4. Choose the task and classes
 
 Select the correct task before labeling:
@@ -116,6 +132,14 @@ the names after labeling unless the annotations are remapped too.
 For pose datasets, define a consistent keypoint order and skeleton. For
 segmentation, labels must contain polygon points rather than box-only rows.
 Avoid mixing annotation formats in one dataset.
+
+In **Keypoints** mode, an existing or detected bounding box receives missing
+point slots as `(0, 0, 0)` ghosts. They are editable placeholders, not predicted
+coordinates or visible dots. An all-missing pose is ready for manual placement;
+valid existing points remain intact. A pose model supplies actual points, while
+a box-only detector can supply boxes plus ghosts. No object detection means no
+new box or pose is invented. Auto-labeling preserves a compatible configured
+keypoint list, including its names, order, colors and visibility settings.
 
 ## 5. Create labels
 
@@ -143,6 +167,28 @@ The **Drawing** settings control outline thickness, hover emphasis, label
 text, pose markers, and edit handles. Minimum and maximum annotation sizes
 are checked in image pixels, including when zoomed in.
 
+### Propagate corrected labels
+
+Enable **Propagate** to carry your finished annotations to the next or previous
+image and let SAM3 adjust their geometry. Correct the current frame before
+continuing; those corrections become the next propagation seed. No preview is
+required. **Propagate Range** handles an ordered image range or frames from a
+local video, with forward/backward controls and stop-on-uncertainty safeguards.
+
+**Overwrite labels** beside Propagate is off by default and saved per project.
+When enabled, successful propagation replaces **all annotations on the target
+frame**, including other classes; selected-object propagation can therefore
+leave only that selected object. A failed or empty propagation result does not
+clear existing labels. Corrections made while adjacent propagation is running
+are protected rather than overwritten.
+
+The range dialog offers **Existing labels > Overwrite existing labels** for the
+same full-frame replacement. **Replace matching class** is narrower: it replaces
+only overlapping annotations of the same class and retains unrelated labels.
+Original files are backed up under the dataset's `.darkfusion/propagation`
+folder. Use **Undo Last Batch** in Propagate Range to restore the last operation.
+Keep a separate dataset backup before intentionally overwriting manual labels.
+
 ### Auto-label with model weights
 
 Open **Auto Label**, load the image folder, then select the model and settings.
@@ -157,6 +203,30 @@ The model task must match the required output. A detection model produces
 boxes; it cannot create genuine segmentation polygons or pose keypoints.
 TensorRT engines are hardware and TensorRT-version specific, so an engine
 should normally be exported on the computer that will run it.
+
+Exported `.onnx` models use Windows ML by default in labeling and video inference.
+A manually selected backend/provider remains an explicit override. `.pt` and
+`.engine` models keep their native Ultralytics loading paths.
+
+On Windows, **Automatic** prepares compatible certified Windows ML providers.
+Maximum-performance mode compares their speed once per model/GPU/input size and
+remembers the fastest numerically validated result. This adds first-use warm-up
+and possibly compilation time, but no preview or repeated frame-by-frame benchmark.
+The comparison does not change dataset annotations; it stores only timings and a
+provider/device choice. Changed model, hardware, driver, runtime/provider or input
+settings invalidate the result. Machine load can affect timings, so manual provider
+selection remains available. Disable comparison to use the hardware recommendation.
+Other power/NPU/CPU policies retain their requested hardware preference.
+Use **Recompare speed on next model load** to rerun it after background work ends.
+
+Expand **Provider setup / advanced ONNX model settings** to refresh providers and
+GPUs, download a compatible provider, choose a policy/device, control cache,
+download/offline and CPU-fallback behavior, or describe a metadata-free ONNX
+export's task/output format/class names. The settings apply to Weights, compiled
+YOLOE and SAHI when loading a new ONNX model. Native `.pt`, `.engine` and
+Darknet `.weights`/`.cfg` loading and training are unchanged. See
+[ONNX_RUNTIME_BACKEND.md](ONNX_RUNTIME_BACKEND.md) for model-contract limits and
+the distinction between TensorRT RTX and classic CUDA/TensorRT plugins.
 
 Set confidence low enough to find difficult objects but high enough to keep
 the review workload manageable. Start on a small sample before processing the
@@ -265,6 +335,26 @@ Removing duplicates prevents the same scene from leaking across train and
 validation splits. Re-run Dataset Analysis after repairs until the remaining
 warnings are understood and intentional.
 
+The possible-false-positive scan uses DINOv3 appearance comparisons, then the
+enabled SigLIP 2 class-name and SAM3 shape checks. Decisive later-pass class
+matches skip later verification work; the first-pass SigLIP rule remains
+conservative. SAM3 shape references come only from annotations you explicitly
+reviewed and kept in this dataset, not from the suspicious candidates being
+judged. At least three independent usable reference masks per class are needed;
+otherwise shape evidence stays unknown and the remaining checks continue.
+The LLM is initialized only for unresolved eligible borderline cases. Uncertain
+or conflicting class/shape/LLM evidence stays in review. These checks produce
+review findings, not automatic label deletion or missing-label suggestions.
+The LLM checks the individual annotation crop; invalid crops remain unverified
+instead of silently using the whole image. Cached answers are tied to the full
+image path, image content, crop, class, selected model and prompt version.
+Timeouts, failed requests and malformed answers are not cached. Previous cache
+formats are ignored automatically, so no manual cache clearing is needed.
+SAM3 shape scores use real contour measurements and normalized geometry, not
+raw pixel dimensions. Unchanged confirmed-good reference measurements are
+reused across scans; changed images, annotations, SAM checkpoints or inference
+settings invalidate them. Cache problems fall back to computation.
+
 ## 8. Prepare the training dataset
 
 Keep training and validation data separate. Validation images should be
@@ -337,6 +427,35 @@ perform a normal training run and validate it.
 
 Tuning cannot repair incorrect labels, missing classes, duplicate leakage, or
 an unrepresentative dataset.
+
+### Export the trained model
+
+Open the Trainer's **Export** tab and select a trained `.pt` checkpoint (or
+**Use Best / Last**). DarkFusion calls the installed Ultralytics exporter;
+using the same checkpoint, library version, and arguments uses the same export
+implementation as `yolo export`.
+
+Choose the target, width/height, supported precision, and CPU/GPU. Unchecked
+**Simplify graph** and **Dynamic shapes** explicitly turn those options off.
+Export defaults to **batch 1**, independently of the training batch. Leave
+**Custom batch** unchecked for single-frame video inference. Enable it only
+when you intentionally need a larger exported batch. Dynamic shapes are a
+separate option; enabling Custom batch does not make the batch dynamic.
+Unchecked **Embed NMS** keeps raw model output for runtime postprocessing.
+For calibrated INT8 targets, select a representative dataset YAML.
+
+**Extra arguments** accepts native `key=value` options and overrides the
+controls above. For example, use `opset=17` for ONNX, or `workspace=4` for
+TensorRT. Quote paths with spaces: `data="C:\datasets\my game\data.yaml"`.
+Unsupported target options are rejected before export. Formats come from the
+installed library's catalog; listing a format does not install its optional
+SDK or mean that it supports Windows. Advanced mixed/dynamic INT8 choices
+are enabled only for targets that support them.
+
+Export runs in the background and leaves the active annotation/video model
+unchanged. The completion message shows the actual output path. Test the
+artifact on its intended inference backend, and check accuracy on held-out
+data when changing precision. Build TensorRT engines on the target GPU.
 
 ## 11. Review the trained model
 

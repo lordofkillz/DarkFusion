@@ -9,6 +9,13 @@ Setup does not overwrite nonempty folders or change existing training environmen
 Allow at least 35 GB free during setup, keep your NVIDIA driver installed, and
 stay connected while the runtime and required models download.
 
+Windows ML also requires the matching Microsoft Windows App SDK shared runtime.
+Setup checks for it and, if missing, downloads the Microsoft-signed runtime
+installer. This prerequisite may need Windows to permit software deployment or
+request a restart; it does not install GPU drivers or change a training environment.
+Compatible GPU providers download on first use; DirectML is included. Offline
+use requires completing this initial runtime/provider setup first.
+
 Setup verifies downloads by size and SHA-256. Interrupted downloads are cached
 on the selected drive and can resume. Runtime `.bin` release assets are managed
 by setup; do not assemble them yourself. SAM3 and GroundingDINO are installed

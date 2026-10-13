@@ -38,9 +38,31 @@ recommended setup experience, use the **Download DarkFusionSetup.exe** link abov
 
 ## What changed in 5.2.1
 
+- Windows ML is the default runtime for exported `.onnx` models, with
+  hardware-aware provider selection and a cached, read-only speed comparison
+  per model. `.pt` and `.engine` models retain their native Ultralytics paths.
+  WebGPU is an optional experimental provider, not the automatic default.
+- Annotation review stays synchronized with saved object IDs after edits and
+  deletion. Atomic label replacement protects existing files on write failure.
+  Segmentation and OBB labels use the same connected class badges as boxes.
+- Keypoint labeling preserves custom point lists and creates editable ghost
+  slots when an existing detection has no pose points.
+- Save To chooses a destination only; local video, YouTube, desktop and camera
+  extraction starts only from Extract. Duplicate Extract/Stop connections are fixed.
+- Video frames and inference overlays stay paired; per-frame VRAM polling and
+  repeated display/preprocessing work are reduced. Export batch size defaults
+  to 1 unless a custom export batch is explicitly selected.
+- Propagation can optionally overwrite already labeled frames; it remains off
+  by default and preserves reviewed labels when overwrite is disabled.
+- Dataset Analysis applies decisive later-pass class checks before expensive
+  verification. SAM3 uses confirmed-good review examples and real normalized
+  shape measurements, with unchanged references cached across scans. LLM checks
+  use the correct object crop and content/model-specific caches; failed requests
+  remain unverified and are retried instead of being cached. Conflicting evidence
+  stays in review; the scan does not rewrite labels or suggest missing objects.
 - Teammate-ignore auto labeling uses conditional, compact nameplate OCR; its
   CLIP and OCR models are cached after their first-use downloads.
-- SAM3 shape analysis uses existing annotations as its reference, with
+- SAM3 shape analysis uses annotations explicitly reviewed and kept as its reference, with
   conservative handling when there is not enough reference data.
 - Six new DF themes have matching names, GIFs, icons, and panorama artwork
   behind the upper Status dock controls. Idle artwork disappears when an image
@@ -138,7 +160,10 @@ Analysis, training, tuning, and validation review.
 - The pinned PyTorch build uses CUDA 13.0 and supports modern NVIDIA GPUs,
   including Blackwell/RTX 50-series. CUDA training requires an NVIDIA driver
   from branch 580 or newer; update the driver before using the new runtime.
-- Windows ONNX inference uses DirectML, separately from PyTorch/CUDA training.
+- Windows ONNX inference uses Windows ML's hardware-aware Automatic selection,
+  with a read-only, cached per-model provider speed comparison by default and
+  selectable DirectML and compatible catalog providers. PyTorch/CUDA training
+  remains separate; provider setup does not replace the training environment.
 
 The normal Python installation does not require compiling OpenCV or installing
 a separate CUDA Toolkit. The PyTorch wheel provides its matching CUDA runtime.
@@ -177,7 +202,8 @@ The installer:
 2. Creates `fusion` with Python 3.12 when needed.
 3. prevents packages from leaking into the user-site directory.
 4. installs the pinned CUDA/ML/UI environment from `requirements.txt`.
-5. verifies the application files and critical imports.
+5. installs the signed matching Microsoft Windows App SDK runtime if missing.
+6. verifies the application files and critical imports.
 
 Launch DarkFusion with:
 

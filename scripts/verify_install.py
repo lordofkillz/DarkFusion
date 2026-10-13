@@ -11,6 +11,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 APP_ROOT = REPO_ROOT / "UltraDarkFusion"
+if str(APP_ROOT) not in sys.path:
+    sys.path.insert(0, str(APP_ROOT))
 
 REQUIRED_FILES = (
     "UltraDarkFusion_v5.2.py",
@@ -29,6 +31,11 @@ REQUIRED_FILES = (
     "darkfusion_teammate_review.py",
     "darkfusion_theme_assets.py",
     "darkfusion_onnx_runtime.py",
+    "darkfusion_inference.py",
+    "darkfusion_onnx_tracking.py",
+    "darkfusion_windows_ml.py",
+    "darkfusion_onnx_settings.py",
+    "darkfusion_onnx_performance.py",
     "darkfusion_negative_crops.py",
     "darkfusion_dataset_statistics.py",
     "darkfusion_class_semantics.py",
@@ -130,26 +137,26 @@ def verify_onnx_backend() -> list[str]:
         return []
     failures: list[str] = []
     try:
-        import onnxruntime
-
-        version = importlib.metadata.version("onnxruntime-directml")
-        for variant in ("onnxruntime", "onnxruntime-gpu", "onnxruntime-openvino"):
+        from darkfusion_windows_ml import get_ort
+        onnxruntime = get_ort()
+        version = importlib.metadata.version("onnxruntime-windowsml")
+        for variant in ("onnxruntime", "onnxruntime-gpu", "onnxruntime-openvino", "onnxruntime-directml"):
             try:
                 importlib.metadata.version(variant)
             except importlib.metadata.PackageNotFoundError:
                 continue
             failures.append(
-                f"{variant} overlaps onnxruntime-directml; use only the DirectML variant."
+                f"{variant} overlaps onnxruntime-windowsml; use only the Windows ML variant."
             )
-        if onnxruntime.__version__ != version:
-            failures.append("ONNX Runtime module and DirectML package versions do not match.")
+        if onnxruntime.__version__ != ".".join(version.split(".")[:3]):
+            failures.append("ONNX Runtime module and Windows ML package versions do not match.")
         providers = onnxruntime.get_available_providers()
         if "DmlExecutionProvider" not in providers:
             failures.append("DirectML execution provider is missing from ONNX Runtime.")
         if not failures:
-            print(f"ONNX Runtime: {version}; backend: DirectML; providers: {', '.join(providers)}")
+            print(f"Windows ML: {version}; DirectML available; providers: {', '.join(providers)}")
     except Exception as exc:
-        failures.append(f"Windows ONNX backend requires onnxruntime-directml: {exc}")
+        failures.append(f"Windows ONNX backend requires onnxruntime-windowsml and its Windows App SDK runtime: {exc}")
     return failures
 
 
@@ -159,7 +166,7 @@ def main() -> int:
         return 1
 
     missing_files = [name for name in REQUIRED_FILES if not (APP_ROOT / name).is_file()]
-    import_failures: list[str] = []
+    import_failures: list[str] = verify_onnx_backend()
     for module_name in REQUIRED_IMPORTS:
         try:
             importlib.import_module(module_name)
@@ -171,7 +178,6 @@ def main() -> int:
     except Exception as exc:
         import_failures.append(f"ultralytics.YOLOE: {exc}")
 
-    import_failures.extend(verify_onnx_backend())
 
     translation_failures: list[str] = []
     translation_dir = APP_ROOT / "translations"

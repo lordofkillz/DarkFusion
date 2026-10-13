@@ -7959,7 +7959,7 @@ QCheckBox::indicator:checked {
                           </size>
                          </property>
                          <property name="toolTip">
-                          <string>Set the batch size used by the exported model during prediction.</string>
+                          <string>Export batch size. Use 1 for single-frame video inference. This does not change the training batch.</string>
                          </property>
                          <property name="styleSheet">
                           <string notr="true">QSpinBox, QDoubleSpinBox, QDateTimeEdit {
@@ -8014,16 +8014,16 @@ QDoubleSpinBox::down-arrow, QSpinBox::down-arrow, QDateTimeEdit::down-arrow {
 }</string>
                          </property>
                          <property name="minimum">
-                          <number>2</number>
+                          <number>1</number>
                          </property>
                          <property name="maximum">
                           <number>100</number>
                          </property>
                          <property name="singleStep">
-                          <number>2</number>
+                          <number>1</number>
                          </property>
                          <property name="value">
-                          <number>2</number>
+                          <number>1</number>
                          </property>
                         </widget>
                        </item>

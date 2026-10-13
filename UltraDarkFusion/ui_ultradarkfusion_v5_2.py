@@ -5423,10 +5423,10 @@ class Ui_mainWindow(object):
 "    width: 7px;\n"
 "    height: 7px;\n"
 "}")
-        self.batch_input_spinbox.setMinimum(2)
+        self.batch_input_spinbox.setMinimum(1)
         self.batch_input_spinbox.setMaximum(100)
-        self.batch_input_spinbox.setSingleStep(2)
-        self.batch_input_spinbox.setProperty("value", 2)
+        self.batch_input_spinbox.setSingleStep(1)
+        self.batch_input_spinbox.setProperty("value", 1)
         self.batch_input_spinbox.setObjectName("batch_input_spinbox")
         self.gridLayout_51.addWidget(self.batch_input_spinbox, 1, 1, 1, 1)
         self.batch_size_checkbox = QtWidgets.QCheckBox(self.frame_9)
@@ -10044,7 +10044,7 @@ class Ui_mainWindow(object):
         self.half_true.setText(_translate("mainWindow", "FP16"))
         self.use_gpu_checkbox.setToolTip(_translate("mainWindow", "Select the export device, such as GPU, CPU, MPS, or DLA."))
         self.use_gpu_checkbox.setText(_translate("mainWindow", "GPU"))
-        self.batch_input_spinbox.setToolTip(_translate("mainWindow", "Set the batch size used by the exported model during prediction."))
+        self.batch_input_spinbox.setToolTip(_translate("mainWindow", "Export batch size. Use 1 for single-frame video inference. This does not change the training batch."))
         self.batch_size_checkbox.setText(_translate("mainWindow", "Batch"))
         self.convertButton.setToolTip(_translate("mainWindow", "Export the model using the selected settings."))
         self.convertButton.setText(_translate("mainWindow", "Export"))

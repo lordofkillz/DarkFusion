@@ -1,11 +1,20 @@
 # DarkFusion clean reinstall requirements for the conda env named "fusion".
 #
-# Recommended fresh install:
-#   conda create -n fusion python=3.12 -y
+# Recommended source setup/update from the repository root:
+#   powershell -ExecutionPolicy Bypass -File .\install.ps1
+# Close DarkFusion and finish training first. The installer replaces overlapping
+# ORT packages and sets up the matching Microsoft Windows App SDK runtime.
+#
+# Advanced fresh-environment installation only:
+#   conda create -n fusion python=3.12.15 -y
 #   conda activate fusion
 #   set PYTHONNOUSERSITE=1
 #   python -m pip install --upgrade pip setuptools wheel
 #   python -m pip install --no-user -r requirements.txt
+#   powershell -ExecutionPolicy Bypass -File scripts/install-windows-ml-runtime.ps1 -PythonPath "$env:CONDA_PREFIX\python.exe"
+#   python scripts/verify_install.py
+# Do not install these requirements over another ORT variant in an existing env;
+# use install.ps1 or scripts/update-windows-ml.ps1 for the guarded replacement.
 #
 # Keep --no-user in the install command so packages land in the active fusion
 # env instead of per-user site-packages.
@@ -62,12 +71,16 @@ yapf==0.43.0
 diffusers==0.38.0
 accelerate==1.15.0
 
-# ONNX inference: DirectML on Windows; PyTorch training still uses CUDA.
+# ONNX inference: Windows ML hardware policy / DirectML; PyTorch training remains CUDA.
+# Install into a fresh environment. ORT variants share a namespace; never stack them.
 onnx==1.22.0
-onnxruntime-directml==1.22.0; platform_system == "Windows"
+onnxruntime-windowsml==1.25.2.202605110140; platform_system == "Windows"
+wasdk-Microsoft.Windows.AI.MachineLearning[all]==2.3.0; platform_system == "Windows"
+wasdk-Microsoft.Windows.ApplicationModel.DynamicDependency.Bootstrap==2.3.0; platform_system == "Windows"
+winrt-runtime==3.2.1; platform_system == "Windows"
 onnxruntime==1.22.0; platform_system != "Windows"
 # Install only ONE ONNX Runtime distribution: the variants share native files.
-# DirectML is the Windows default, including in the standalone EXE runtime.
+# Windows ML includes DirectML/CPU and acquires compatible provider plugins.
 # Native TensorRT export/engine support is separate from the ONNX backend.
 # Do not replace this with the unsuffixed latest package (currently CUDA 13).
 tensorrt-cu12==10.9.0.34

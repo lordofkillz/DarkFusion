@@ -16,12 +16,16 @@ import sys
 import json
 import logging
 import base64
+import hashlib
+import math
+import re
 import tempfile
 from pathlib import Path
 from typing import Optional, Dict, Any
 import requests
 import cv2
 import numpy as np
+from darkfusion_shape_verifier import shape_annotation_crop
 
 try:
     from darkfusion_ollama_auto_setup import ensure_ollama_ready, check_ollama_running
@@ -33,6 +37,9 @@ except ImportError:
         return False
 
 logger = logging.getLogger(__name__)
+LLM_CACHE_VERSION = "borderline-object-crop-v2"
+LLM_PROMPT_VERSION = "saved-class-yes-no-v2"
+LLM_GENERATION_OPTIONS = {"temperature": 0.3, "top_p": 0.8}
 
 
 class BorderlineLLMVerifier:
@@ -63,6 +70,7 @@ class BorderlineLLMVerifier:
         self.available_model = None
         self.health_checked = False
         self._model_cache = {}
+        self._available_model_digest = ""
         
     def health_check(self) -> bool:
         """Check if Ollama is running and models available.
@@ -93,8 +101,10 @@ class BorderlineLLMVerifier:
                 
                 # Check which models are available
                 for candidate in [self.model, self.fallback_model]:
-                    if any(candidate in name for name in model_names):
-                        self.available_model = candidate
+                    matched = next((item for item in models if candidate in item.get("name", "")), None)
+                    if matched:
+                        self.available_model = matched["name"]
+                        self._available_model_digest = str(matched.get("digest", "") or "")
                         logger.info(f"LLM verifier using model: {self.available_model}")
                         return True
         except requests.exceptions.ConnectionError:
@@ -139,13 +149,15 @@ class BorderlineLLMVerifier:
     def verify_borderline_candidate(self, 
                                     image_path: str,
                                     class_name: str,
-                                    bounds: Optional[tuple] = None) -> Dict[str, Any]:
+                                    bounds: Optional[tuple] = None, *,
+                                    bounds_space: str = "normalized") -> Dict[str, Any]:
         """Verify if borderline candidate is correctly labeled.
         
         Args:
             image_path: Path to image file
             class_name: Labeled class name
-            bounds: Bounding box (x1, y1, x2, y2) to crop object
+            bounds: Normalized xyxy bounds for the saved annotation.
+            bounds_space: "pixels" is supported for explicit legacy API callers.
         
         Returns:
             dict with:
@@ -166,60 +178,48 @@ class BorderlineLLMVerifier:
                     "error": "ollama_not_available",
                 }
         
-        # Check cache first
-        cache_key = self._get_cache_key(image_path, class_name, bounds)
+        # Read once: the content hashed for caching is exactly what gets decoded
+        # and sent. A deleted/replaced image cannot inherit a stale answer.
+        try:
+            image_bytes = Path(image_path).read_bytes()
+        except OSError:
+            return self._unknown("image_not_found", f"Image unavailable: {image_path}")
+        try:
+            cache_key = self._get_cache_key(
+                image_path, class_name, bounds, bounds_space=bounds_space,
+                image_bytes=image_bytes,
+            )
+        except (TypeError, ValueError):
+            return self._unknown("invalid_bounds", "Invalid annotation crop bounds")
         cached = self._load_from_cache(cache_key)
         if cached:
             cached["cached"] = True
             return cached
-        
-        # Prepare image
-        if not os.path.isfile(image_path):
-            return {
-                "verified": None,
-                "confidence": None,
-                "reasoning": f"Image not found: {image_path}",
-                "suggested_class": None,
-                "cached": False,
-                "error": "image_not_found",
-            }
-        
-        # Crop object if bounds provided (in-memory, no temp files)
-        image_data = None
-        if bounds and len(bounds) == 4:
-            try:
-                x1, y1, x2, y2 = [int(b) for b in bounds]
-                img = cv2.imread(image_path)
-                if img is not None:
-                    crop = img[max(0, y1):min(img.shape[0], y2),
-                               max(0, x1):min(img.shape[1], x2)]
-                    if crop.size > 0:
-                        # Encode crop directly to base64 (in-memory, no temp file)
-                        success, buffer = cv2.imencode('.jpg', crop)
-                        if success:
-                            image_data = base64.b64encode(buffer).decode("utf-8")
-            except Exception as e:
-                logger.warning(f"Could not crop image in-memory: {e}")
-        
-        # Fallback to full image if crop failed
-        if not image_data:
-            image_data = self._image_to_base64(image_path)
-        
-        if not image_data:
-            return {
-                "verified": None,
-                "confidence": None,
-                "reasoning": "Could not encode image",
-                "suggested_class": None,
-                "cached": False,
-                "error": "image_encode_failed",
-            }
+        try:
+            image = cv2.imdecode(np.frombuffer(image_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+            if image is None:
+                return self._unknown("image_decode_failed", "Could not decode image")
+            if bounds is not None:
+                normalized = tuple(float(value) for value in bounds)
+                if bounds_space == "pixels":
+                    height, width = image.shape[:2]
+                    normalized = (normalized[0] / width, normalized[1] / height,
+                                  normalized[2] / width, normalized[3] / height)
+                image = shape_annotation_crop(image, normalized)
+                if image is None:
+                    return self._unknown("invalid_crop", "Annotation crop is empty or too small")
+            success, buffer = cv2.imencode(".jpg", image)
+            if not success:
+                return self._unknown("image_encode_failed", "Could not encode object crop")
+            image_data = base64.b64encode(buffer).decode("utf-8")
+        except (ValueError, TypeError, cv2.error) as error:
+            return self._unknown("image_encode_failed", f"Object crop unavailable: {error}")
         
         # Ask LLM with cropped (or full) image
         try:
             result = self._query_llm_with_data(image_data, class_name)
-            # Cache result
-            self._save_to_cache(cache_key, result)
+            if self._cacheable_result(result):
+                self._save_to_cache(cache_key, result)
             return result
         except Exception as e:
             logger.error(f"LLM query failed: {e}")
@@ -276,21 +276,14 @@ REASONING: [1-2 sentences explaining]"""
                     "prompt": prompt,
                     "images": [image_b64],
                     "stream": False,
-                    "temperature": 0.3,  # Lower temp = more consistent
-                    "top_p": 0.8,
+                    "options": dict(LLM_GENERATION_OPTIONS),
                 },
                 timeout=30  # 30 sec timeout (was 60) - prevent hanging
             )
             
             if response.status_code != 200:
                 logger.warning(f"LLM returned status {response.status_code}")
-                return {
-                    "verified": None,
-                    "confidence": None,
-                    "reasoning": f"LLM error: {response.status_code}",
-                    "suggested_class": None,
-                    "cached": False,
-                }
+                return self._unknown("llm_http_error", f"LLM error: {response.status_code}")
             
             # Parse response
             response_text = response.json().get("response", "").strip()
@@ -298,13 +291,7 @@ REASONING: [1-2 sentences explaining]"""
         
         except requests.exceptions.Timeout:
             logger.warning("LLM request timed out")
-            return {
-                "verified": None,
-                "confidence": None,
-                "reasoning": "LLM request timed out (model too slow)",
-                "suggested_class": None,
-                "cached": False,
-            }
+            return self._unknown("llm_timeout", "LLM request timed out; object remains unverified")
         except Exception as e:
             logger.error(f"LLM request error: {e}")
             raise
@@ -333,51 +320,80 @@ REASONING: [1-2 sentences explaining]"""
             dict with parsed result
         """
         lines = response.split("\n")
-        correct = None
-        confidence = None
+        correct_values = set()
+        confidence_values = set()
+        invalid_field = False
         suggestion = None
         reasoning = ""
         
         for line in lines:
-            line_lower = line.lower().strip()
-            if "correct:" in line_lower:
-                correct = "yes" in line_lower
-            elif "confidence:" in line_lower:
-                if "high" in line_lower:
-                    confidence = "high"
-                elif "medium" in line_lower:
-                    confidence = "medium"
-                elif "low" in line_lower:
-                    confidence = "low"
-            elif "suggestion:" in line_lower:
+            line_lower = line.lower().strip().replace("**", "")
+            correct_match = re.fullmatch(r"correct\s*:\s*(yes|no)[.!]?", line_lower)
+            confidence_match = re.fullmatch(r"confidence\s*:\s*(high|medium|low)[.!]?", line_lower)
+            if correct_match:
+                correct_values.add(correct_match.group(1) == "yes")
+            elif confidence_match:
+                confidence_values.add(confidence_match.group(1))
+            elif re.match(r"^(correct|confidence)\s*:", line_lower):
+                invalid_field = True
+            elif line_lower.startswith("suggestion:"):
                 parts = line.split(":", 1)
                 if len(parts) > 1:
                     suggestion = parts[1].strip()
                     if suggestion.lower() in ["none", "n/a", "-", ""]:
                         suggestion = None
-            elif "reasoning:" in line_lower:
+            elif line_lower.startswith("reasoning:"):
                 parts = line.split(":", 1)
                 if len(parts) > 1:
                     reasoning = parts[1].strip()
         
-        return {
+        correct = next(iter(correct_values)) if len(correct_values) == 1 else None
+        confidence = next(iter(confidence_values)) if len(confidence_values) == 1 else None
+        result = {
             "verified": correct,
-            "confidence": confidence or "medium",
+            "confidence": confidence,
             "reasoning": reasoning or response[:200],
             "suggested_class": suggestion,
             "cached": False,
         }
+        if correct is None or confidence is None or invalid_field:
+            result["verified"] = None
+            result["error"] = "unparseable_answer"
+        return result
     
-    def _get_cache_key(self, image_path: str, class_name: str, bounds: Optional[tuple]) -> str:
-        """Generate cache key for result."""
-        import hashlib
-        key_parts = [
-            os.path.basename(image_path),
-            class_name,
-            str(bounds or ""),
-        ]
-        key_str = "|".join(key_parts)
-        return hashlib.md5(key_str.encode()).hexdigest()[:16]
+    @staticmethod
+    def _unknown(error, reasoning):
+        return {"verified": None, "confidence": None, "reasoning": reasoning,
+                "suggested_class": None, "cached": False, "error": error}
+
+    @staticmethod
+    def _cacheable_result(result):
+        return (isinstance(result, dict) and not result.get("error")
+                and type(result.get("verified")) is bool
+                and result.get("confidence") in ("high", "medium", "low"))
+
+    def _get_cache_key(self, image_path: str, class_name: str, bounds: Optional[tuple], *,
+                       bounds_space="normalized", image_bytes=None) -> str:
+        """Versioned identity: exact image content, object, model and prompt."""
+        if bounds_space not in ("normalized", "pixels"):
+            raise ValueError("Unsupported bounds coordinate space")
+        normalized_bounds = None
+        if bounds is not None:
+            normalized_bounds = tuple(float(value) for value in bounds)
+            if len(normalized_bounds) != 4 or not all(math.isfinite(value) for value in normalized_bounds):
+                raise ValueError("Invalid crop bounds")
+        image_path = os.path.normcase(os.path.realpath(os.path.abspath(os.fspath(image_path))))
+        if image_bytes is None:
+            image_bytes = Path(image_path).read_bytes()
+        identity = {
+            "version": LLM_CACHE_VERSION, "prompt": LLM_PROMPT_VERSION,
+            "image": image_path, "content": hashlib.sha256(image_bytes).hexdigest(),
+            "class": str(class_name), "bounds": normalized_bounds, "bounds_space": bounds_space,
+            "model": self.available_model or self.model,
+            "model_digest": getattr(self, "_available_model_digest", ""),
+            "host": self.ollama_host.rstrip("/"), "options": LLM_GENERATION_OPTIONS,
+        }
+        return hashlib.sha256(json.dumps(identity, sort_keys=True).encode("utf-8")).hexdigest()
     
     def _load_from_cache(self, cache_key: str) -> Optional[Dict[str, Any]]:
         """Load cached result."""
@@ -385,31 +401,47 @@ REASONING: [1-2 sentences explaining]"""
             cache_file = self.cache_dir / f"{cache_key}.json"
             if cache_file.exists():
                 with open(cache_file) as f:
-                    return json.load(f)
+                    payload = json.load(f)
+                if (isinstance(payload, dict) and payload.get("version") == LLM_CACHE_VERSION
+                        and self._cacheable_result(payload.get("result"))):
+                    return payload["result"]
         except Exception as e:
             logger.debug(f"Cache load failed: {e}")
         return None
     
     def _save_to_cache(self, cache_key: str, result: Dict[str, Any]) -> None:
         """Save result to cache."""
+        if not self._cacheable_result(result):
+            return
+        temporary = None
         try:
             cache_file = self.cache_dir / f"{cache_key}.json"
-            with open(cache_file, "w") as f:
-                json.dump(result, f)
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=self.cache_dir,
+                                             prefix=".llm-", suffix=".tmp", delete=False) as handle:
+                temporary = Path(handle.name)
+                json.dump({"version": LLM_CACHE_VERSION, "result": result}, handle)
+            os.replace(temporary, cache_file)
+            temporary = None
         except Exception as e:
             logger.debug(f"Cache save failed: {e}")
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    logger.debug("Could not remove incomplete LLM cache temporary file")
 
 
 def verify_with_llm(image_path: str, 
                     class_name: str,
                     bounds: Optional[tuple] = None,
-                    cache_dir: Optional[str] = None) -> Dict[str, Any]:
+                    cache_dir: Optional[str] = None, *, bounds_space="normalized") -> Dict[str, Any]:
     """Quick function to verify a single borderline candidate.
     
     Args:
         image_path: Path to image
         class_name: Labeled class
-        bounds: Optional bounding box
+        bounds: Optional normalized xyxy bounding box (or explicit bounds_space="pixels")
         cache_dir: Cache directory
     
     Returns:
@@ -425,4 +457,4 @@ def verify_with_llm(image_path: str,
             "cached": False,
             "error": "ollama_not_available",
         }
-    return verifier.verify_borderline_candidate(image_path, class_name, bounds)
+    return verifier.verify_borderline_candidate(image_path, class_name, bounds, bounds_space=bounds_space)

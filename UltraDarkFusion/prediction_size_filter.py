@@ -3,6 +3,57 @@ import math
 import numpy as np
 
 
+def polygon_touches_roi_rect(points, bounds):
+    """Shared editor/inference/SAHI ROI geometry, including touching edges."""
+    points = [tuple(map(float, point)) for point in points]
+    if len(points) < 3:
+        return False
+    left, top, width, height = map(float, bounds)
+    right, bottom = left + width, top + height
+    corners = [(left, top), (right, top), (right, bottom), (left, bottom)]
+    if any(left <= x <= right and top <= y <= bottom for x, y in points):
+        return True
+
+    def contains(point):
+        inside = False
+        x, y = point
+        previous = points[-1]
+        for current in points:
+            if (current[1] > y) != (previous[1] > y):
+                crossing_x = ((previous[0] - current[0]) * (y - current[1]) /
+                              (previous[1] - current[1]) + current[0])
+                if x < crossing_x:
+                    inside = not inside
+            previous = current
+        return inside
+
+    if any(contains(corner) for corner in corners):
+        return True
+
+    def segments_touch(a, b, c, d):
+        epsilon = 1e-9
+
+        def cross(p, q, r):
+            return (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+
+        def on_segment(p, q, r):
+            return (min(p[0], q[0]) - epsilon <= r[0] <= max(p[0], q[0]) + epsilon and
+                    min(p[1], q[1]) - epsilon <= r[1] <= max(p[1], q[1]) + epsilon)
+
+        values = (cross(a, b, c), cross(a, b, d), cross(c, d, a), cross(c, d, b))
+        if ((values[0] > epsilon and values[1] < -epsilon) or
+                (values[0] < -epsilon and values[1] > epsilon)) and \
+                ((values[2] > epsilon and values[3] < -epsilon) or
+                 (values[2] < -epsilon and values[3] > epsilon)):
+            return True
+        return any(abs(value) <= epsilon and on_segment(p, q, r) for value, p, q, r in (
+            (values[0], a, b, c), (values[1], a, b, d), (values[2], c, d, a), (values[3], c, d, b)))
+
+    return any(segments_touch(a, b, c, d)
+               for a, b in zip(points, points[1:] + points[:1])
+               for c, d in zip(corners, corners[1:] + corners[:1]))
+
+
 def prediction_size_limits(img_width, img_height, min_size_px=0.0, max_percent=1.0):
     try:
         img_width = max(1.0, float(img_width))

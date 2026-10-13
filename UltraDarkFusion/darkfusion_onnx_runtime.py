@@ -1,6 +1,7 @@
 """Standalone ONNX Runtime inference backend for DarkFusion.
 
-This module intentionally has no Ultralytics runtime dependency.  It supports
+Inference intentionally has no Ultralytics runtime dependency. Project tracking
+can use the optional adapter for DarkFusion's existing tracker algorithms. It supports
 Ultralytics-exported YOLO detect, segment, pose, OBB, and classify graphs and
 returns small NumPy-backed objects with the result attributes DarkFusion uses
 (``boxes.xyxy``, ``masks.xy``, ``keypoints.xy``, ``obb.xyxyxyxy``, etc.).
@@ -19,15 +20,19 @@ import json
 import math
 import os
 import time
+import hashlib
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 import cv2
 import numpy as np
 
+import darkfusion_windows_ml as windows_ml
+
 try:
-    import onnxruntime as ort
+    ort = windows_ml.get_ort()
 except ImportError as exc:  # pragma: no cover - exercised only in missing dependency environments
     raise ImportError(
         "darkfusion_onnx_runtime requires ONNX Runtime. Install the package "
@@ -36,6 +41,38 @@ except ImportError as exc:  # pragma: no cover - exercised only in missing depen
 
 
 IMAGE_SUFFIXES = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
+
+# Match the existing FP16 cast-then-multiply, including its rounding. Using
+# FP32 division followed by an FP16 cast would not produce identical values.
+_FP16_NORMALIZED_PIXELS = np.arange(256, dtype=np.float16)
+_FP16_NORMALIZED_PIXELS *= 1.0 / 255.0
+_FP16_NORMALIZED_PIXELS.flags.writeable = False
+
+
+def _normalized_rgb_tensor(pixels: np.ndarray, input_type: str) -> np.ndarray:
+    """Normalize YOLO pixels without slow per-pixel CPU half arithmetic."""
+    fp16 = "float16" in input_type
+    if fp16 and pixels.dtype == np.uint8:
+        return np.ascontiguousarray(_FP16_NORMALIZED_PIXELS[pixels])
+    # Preserve all previous behavior for FP32 and non-byte image inputs.
+    tensor = np.asarray(pixels, dtype=np.float16 if fp16 else np.float32, order="C")
+    tensor *= 1.0 / 255.0
+    return tensor
+
+# Official metadata-free DAMO exports already used by DarkFusion users.
+# Other score/box graphs need an explicit contract, not a guessed YOLO head.
+DAMO_PROFILES = {"damoyolo_tinynasl18_ns": "stretch", "damoyolo_tinynasl45_l_519": "letterbox"}
+COCO_NAMES = (
+    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light",
+    "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow",
+    "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
+    "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove", "skateboard", "surfboard",
+    "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
+    "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch",
+    "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard", "cell phone",
+    "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors", "teddy bear",
+    "hair drier", "toothbrush",
+)
 
 PROVIDER_ALIASES = {
     "cpu": "CPUExecutionProvider",
@@ -52,6 +89,7 @@ PROVIDER_ALIASES = {
     "migraphx": "MIGraphXExecutionProvider",
     "coreml": "CoreMLExecutionProvider",
     "qnn": "QNNExecutionProvider",
+    "vitisai": "VitisAIExecutionProvider",
     "webgpu": "WebGpuExecutionProvider",
     "xnnpack": "XnnpackExecutionProvider",
 }
@@ -77,6 +115,23 @@ AUTO_PROVIDER_PRIORITY = (
 
 class OnnxBackendError(RuntimeError):
     """Raised when a graph or execution provider cannot be used safely."""
+
+
+@lru_cache(maxsize=64)
+def _onnx_image_input_contract(path: str, size: int, modified_ns: int):
+    """Read only the original input/metadata; never rewrite an exported model."""
+    del size, modified_ns  # Cache arguments invalidate a replaced model.
+    import onnx
+
+    graph = onnx.load_model(path, load_external_data=False)
+    initializers = {item.name for item in graph.graph.initializer}
+    inputs = [item for item in graph.graph.input if item.name not in initializers]
+    if len(inputs) != 1:
+        raise OnnxBackendError(f"Image backends require one graph input; found {len(inputs)}.")
+    value = inputs[0]
+    shape = tuple(dim.dim_value if dim.dim_value > 0 else dim.dim_param or None
+                  for dim in value.type.tensor_type.shape.dim)
+    return value.name, shape, {item.key: item.value for item in graph.metadata_props}
 
 
 class ArrayView:
@@ -678,7 +733,13 @@ def _load_image(source: Any) -> tuple[np.ndarray, str]:
         if image is None:
             raise FileNotFoundError(f"Could not read image: {path}")
         return image, path
-    image = np.asarray(source)
+    # Follow the existing Ultralytics source contract: PIL is RGB, OpenCV/
+    # NumPy video frames are BGR. This has nothing to do with class colors.
+    from PIL import Image
+    if isinstance(source, Image.Image):
+        image = cv2.cvtColor(np.asarray(source.convert("RGB")), cv2.COLOR_RGB2BGR)
+    else:
+        image = np.asarray(source)
     if image.ndim == 2:
         image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
     elif image.ndim == 3 and image.shape[2] == 4:
@@ -716,6 +777,8 @@ def provider_status() -> dict[str, Any]:
         "available": available,
         "known": all_execution_providers(),
         "aliases": dict(PROVIDER_ALIASES),
+        "runtime": "Windows ML" if windows_ml.installed() else "ONNX Runtime",
+        "devices": windows_ml.devices(),
     }
 
 
@@ -724,6 +787,8 @@ def _canonical_provider(value: str, available: Sequence[str]) -> str:
     if not requested:
         return ""
     alias = PROVIDER_ALIASES.get(requested.lower(), requested)
+    if alias == "TensorrtExecutionProvider" and "TensorRTPluginExecutionProvider" in available:
+        return "TensorRTPluginExecutionProvider"
     for provider in available:
         if provider.lower() == alias.lower():
             return provider
@@ -840,41 +905,51 @@ class DarkFusionOnnxModel:
         providers: str | Sequence[str] = "auto",
         provider_options: Mapping[str, Mapping[str, Any]] | None = None,
         strict_provider: bool = True,
-        include_cpu_fallback: bool = True,
+        include_cpu_fallback: bool | None = None,
         task: str | None = None,
         names: Mapping[int, str] | Sequence[str] | None = None,
         imgsz: int | Sequence[int] | None = None,
         fp16: bool = True,
-        device_id: int = 0,
+        device_id: int | None = None,
         cache_dir: str | os.PathLike | None = None,
         output_format: str = "auto",
         framework: str = "auto",
+        runtime_options: Mapping[str, Any] | None = None,
     ):
         self.model_path = os.path.abspath(os.fspath(model_path))
         if not os.path.isfile(self.model_path):
             raise FileNotFoundError(self.model_path)
         self.requested_providers = providers
+        self.runtime_options = windows_ml.settings(runtime_options)
         self.strict_provider = bool(strict_provider)
-        self.include_cpu_fallback = bool(include_cpu_fallback)
+        self.include_cpu_fallback = self.runtime_options["cpu_fallback"] if include_cpu_fallback is None else bool(include_cpu_fallback)
         self.user_provider_options = {
             str(key): dict(value) for key, value in (provider_options or {}).items()
         }
         self.fp16 = bool(fp16)
-        self.device_id = int(device_id)
+        self.device_id = self.runtime_options["device_id"] if device_id is None else int(device_id)
+        if self.runtime_options["cache_dir"]:
+            cache_dir = os.path.join(self.runtime_options["cache_dir"], hashlib.sha1(self.model_path.encode("utf-8")).hexdigest()[:12])
         self.cache_dir = os.path.abspath(os.fspath(cache_dir)) if cache_dir else os.path.join(
             os.path.dirname(self.model_path), ".darkfusion_ort_cache"
         )
-        self.output_format = str(output_format).lower().strip().replace("-", "_")
+        self.output_format = str(self.runtime_options["output_format"] if output_format == "auto" else output_format).lower().strip().replace("-", "_")
         if self.output_format not in {"auto", "ultralytics", "yolo_objectness", "end2end"}:
             raise ValueError(
                 "output_format must be auto, ultralytics, yolo_objectness, or end2end"
             )
-        self.framework = str(framework).lower().strip()
-        if self.framework not in {"auto", "ultralytics", "darknet"}:
+        self.framework = str(self.runtime_options["framework"] if framework == "auto" else framework).lower().strip()
+        if self.framework not in {"auto", "ultralytics", "darknet", "damo"}:
             raise ValueError(
-                "framework must be auto, ultralytics, or darknet"
+                "framework must be auto, ultralytics, darknet, or damo"
             )
+        if self.runtime_options["task"] != "auto":
+            task = self.runtime_options["task"]
         self.task_override = str(task).lower().strip() if task else ""
+        if names is None and self.runtime_options["names"]:
+            names = _literal_metadata(self.runtime_options["names"], None)
+            if not isinstance(names, (Mapping, list, tuple)):
+                raise ValueError("ONNX class names must be a JSON array or an index-to-name object.")
         self.names_override = _normalize_names(names)
         self.imgsz_override = _normalize_imgsz(imgsz) if imgsz is not None else None
         self.session: ort.InferenceSession | None = None
@@ -896,16 +971,55 @@ class DarkFusionOnnxModel:
         self.ckpt: dict[str, Any] = {}
         self.darknet_confs_name: str = ""
         self.darknet_boxes_name: str = ""
+        self.damo_scores_name: str = ""
+        self.damo_boxes_name: str = ""
+        self.setup_diagnostics: list[str] = []
+        self.performance_selection: dict[str, Any] = {}
+        self._performance_input = None
+        self._provider_input_shape: tuple[int, ...] | None = None
+        self._session_profile_bounds = None
         self._create_session()
 
     def _session_options(self, chain: Sequence[str]) -> ort.SessionOptions:
         options = ort.SessionOptions()
         options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        options.log_severity_level = 4
+        # Keep native compiler errors visible; FATAL-only logging hid the
+        # actual reason behind generic "failed to create serialized engine".
+        options.log_severity_level = 3
         if "DmlExecutionProvider" in chain:
             options.enable_mem_pattern = False
             options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+        if not getattr(self, "include_cpu_fallback", True) and "CPUExecutionProvider" not in chain:
+            options.add_session_config_entry("session.disable_cpu_ep_fallback", "1")
         return options
+
+    def _uses_automatic_rtx_profile(self) -> bool:
+        keys = {"nv_profile_min_shapes", "nv_profile_opt_shapes", "nv_profile_max_shapes"}
+        provided = keys.intersection(self.user_provider_options.get("NvTensorRTRTXExecutionProvider", {}))
+        if provided and provided != keys:
+            raise OnnxBackendError("TensorRT RTX requires all three min/opt/max shape profile options together.")
+        return not provided
+
+    def _rtx_profile_shapes(self):
+        stat = os.stat(self.model_path)
+        name, original, metadata = _onnx_image_input_contract(self.model_path, stat.st_size, stat.st_mtime_ns)
+        if len(original) != 4:
+            raise OnnxBackendError(f"Expected a four-dimensional image input, found {original}.")
+        shape = getattr(self, "_provider_input_shape", None)
+        if shape is None:
+            height, width = self.imgsz_override or _normalize_imgsz(metadata.get("imgsz", ""), (640, 640))
+            channels = int(metadata.get("channels", 3))
+            fallback = (1, height, width, channels) if original[-1] in (1, 3, 4) else (1, channels, height, width)
+            shape = tuple(value if isinstance(value, int) and value > 0 else fallback[index]
+                          for index, value in enumerate(original))
+        shape = tuple(int(value) for value in shape)
+        if len(shape) != 4 or any(value <= 0 for value in shape):
+            raise OnnxBackendError(f"Invalid TensorRT RTX image shape: {shape}.")
+        # Smaller final batches fit the same engine. Spatial dimensions stay
+        # bounded to the actual inference size, not the EP's implicit 1x1 to
+        # 32767x32767 range (invalid/expensive for dynamic YOLO exports).
+        minimum = (1, *shape[1:]) if not isinstance(original[0], int) else shape
+        return name, minimum, shape, shape
 
     def _provider_options(self, provider: str) -> dict[str, Any]:
         options = dict(self.user_provider_options.get(provider, {}))
@@ -913,7 +1027,7 @@ class DarkFusionOnnxModel:
             options.setdefault("device_id", self.device_id)
             options.setdefault("cudnn_conv_algo_search", "EXHAUSTIVE")
             options.setdefault("do_copy_in_default_stream", True)
-        elif provider == "TensorrtExecutionProvider":
+        elif provider in {"TensorrtExecutionProvider", "TensorRTPluginExecutionProvider"}:
             os.makedirs(self.cache_dir, exist_ok=True)
             options.setdefault("device_id", self.device_id)
             options.setdefault("trt_fp16_enable", self.fp16)
@@ -922,17 +1036,75 @@ class DarkFusionOnnxModel:
             options.setdefault("trt_timing_cache_enable", True)
             options.setdefault("trt_timing_cache_path", self.cache_dir)
         elif provider == "NvTensorRTRTXExecutionProvider":
-            os.makedirs(self.cache_dir, exist_ok=True)
             options.setdefault("device_id", self.device_id)
-            options.setdefault("enable_cuda_graph", True)
-            options.setdefault("nv_runtime_cache_path", self.cache_dir)
+            # CUDA graph capture needs stable device-bound I/O. This adapter uses
+            # NumPy inputs and recreatable sessions; explicitly keep capture off
+            # even when an installed provider version defaults it to on.
+            options.setdefault("enable_cuda_graph", False)
+            cache_dir = self.cache_dir
+            if self._uses_automatic_rtx_profile():
+                name, minimum, optimum, maximum = self._rtx_profile_shapes()
+                for key, shape in (("nv_profile_min_shapes", minimum), ("nv_profile_opt_shapes", optimum),
+                                   ("nv_profile_max_shapes", maximum)):
+                    options[key] = name + ":" + "x".join(map(str, shape))
+                signature = "x".join(map(str, minimum)) + "--" + "x".join(map(str, maximum))
+                cache_dir = os.path.join(cache_dir, "tensorrt-rtx", signature)
+            os.makedirs(cache_dir, exist_ok=True)
+            options.setdefault("nv_runtime_cache_path", cache_dir)
         elif provider == "DmlExecutionProvider":
             options.setdefault("device_id", self.device_id)
         elif provider in {"ROCMExecutionProvider", "MIGraphXExecutionProvider"}:
             options.setdefault("device_id", self.device_id)
         return options
 
+    def _open_session(self, chain, options, *, automatic=False):
+        """Use one Windows ML device API for built-in and catalog GPU EPs.
+
+        Mixing the legacy Python DirectML factory with RTX broke FP16 execution
+        after a switch on the tested NVIDIA stack. The V2 factory interoperates
+        without disabling DirectML metacommands or changing image processing.
+        CPU/non-Windows runtimes retain their existing registration path.
+        """
+        if windows_ml.installed() and chain[0] != "CPUExecutionProvider":
+            devices = list(ort.get_ep_devices())
+            index = 0 if automatic else self.device_id
+            for provider in chain:
+                if provider == "CPUExecutionProvider":
+                    continue
+                selected = [device for device in devices if device.ep_name == provider]
+                if not selected or index >= len(selected):
+                    raise OnnxBackendError(f"{provider} device index {index} is unavailable.")
+                # V2 binds the device itself. Passing device_id again duplicates
+                # config entries and can disagree with catalog device numbering.
+                values = {key: windows_ml.option_string(value)
+                          for key, value in self._provider_options(provider).items() if key != "device_id"}
+                options.add_provider_for_devices([selected[index]], values)
+            return ort.InferenceSession(self.model_path, sess_options=options)
+        registrations = []
+        for provider in chain:
+            values = self._provider_options(provider)
+            if automatic:
+                values.pop("device_id", None)
+            registrations.append((provider, values) if values else provider)
+        return ort.InferenceSession(self.model_path, sess_options=options, providers=registrations)
+
     def _create_session(self):
+        values = self.requested_providers.split(",") if isinstance(self.requested_providers, str) else list(self.requested_providers)
+        automatic = not values or any(str(value).strip().lower() == "auto" for value in values)
+        compare_automatic = (automatic and self.runtime_options["compare_providers"]
+                             and self.runtime_options["auto_policy"] in {"max_performance", "prefer_gpu"})
+        # With comparison enabled, begin with the inexpensive compatibility
+        # session. Do not compile the policy's RTX choice before discovering a
+        # remembered DirectML winner at first inference.
+        use_policy = windows_ml.installed() and automatic and not compare_automatic
+        if windows_ml.installed():
+            for value in (["auto"] if automatic else values):
+                canonical = PROVIDER_ALIASES.get(str(value).strip().lower(), str(value).strip())
+                canonical = _canonical_provider(canonical, available_execution_providers())
+                try:
+                    windows_ml.prepare(canonical, self.runtime_options)
+                except Exception as exc:
+                    raise OnnxBackendError(str(exc)) from exc
         chain = resolve_provider_chain(
             self.requested_providers,
             strict=self.strict_provider,
@@ -952,28 +1124,67 @@ class DarkFusionOnnxModel:
                 importlib.import_module("tensorrt_libs")
             except ImportError:
                 pass
-        registrations: list[Any] = []
-        for provider in chain:
-            provider_options = self._provider_options(provider)
-            registrations.append((provider, provider_options) if provider_options else provider)
         try:
-            self.session = ort.InferenceSession(
-                self.model_path,
-                sess_options=self._session_options(chain),
-                providers=registrations,
-            )
+            # Explicitly preferring CPU is not CPU fallback. Otherwise disabling
+            # fallback must prevent CPU graph partitions in automatic GPU mode.
+            option_chain = ["CPUExecutionProvider"] if use_policy and self.runtime_options["auto_policy"] == "prefer_cpu" else chain
+            options = self._session_options(option_chain)
+            if use_policy:
+                # DirectML may be selected by the policy; its constraints apply.
+                options.enable_mem_pattern = False
+                options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+                for provider in available_execution_providers():
+                    for key, value in self._provider_options(provider).items():
+                        if key == "device_id":
+                            continue  # Policy chooses the device, not the manual index.
+                        options.add_session_config_entry(windows_ml.provider_config_prefix(provider) + key,
+                                                         windows_ml.option_string(value))
+                policy = windows_ml.POLICIES[self.runtime_options["auto_policy"]]
+                options.set_provider_selection_policy(getattr(ort.OrtExecutionProviderDevicePolicy, policy))
+                self.session = ort.InferenceSession(self.model_path, sess_options=options)
+                if any(windows_ml.is_experimental(name) for name in self.session.get_providers()):
+                    raise OnnxBackendError("Automatic policy selected an experimental provider; using safe fallback.")
+            else:
+                self.session = self._open_session(chain, options, automatic=automatic)
         except Exception as exc:
-            raise OnnxBackendError(
-                f"Could not create ONNX Runtime session for {self.model_path} with {chain}: {exc}"
-            ) from exc
+            if automatic:
+                # Retry only Automatic setup at model load. Manual choices
+                # remain strict and never silently fall back. A broken GPU DLL
+                # must not prevent a permitted final CPU-only attempt.
+                fallback = resolve_provider_chain("auto", include_cpu_fallback=self.include_cpu_fallback)
+                attempts = [fallback]
+                if self.include_cpu_fallback and fallback != ["CPUExecutionProvider"]:
+                    attempts.append(["CPUExecutionProvider"])
+                failure = exc
+                for fallback in attempts:
+                    self.setup_diagnostics.append(f"Automatic provider could not load this model; trying {fallback}: {failure}")
+                    try:
+                        self.session = self._open_session(fallback, self._session_options(fallback), automatic=True)
+                        chain = fallback
+                        break
+                    except Exception as retry_error:
+                        failure = retry_error
+                else:
+                    raise OnnxBackendError(f"No automatic ONNX provider could load {self.model_path}: {failure}") from failure
+                use_policy = False
+            else:
+                raise OnnxBackendError(
+                    f"Could not create ONNX Runtime session for {self.model_path} with {chain}: {exc}"
+                ) from exc
         self.providers = list(self.session.get_providers())
-        if self.strict_provider and chain and self.providers and self.providers[0] != chain[0]:
+        if automatic and not use_policy and chain and self.providers and self.providers[0] != chain[0]:
+            self.setup_diagnostics.append(f"Automatic setup used {self.providers} instead of {chain}.")
+        if self.strict_provider and not automatic and chain and self.providers and self.providers[0] != chain[0]:
             actual = ", ".join(self.providers)
             raise OnnxBackendError(
                 f"ONNX Runtime registered {chain[0]} but could not activate it and silently fell back "
                 f"to {actual}. The provider's native runtime/DLL dependencies are likely missing."
             )
         self.session.disable_fallback()
+        self._session_profile_bounds = None
+        if "NvTensorRTRTXExecutionProvider" in self.providers and self._uses_automatic_rtx_profile():
+            _name, minimum, _optimum, maximum = self._rtx_profile_shapes()
+            self._session_profile_bounds = (minimum, maximum)
         inputs = self.session.get_inputs()
         if len(inputs) != 1:
             raise OnnxBackendError(
@@ -983,19 +1194,22 @@ class DarkFusionOnnxModel:
         self.input_name = input_info.name
         self.input_shape = list(input_info.shape)
         self.input_type = str(input_info.type)
+        if self.input_type not in {"tensor(float)", "tensor(float16)"}:
+            raise OnnxBackendError(f"Unsupported image input type {self.input_type}; export float32/float16 inputs (quantized internal weights are supported).")
         self.output_names = [item.name for item in self.session.get_outputs()]
+        self.metadata = dict(self.session.get_modelmeta().custom_metadata_map or {})
         
         # Auto-detect Darknet framework by looking for confs+boxes output pattern
-        if self.framework == "auto" and len(self.output_names) == 2:
+        if self.framework == "auto" and len(self.output_names) == 2 and (self.task_override or self.metadata.get("task", "detect")) == "detect":
             outputs = self.session.get_outputs()
             shapes = [list(out.shape) for out in outputs]
             # Darknet pattern: two outputs where one has shape [B,N,classes] and other [B,N,1,4]
             # This heuristic checks for the characteristic shapes
-            if len(shapes[0]) == 3 and len(shapes[1]) == 4:
+            if len(shapes[0]) == 3 and len(shapes[1]) == 4 and shapes[1][-2:] == [1, 4] and shapes[0][:2] == shapes[1][:2]:
                 self.framework = "darknet"
                 self.darknet_confs_name = outputs[0].name
                 self.darknet_boxes_name = outputs[1].name
-            elif len(shapes[0]) == 4 and len(shapes[1]) == 3:
+            elif len(shapes[0]) == 4 and len(shapes[1]) == 3 and shapes[0][-2:] == [1, 4] and shapes[1][:2] == shapes[0][:2]:
                 self.framework = "darknet"
                 self.darknet_boxes_name = outputs[0].name
                 self.darknet_confs_name = outputs[1].name
@@ -1020,6 +1234,7 @@ class DarkFusionOnnxModel:
                 f"Unsupported ONNX task '{self.task}'. Supported tasks: {sorted(self.SUPPORTED_TASKS)}."
             )
         self.names = self.names_override or _normalize_names(self.metadata.get("names", ""))
+        self._configure_damo_contract()
         self.stride = max(1, int(float(self.metadata.get("stride", 32) or 32)))
         metadata_size = _normalize_imgsz(self.metadata.get("imgsz", ""), (640, 640))
         self.imgsz = self.imgsz_override or self._static_input_size() or metadata_size
@@ -1038,9 +1253,70 @@ class DarkFusionOnnxModel:
             self.end2end = True
         if not self.names and self.task != "classify":
             channels = self._output_channel_hint()
+            if self.framework == "darknet" and self.darknet_confs_name:
+                shape = next(out.shape for out in self.session.get_outputs() if out.name == self.darknet_confs_name)
+                if isinstance(shape[-1], int):
+                    self.names = {index: str(index) for index in range(shape[-1])}
+                    return
+            if self.framework == "damo":
+                shape = next(out.shape for out in self.session.get_outputs() if out.name == self.damo_scores_name)
+                count = shape[-1]
+                if not isinstance(count, int) or count <= 0:
+                    raise OnnxBackendError("DAMO exports with dynamic class counts require model class names.")
+                profile = DAMO_PROFILES.get(Path(self.model_path).stem.lower())
+                self.names = dict(enumerate(COCO_NAMES if profile and count == 80 else map(str, range(count))))
+                return
             extra = {"detect": 0, "segment": 32, "pose": 51, "obb": 1}.get(self.task, 0)
-            count = max(1, channels - 4 - extra) if channels else 1
+            score_offset = 5 if self.output_format == "yolo_objectness" else 4
+            count = max(1, channels - score_offset - extra) if channels else 1
             self.names = {index: str(index) for index in range(count)}
+
+    def _configure_damo_contract(self):
+        outputs = self.session.get_outputs()
+        if len(outputs) != 2 or self.task != "detect":
+            if self.framework == "damo":
+                raise OnnxBackendError("DAMO detection requires separate scores [B,N,C] and pixel boxes [B,N,4].")
+            return
+        shapes = [list(out.shape) for out in outputs]
+        matches = [index for index in (0, 1) if len(shapes[index]) == len(shapes[1-index]) == 3
+                   and shapes[index][-1] == 4 and shapes[index][:2] == shapes[1-index][:2]]
+        if len(matches) != 1:
+            if self.framework == "damo":
+                raise OnnxBackendError("Ambiguous DAMO scores/boxes contract; expected [B,N,C] and [B,N,4].")
+            return
+        profile = DAMO_PROFILES.get(Path(self.model_path).stem.lower())
+        if self.framework == "auto":
+            if not profile and self.metadata.get("framework", "").lower() != "damo":
+                raise OnnxBackendError("Separate scores/boxes outputs are not a raw YOLO head. Select the matching DAMO export contract and preprocessing in advanced settings before labeling.")
+            self.framework = "damo"
+        if self.framework != "damo":
+            return
+        self.damo_boxes_name = outputs[matches[0]].name
+        self.damo_scores_name = outputs[1-matches[0]].name
+        self.damo_resize = self.runtime_options["damo_resize"]
+        if self.damo_resize == "auto":
+            self.damo_resize = self.metadata.get("damo_resize") or profile or "letterbox"
+        if self.damo_resize not in {"stretch", "letterbox"}:
+            raise OnnxBackendError("DAMO resize must be stretch or letterbox (top-left, zero padding).")
+        count = shapes[1-matches[0]][-1]
+        if self.names and isinstance(count, int) and len(self.names) != count:
+            raise OnnxBackendError("DAMO model class names do not match its score channels.")
+
+    def _damo_preprocess_image(self, image, target):
+        # Standard DAMO transforms use RGB pixel values 0..255, not YOLO's
+        # division by 255. Ns stretches; L models pad bottom/right with zero.
+        height, width = image.shape[:2]
+        target_h, target_w = target
+        ratio = min(target_w / width, target_h / height)
+        resized_w, resized_h = (target_w, target_h) if self.damo_resize == "stretch" else (max(1, int(width * ratio)), max(1, int(height * ratio)))
+        rgb = cv2.cvtColor(cv2.resize(image, (resized_w, resized_h)), cv2.COLOR_BGR2RGB)
+        pixels = np.zeros((target_h, target_w, 3), dtype=np.float32)
+        pixels[:resized_h, :resized_w] = rgb
+        if not self._input_is_nhwc():
+            pixels = pixels.transpose(2, 0, 1)
+        tensor = np.asarray(pixels, dtype=np.float16 if "float16" in self.input_type else np.float32, order="C")
+        info = LetterboxInfo(image.shape[:2], target, (resized_w / width, resized_h / height), (0., 0.))
+        return tensor, info
 
     def _static_input_size(self) -> tuple[int, int] | None:
         if len(self.input_shape) != 4:
@@ -1071,14 +1347,22 @@ class DarkFusionOnnxModel:
         strict: bool | None = None,
         provider_options: Mapping[str, Mapping[str, Any]] | None = None,
     ):
-        self.requested_providers = providers
+        # Build on a separate adapter so an unavailable/invalid manual choice
+        # leaves the currently usable session, metadata and request intact.
+        candidate = object.__new__(type(self))
+        candidate.__dict__ = self.__dict__.copy()
+        candidate.setup_diagnostics = []
+        candidate.performance_selection = {}
+        candidate._performance_input = None
+        candidate.requested_providers = providers
         if strict is not None:
-            self.strict_provider = bool(strict)
+            candidate.strict_provider = bool(strict)
         if provider_options is not None:
-            self.user_provider_options = {
+            candidate.user_provider_options = {
                 str(key): dict(value) for key, value in provider_options.items()
             }
-        self._create_session()
+        candidate._create_session()
+        self.__dict__.update(candidate.__dict__)
         return self.providers
 
     @property
@@ -1100,6 +1384,10 @@ class DarkFusionOnnxModel:
             "end2end": self.end2end,
             "output_format": self.output_format,
             "metadata": self.metadata,
+            "runtime": "Windows ML" if windows_ml.installed() else "ONNX Runtime",
+            "runtime_options": dict(self.runtime_options),
+            "setup_diagnostics": list(self.setup_diagnostics),
+            "performance_selection": dict(self.performance_selection),
         }
 
     def _expected_extra_channels(self) -> int:
@@ -1133,14 +1421,15 @@ class DarkFusionOnnxModel:
     ) -> tuple[np.ndarray, LetterboxInfo]:
         """Darknet preprocessing: direct resize (not letterbox), RGB, normalize, NCHW."""
         # Direct resize to target size (no letterboxing)
-        resized = cv2.resize(image, target_size, interpolation=cv2.INTER_LINEAR)
+        target_h, target_w = target_size
+        resized = cv2.resize(image, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
         rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
         
         # Store info for coordinate restoration (no padding, 1:1 ratio)
         info = LetterboxInfo(
             original_shape=image.shape[:2],
             input_shape=target_size,
-            ratio=(1.0, 1.0),
+            ratio=(target_w / image.shape[1], target_h / image.shape[0]),
             pad=(0.0, 0.0)
         )
         
@@ -1148,8 +1437,7 @@ class DarkFusionOnnxModel:
         if not self._input_is_nhwc():
             rgb = rgb.transpose(2, 0, 1)
         
-        tensor = np.asarray(rgb, dtype=np.float32, order="C")
-        tensor *= 1.0 / 255.0
+        tensor = _normalized_rgb_tensor(rgb, self.input_type)
         
         return tensor, info
 
@@ -1166,7 +1454,9 @@ class DarkFusionOnnxModel:
         tensors: list[np.ndarray] = []
         for source in sources:
             image, path = _load_image(source)
-            if self.framework == "darknet":
+            if self.framework == "damo":
+                tensor, info = self._damo_preprocess_image(image, target)
+            elif self.framework == "darknet":
                 # Darknet: direct resize (no letterbox)
                 tensor, info = self._darknet_preprocess_image(image, target)
             elif self.task == "classify":
@@ -1176,19 +1466,13 @@ class DarkFusionOnnxModel:
                 )
                 if not self._input_is_nhwc():
                     rgb = rgb.transpose(2, 0, 1)
-                tensor = np.asarray(
-                    rgb, dtype=np.float16 if "float16" in self.input_type else np.float32, order="C"
-                )
-                tensor *= 1.0 / 255.0
+                tensor = _normalized_rgb_tensor(rgb, self.input_type)
             else:
                 letterboxed, info = _letterbox(image, target, self.stride)
                 rgb = cv2.cvtColor(letterboxed, cv2.COLOR_BGR2RGB)
                 if not self._input_is_nhwc():
                     rgb = rgb.transpose(2, 0, 1)
-                tensor = np.asarray(
-                    rgb, dtype=np.float16 if "float16" in self.input_type else np.float32, order="C"
-                )
-                tensor *= 1.0 / 255.0
+                tensor = _normalized_rgb_tensor(rgb, self.input_type)
             tensors.append(tensor)
             images.append(image)
             paths.append(path)
@@ -1196,9 +1480,36 @@ class DarkFusionOnnxModel:
         batch_tensor = tensors[0][None] if len(tensors) == 1 else np.stack(tensors, axis=0)
         return batch_tensor, images, paths, infos
 
+    def _ensure_execution_shape(self, shape: tuple[int, ...]):
+        bounds = getattr(self, "_session_profile_bounds", None)
+        if bounds is None or (len(shape) == len(bounds[0]) and
+                all(low <= value <= high for value, low, high in zip(shape, *bounds))):
+            return
+        # An input size/batch increase needs another valid engine, not different
+        # pixels or decoding. Publish the new session only after a successful
+        # build; a failed change retains the previous usable session/profile.
+        candidate = object.__new__(type(self))
+        candidate.__dict__ = self.__dict__.copy()
+        candidate._provider_input_shape = shape
+        candidate._create_session()
+        self.session = candidate.session
+        self.providers = list(candidate.providers)
+        self._session_profile_bounds = candidate._session_profile_bounds
+
     def _run_batch(self, tensor: np.ndarray) -> tuple[list[np.ndarray], float]:
         if self.session is None:
             raise OnnxBackendError("The ONNX Runtime session is closed.")
+        self._provider_input_shape = tuple(tensor.shape)
+        values = self.requested_providers.split(",") if isinstance(self.requested_providers, str) else list(self.requested_providers)
+        automatic = not values or any(str(value).strip().lower() == "auto" for value in values)
+        if (automatic and self.runtime_options["compare_providers"] and windows_ml.installed()
+                and self.runtime_options["auto_policy"] in {"max_performance", "prefer_gpu"}):
+            signature = (tuple(tensor.shape), str(tensor.dtype))
+            if signature != self._performance_input:
+                from darkfusion_onnx_performance import select_fastest
+                select_fastest(self, tensor)
+                self._performance_input = signature
+        self._ensure_execution_shape(tuple(tensor.shape))
         started = time.perf_counter()
         outputs = self.session.run(self.output_names, {self.input_name: tensor})
         elapsed_ms = (time.perf_counter() - started) * 1000.0
@@ -1214,9 +1525,30 @@ class DarkFusionOnnxModel:
             raise OnnxBackendError(
                 f"Output batch {prediction.shape[0]} does not match input batch {batch_size}."
             )
-        # Raw Ultralytics heads are B,C,N; end-to-end NMS heads are B,N,6+.
-        if prediction.shape[1] < prediction.shape[2] and prediction.shape[1] <= 4096:
-            prediction = prediction.transpose(0, 2, 1)
+        # Do not infer orientation solely from the smaller dimension: small
+        # candidate counts and end-to-end exports can legitimately be N<C.
+        if getattr(self, "end2end", False):
+            channels = 6 + self._expected_extra_channels()
+            if prediction.shape[-1] == channels:
+                pass
+            elif prediction.shape[1] == channels:
+                prediction = prediction.transpose(0, 2, 1)
+            else:
+                raise OnnxBackendError(f"Unsupported end-to-end output {prediction.shape}; expected {channels} values per detection.")
+        else:
+            extras = self._expected_extra_channels()
+            offsets = (5,) if self.output_format == "yolo_objectness" else (4,) if self.output_format == "ultralytics" else (4, 5)
+            expected = {offset + len(self.names) + extras for offset in offsets}
+            first, last = prediction.shape[1] in expected, prediction.shape[2] in expected
+            if first and not last:
+                prediction = prediction.transpose(0, 2, 1)
+            elif last and not first:
+                pass
+            elif first and last and (self.output_format != "auto" or self.framework == "ultralytics" or self.metadata.get("author") == "Ultralytics"):
+                if self.output_format == "ultralytics" or self.framework == "ultralytics" or self.metadata.get("author") == "Ultralytics":
+                    prediction = prediction.transpose(0, 2, 1)
+            else:
+                raise OnnxBackendError(f"Ambiguous/unsupported YOLO output {prediction.shape}. Specify the model class names and output format, or export decoded predictions.")
         return prediction.astype(np.float32, copy=False)
 
     def _decode_darknet(
@@ -1268,6 +1600,11 @@ class DarkFusionOnnxModel:
             source_indices = source_indices[ranked]
         
         selected_boxes = boxes[source_indices]
+        units = getattr(self, "runtime_options", {}).get("darknet_box_units", "normalized")
+        if units == "normalized":
+            selected_boxes = selected_boxes * np.array([info.input_shape[1], info.input_shape[0], info.input_shape[1], info.input_shape[0]], dtype=np.float32)
+        elif units != "pixels":
+            raise OnnxBackendError(f"Unsupported Darknet box units: {units}")
         selected_classes = class_ids[source_indices]
         selected_confidences = confidences[source_indices]
         
@@ -1289,6 +1626,24 @@ class DarkFusionOnnxModel:
         
         return detections, source_indices, np.empty((len(source_indices), 0), dtype=np.float32)
 
+    def _decode_damo(self, outputs, batch_index, info, confidence, iou, classes, agnostic_nms, max_det, max_nms):
+        scores = np.asarray(outputs[self.output_names.index(self.damo_scores_name)])[batch_index]
+        boxes = np.asarray(outputs[self.output_names.index(self.damo_boxes_name)])[batch_index]
+        if scores.ndim != 2 or boxes.shape != (len(scores), 4) or scores.shape[1] != len(self.names):
+            raise OnnxBackendError("DAMO scores/boxes shape does not match the model class contract.")
+        # DAMO uses multi-label class-wise NMS, not argmax of a YOLO head.
+        valid = np.isfinite(scores) & (scores > confidence)
+        valid &= np.isfinite(boxes).all(axis=1)[:, None]
+        if classes is not None:
+            valid &= np.isin(np.arange(scores.shape[1]), list(classes))[None, :]
+        sources, class_ids = np.nonzero(valid)
+        confidences = scores[sources, class_ids]
+        order = np.argsort(-confidences, kind="stable")[:max_nms]
+        sources, class_ids, confidences = sources[order], class_ids[order], confidences[order]
+        selected = boxes[sources].astype(np.float32, copy=False)
+        keep = numpy_nms(selected, confidences, class_ids, iou, max_det, agnostic=agnostic_nms)
+        return np.column_stack((_scale_xyxy(selected[keep], info), confidences[keep], class_ids[keep])).astype(np.float32)
+
     def _decode_end2end(
         self,
         rows: np.ndarray,
@@ -1303,11 +1658,12 @@ class DarkFusionOnnxModel:
         valid = np.isfinite(rows[:, :6]).all(1) & (rows[:, 4] >= float(confidence))
         if classes is not None:
             valid &= np.isin(rows[:, 5].astype(np.int64), list(classes))
-        rows = rows[valid][: int(max_det)]
+        source_indices = np.flatnonzero(valid)[: int(max_det)]
+        rows = rows[source_indices].copy()
         if not len(rows):
             return _empty(0, 6), np.empty((0,), dtype=np.int64)
         rows[:, :4] = _scale_xyxy(rows[:, :4], info)
-        return rows[:, :6], np.arange(len(rows), dtype=np.int64)
+        return rows[:, :6], source_indices
 
     def _decode_raw(
         self,
@@ -1443,7 +1799,10 @@ class DarkFusionOnnxModel:
             return result
 
         # Darknet: separate confs and boxes outputs
-        if self.framework == "darknet" and len(outputs) == 2:
+        if self.framework == "damo":
+            detections = self._decode_damo(outputs, batch_index, info, confidence, iou, classes, agnostic_nms, max_det, max_nms)
+            result.boxes = OrtBoxes(detections, info.original_shape)
+        elif self.framework == "darknet" and len(outputs) == 2:
             # Find confs and boxes by name from output_names list
             confs_data = None
             boxes_data = None
@@ -1523,7 +1882,7 @@ class DarkFusionOnnxModel:
             proto = proto_output[batch_index] if proto_output.ndim == 4 else proto_output
             mask_channels = int(proto.shape[0])
             coefficients = extras[:, :mask_channels]
-            boxes_input = _xywh_to_xyxy(rows[source_indices, :4]) if len(source_indices) else _empty(0, 4)
+            boxes_input = (rows[source_indices, :4].copy() if self.end2end else _xywh_to_xyxy(rows[source_indices, :4])) if len(source_indices) else _empty(0, 4)
             result.masks = OrtMasks(
                 self._process_masks(proto, coefficients, boxes_input, info), info.original_shape
             )
@@ -1572,7 +1931,9 @@ class DarkFusionOnnxModel:
                 tensor, images, paths, infos = self._prepare_batch(padded, imgsz)
                 preprocess_ms = (time.perf_counter() - preprocess_started) * 1000.0 / max(1, len(padded))
                 outputs, inference_total_ms = self._run_batch(tensor)
-                if self.task == "classify":
+                if self.framework in {"darknet", "damo"} and len(outputs) == 2:
+                    predictions = np.empty((len(padded), 0, 6), dtype=np.float32)
+                elif self.task == "classify":
                     predictions = np.asarray(outputs[0])
                     if predictions.ndim == 1:
                         predictions = predictions[None]
@@ -1596,10 +1957,16 @@ class DarkFusionOnnxModel:
 
     def track(self, source: Any, *, persist: bool = False, tracker: str | None = None, **kwargs):
         if tracker and str(tracker).lower() not in {"simple_iou", "simple-iou", "iou"}:
-            raise OnnxBackendError(
-                "This standalone backend currently provides simple_iou tracking only. "
-                f"DarkFusion tracker preset '{tracker}' requires a tracker adapter and must not be silently changed."
-            )
+            from darkfusion_onnx_tracking import ProjectTrackerAdapter, tracker_config_key
+            device = kwargs.get("device", "cpu")
+            key = tracker_config_key(tracker, device)
+            if not isinstance(getattr(self, "tracker", None), ProjectTrackerAdapter) or self.tracker.config_key != key:
+                try:
+                    self.tracker = ProjectTrackerAdapter(tracker, device=device)
+                except Exception as exc:
+                    raise OnnxBackendError(f"Could not initialize the selected project tracker '{tracker}': {exc}") from exc
+        elif not isinstance(self.tracker, SimpleIoUTracker):
+            self.tracker = SimpleIoUTracker()
         if not persist:
             self.tracker.reset()
         results = self.predict(source, **kwargs)
@@ -1614,6 +1981,9 @@ class DarkFusionOnnxModel:
         return results
 
     def _assign_tracks(self, result: OrtResult):
+        if hasattr(self.tracker, "apply"):
+            self.tracker.apply(result)
+            return
         if result.boxes is not None:
             ids = self.tracker.update(result.boxes.xyxy.numpy(), result.boxes.cls.numpy())
             result.boxes.id = ArrayView(ids.astype(np.float32))
@@ -1657,6 +2027,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--provider-fallback", action="store_true", help="Fall back instead of rejecting a missing EP")
     parser.add_argument("--task", choices=sorted(DarkFusionOnnxModel.SUPPORTED_TASKS))
     parser.add_argument("--output-format", default="auto", choices=("auto", "ultralytics", "yolo_objectness", "end2end"))
+    parser.add_argument("--framework", default="auto", choices=("auto", "ultralytics", "darknet", "damo"))
+    parser.add_argument("--damo-resize", default="auto", choices=("auto", "stretch", "letterbox"))
     parser.add_argument("--cache-dir", help="TensorRT/TensorRT RTX engine and timing cache directory")
     parser.add_argument("--imgsz", type=int)
     parser.add_argument("--conf", type=float, default=0.25)
@@ -1678,6 +2050,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         task=args.task,
         imgsz=args.imgsz,
         output_format=args.output_format,
+        framework=args.framework,
+        runtime_options={"damo_resize": args.damo_resize},
         cache_dir=args.cache_dir,
     )
     if args.warmup:

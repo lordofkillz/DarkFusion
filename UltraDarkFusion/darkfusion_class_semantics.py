@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import sqlite3
 from pathlib import Path
@@ -63,17 +64,20 @@ def class_prompts(class_name):
     )
 
 
-def should_protect_class_match(result, *, scan_pass, minimum_pass=2):
-    """Use only decisive semantic evidence, and never hide first-pass findings."""
-    if int(scan_pass or 0) < int(minimum_pass):
-        return False
+def _decisive_class_match(result):
+    """The calibrated class-match rule, independent of the scan pass."""
     if not isinstance(result, dict) or result.get("error"):
         return False
     if bool(result.get("teammate_marker_layout", False)):
         return False
-    probability = float(result.get("class_probability", 0.0) or 0.0)
-    margin = float(result.get("semantic_margin", -1.0) or -1.0)
-    similarity = float(result.get("class_similarity", -1.0) or -1.0)
+    try:
+        probability = float(result.get("class_probability", 0.0))
+        margin = float(result.get("semantic_margin", -1.0))
+        similarity = float(result.get("class_similarity", -1.0))
+    except (TypeError, ValueError):
+        return False
+    if not all(math.isfinite(value) for value in (probability, margin, similarity)):
+        return False
     if result.get("backend") == "siglip2":
         # Calibrated against the current Apex review set. The top 60 later-pass
         # crops were checked both tightly and in their full frames; this stricter
@@ -83,6 +87,23 @@ def should_protect_class_match(result, *, scan_pass, minimum_pass=2):
     # Preserve the previously calibrated rule when an offline machine falls
     # back to the older CLIP model.
     return probability >= 0.60 and margin >= 0.004 and similarity >= 0.20
+
+
+def should_protect_class_match(result, *, scan_pass, minimum_pass=2):
+    """Use only decisive semantic evidence, and never hide first-pass findings."""
+    return int(scan_pass or 0) >= int(minimum_pass) and _decisive_class_match(result)
+
+
+def class_semantic_conflict(result):
+    """Available but non-decisive class evidence vetoes automatic protection.
+
+    This includes uncertain scores, not just proven mismatches. It keeps shape
+    or LLM evidence from silently dismissing semantic doubt. Missing/failed
+    semantics remain unknown, so the optional shape check can still operate.
+    """
+    if not isinstance(result, dict) or result.get("error"):
+        return False
+    return not _decisive_class_match(result)
 
 
 def false_positive_evidence(
