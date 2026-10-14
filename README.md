@@ -1,5 +1,19 @@
 # UltraDarkFusion 5.2.1
 
+> [!IMPORTANT]
+> **Before installing or using GPU inference, update Windows and your GPU driver.**
+> Check **Settings → Windows Update**, install available updates, and complete any
+> required restart after saving your work and finishing training. Use a compatible
+> current GPU driver from your PC/GPU manufacturer; setup does not update Windows
+> or install GPU drivers.
+>
+> **Windows 11 24H2 (build 26100) or newer is required for downloadable
+> hardware-specific Windows ML providers.** Older supported Windows versions can
+> still use CPU/DirectML; provider availability also depends on your GPU and driver.
+> Check your version with **Win + R → `winver`**. See
+> [Microsoft's Windows Update instructions](https://support.microsoft.com/en-us/windows/deployment/updates-lifecycle/install-windows-updates)
+> and [Windows ML provider requirements](https://learn.microsoft.com/en-us/windows/ai/new-windows-ml/supported-execution-providers).
+
 ![UltraDarkFusion](samples/darkfusion2.gif)
 
 UltraDarkFusion is a Windows desktop application for building YOLO datasets,
@@ -164,11 +178,23 @@ Analysis, training, tuning, and validation review.
   with a read-only, cached per-model provider speed comparison by default and
   selectable DirectML and compatible catalog providers. PyTorch/CUDA training
   remains separate; provider setup does not replace the training environment.
+- Downloadable hardware-specific Windows ML providers require Windows 11 24H2
+  (build 26100) or newer and compatible GPU/NPU drivers. CPU/DirectML remain
+  available on older supported Windows versions.
 
 The normal Python installation does not require compiling OpenCV or installing
 a separate CUDA Toolkit. The PyTorch wheel provides its matching CUDA runtime.
 A locally installed CUDA Toolkit is only needed for specialized source builds.
 Use only trusted models and configuration files; see [model safety](SECURITY.md).
+
+### If Windows crashes or restarts
+
+A stop code such as `IRQL_NOT_LESS_OR_EQUAL (0xA)` is a Windows kernel/driver
+failure, not proof that Windows is outdated. If it occurs while using DarkFusion,
+report your DarkFusion version, `winver` result, GPU/driver version, selected
+model/provider, and the action that triggered it. A crash dump can help identify
+the cause; share dumps privately, not in a public GitHub issue. See
+[Microsoft's explanation of this stop code](https://learn.microsoft.com/en-us/windows-hardware/drivers/debugger/bug-check-0xa--irql-not-less-or-equal).
 
 ## Python installation
 

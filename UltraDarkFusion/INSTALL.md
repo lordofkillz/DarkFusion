@@ -1,5 +1,17 @@
 # DarkFusion installation
 
+> [!IMPORTANT]
+> **Update Windows and your GPU driver before installing or using GPU inference.**
+> Install available updates from **Settings → Windows Update** and complete any
+> required restart after saving your work and finishing training. Get a compatible
+> current GPU driver from your PC/GPU manufacturer; DarkFusion setup does not
+> update Windows or install GPU drivers.
+>
+> Downloadable hardware-specific Windows ML providers require **Windows 11 24H2
+> (build 26100) or newer**, plus compatible hardware/drivers. Older supported
+> Windows versions can still use CPU/DirectML. Check **Win + R → `winver`** and
+> [Microsoft's provider requirements](https://learn.microsoft.com/en-us/windows/ai/new-windows-ml/supported-execution-providers).
+
 For Windows, use the [latest DarkFusionSetup.exe](https://github.com/lordofkillz/DarkFusion/releases/latest/download/DarkFusionSetup.exe).
 Choose a new writable folder. Setup installs a private runtime and the required
 SAM3/GroundingDINO models without changing existing Python environments.
