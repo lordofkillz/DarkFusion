@@ -11,6 +11,7 @@ from darkfusion_verified_images import VerifiedImagesTracker, get_verified_image
 from darkfusion_shape_verifier import ShapeProfiler, shape_verification_score, shape_annotation_crop, ShapeReferenceCache
 from darkfusion_borderline_llm_verifier import BorderlineLLMVerifier
 from darkfusion_ollama_auto_setup import ensure_ollama_ready, check_ollama_running
+from darkfusion_media_tools import yt_dlp_options
 import ast
 import os
 import xml.etree.ElementTree as ET
@@ -767,29 +768,8 @@ SUPPORTED_VIDEO_URL_EXTS = (
 
 
 def yt_dlp_runtime_options():
-    """Return yt-dlp options for an installed supported JavaScript runtime."""
-    deno_path = shutil.which("deno")
-
-    # A process launched before winget updated PATH will not see the new Deno
-    # entry. Locate winget's package directly so URL playback works immediately.
-    if not deno_path and os.name == "nt":
-        local_app_data = os.environ.get("LOCALAPPDATA", "")
-        package_root = os.path.join(local_app_data, "Microsoft", "WinGet", "Packages")
-        patterns = (
-            os.path.join(package_root, "DenoLand.Deno_*", "deno.exe"),
-            os.path.join(local_app_data, "Microsoft", "WinGet", "Links", "deno.exe"),
-        )
-        for pattern in patterns:
-            matches = glob.glob(pattern)
-            if matches:
-                deno_path = matches[0]
-                break
-
-    if deno_path and os.path.isfile(deno_path):
-        return {"js_runtimes": {"deno": {"path": deno_path}}}
-
-    # yt-dlp still provides a useful error when no supported runtime is found.
-    return {}
+    """Use the same private media tools for playback, caching and downloads."""
+    return yt_dlp_options(APP_DIR)
 
 
 def get_video_codec_fourcc(codec_name=None):
@@ -13679,7 +13659,13 @@ class DownloadThread(QThread):
             "quiet": True,
             "no_warnings": False,
         }
-        ydl_opts.update(yt_dlp_runtime_options())
+        try:
+            ydl_opts.update(yt_dlp_runtime_options())
+        except Exception as exc:
+            logger.error("Video download media-tool setup failed: %s", exc)
+            self.update_status.emit(self.row, f"Failed: {exc}")
+            self.update_progress.emit(self.row, 0)
+            return
 
         for attempt in range(retries):
             try:

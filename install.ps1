@@ -87,6 +87,8 @@ finally {
 
 Write-Host "Verifying the application environment..."
 $privatePython = (& $conda @pythonArgs -c 'import sys; print(sys.executable)' | Select-Object -Last 1).Trim()
+& $conda @pythonArgs (Join-Path $repoRoot 'scripts\install-media-tools.py')
+if ($LASTEXITCODE -ne 0) { throw "Private FFmpeg/FFprobe/Deno setup failed." }
 & (Join-Path $repoRoot 'scripts\install-windows-ml-runtime.ps1') -PythonPath $privatePython
 & $conda @pythonArgs $verifyScript
 if ($LASTEXITCODE -ne 0) {

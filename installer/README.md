@@ -28,6 +28,11 @@ request a restart; it does not install GPU drivers or change a training environm
 Compatible GPU providers download on first use; DirectML is included. Offline
 use requires completing this initial runtime/provider setup first.
 
+FFmpeg, FFprobe and Deno are bundled inside the application for YouTube playback,
+downloads and audio/video merging. Setup verifies the actual private executable
+bytes and versions; it never relies on Chocolatey, WinGet or system PATH copies.
+Their licenses and the FFmpeg build/source details accompany the bundle.
+
 Setup verifies downloads by size and SHA-256. Interrupted downloads are cached
 on the selected drive and can resume. Runtime `.bin` release assets are managed
 by setup; do not assemble them yourself. SAM3 and GroundingDINO are installed

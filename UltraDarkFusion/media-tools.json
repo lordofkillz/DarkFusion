@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "platform": "windows-x64",
+  "packages": [
+    {
+      "name": "ffmpeg",
+      "version": "9.0.2",
+      "url": "https://github.com/GyanD/codexffmpeg/releases/download/9.0.2/ffmpeg-9.0.2-essentials_build.zip",
+      "sha256": "60f467265b1e312373dbcd92200c2618a74850f98d3d078e94296bb3fa2047ba",
+      "size": 114768076,
+      "kind": "zip",
+      "files": [
+        {"source": "ffmpeg-9.0.2-essentials_build/bin/ffmpeg.exe", "path": "ffmpeg/ffmpeg.exe", "sha256": "3256173f3f8bffd7df12227c68adf68025edb1832273a9530688a7bb1ed8edec", "size": 105423872},
+        {"source": "ffmpeg-9.0.2-essentials_build/bin/ffprobe.exe", "path": "ffmpeg/ffprobe.exe", "sha256": "f0d36ecbbdd3bcfac3efa078c96c7271c2e68b3810595552ac3b7f17e9a65c52", "size": 105221120},
+        {"source": "ffmpeg-9.0.2-essentials_build/LICENSE", "path": "ffmpeg/LICENSE", "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903", "size": 35147},
+        {"source": "ffmpeg-9.0.2-essentials_build/README.txt", "path": "ffmpeg/README.txt", "sha256": "0342de6bb39dd421cbec2c00d89ad274b640d75ad3f2cab09ffd647ce2d8f949", "size": 41577}
+      ]
+    },
+    {
+      "name": "deno",
+      "version": "2.9.7",
+      "url": "https://github.com/denoland/deno/releases/download/v2.9.7/deno-x86_64-pc-windows-msvc.zip",
+      "sha256": "a0c3101b4158d1dfb7d6a78a7bf0f3de80c96bb423c152beec8beb22786f2238",
+      "size": 42630221,
+      "kind": "zip",
+      "files": [
+        {"source": "deno.exe", "path": "deno/deno.exe", "sha256": "e020f3e232bd16e33768dee528e5983349c962952051ced0a5d58ad42f5d9b33", "size": 97462048}
+      ]
+    },
+    {
+      "name": "deno-license",
+      "version": "2.9.7",
+      "url": "https://raw.githubusercontent.com/denoland/deno/v2.9.7/LICENSE.md",
+      "sha256": "f62497fffecc0852960c8d3e6934b9db86d16396e9b604072e923892cae3a588",
+      "size": 1074,
+      "kind": "file",
+      "files": [
+        {"path": "deno/LICENSE.md", "sha256": "f62497fffecc0852960c8d3e6934b9db86d16396e9b604072e923892cae3a588", "size": 1074}
+      ]
+    }
+  ]
+}

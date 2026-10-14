@@ -35,6 +35,9 @@ shortcut so DarkFusion is easy to open next time.
 
 Setup automatically downloads and installs the application, its private Python
 runtime, and the SAM3/GroundingDINO model bundle into the app's `Sam` folder.
+It also includes private, checksum-verified **FFmpeg, FFprobe, and Deno** for
+YouTube playback/downloads; no separate media-tool installation or PATH edits
+are needed. OpenCV retains its own video decoder for playback and extraction.
 **You do not need to install Python, Conda, Git, or build tools.** Download
 progress appears in the setup window; interrupted downloads can resume when you
 run setup again.
@@ -52,6 +55,9 @@ recommended setup experience, use the **Download DarkFusionSetup.exe** link abov
 
 ## What changed in 5.2.1
 
+- FFmpeg, FFprobe and Deno are now supplied privately for video/YouTube workflows.
+  Setup checks the bundled tools themselves, so system-installed copies cannot
+  hide missing package files. Source setup downloads the same pinned tools.
 - Windows ML is the default runtime for exported `.onnx` models, with
   hardware-aware provider selection and a cached, read-only speed comparison
   per model. `.pt` and `.engine` models retain their native Ultralytics paths.
@@ -228,8 +234,9 @@ The installer:
 2. Creates `fusion` with Python 3.12 when needed.
 3. prevents packages from leaking into the user-site directory.
 4. installs the pinned CUDA/ML/UI environment from `requirements.txt`.
-5. installs the signed matching Microsoft Windows App SDK runtime if missing.
-6. verifies the application files and critical imports.
+5. installs and verifies the private FFmpeg/FFprobe/Deno tools.
+6. installs the signed matching Microsoft Windows App SDK runtime if missing.
+7. verifies the application files and critical imports.
 
 Launch DarkFusion with:
 

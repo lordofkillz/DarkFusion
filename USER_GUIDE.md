@@ -92,6 +92,13 @@ time and can make validation results look better than real-world performance.
 
 Only download material that you have permission to use.
 
+The Windows installer includes private FFmpeg/FFprobe executables for merging
+separate audio/video streams and Deno for YouTube's JavaScript challenges.
+Playback, downloads and fallback caching use these same absolute tool paths;
+there is no system PATH configuration to do. Source installation supplies the
+same pinned bundle. If a tool is missing, rerun setup or follow
+[the source repair instructions](UltraDarkFusion/INSTALL.md).
+
 ### Capture a camera, screen, or image source
 
 Select the appropriate capture source, camera, desktop region, or monitor.

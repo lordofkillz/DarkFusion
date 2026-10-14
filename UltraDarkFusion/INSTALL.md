@@ -15,6 +15,8 @@
 For Windows, use the [latest DarkFusionSetup.exe](https://github.com/lordofkillz/DarkFusion/releases/latest/download/DarkFusionSetup.exe).
 Choose a new writable folder. Setup installs a private runtime and the required
 SAM3/GroundingDINO models without changing existing Python environments.
+FFmpeg, FFprobe and Deno are included privately for YouTube workflows; a system
+installation or PATH change is not required.
 
 For a source installation, follow the [repository installation guide](../README.md).
 The supported environment is a security-patched Python 3.12 (3.12.15 or newer)
@@ -29,6 +31,7 @@ From the repository root, in a new conda environment:
 conda create -n fusion python=3.12.15 -y
 conda activate fusion
 python -m pip install --no-user -r requirements.txt
+python scripts/install-media-tools.py
 powershell -ExecutionPolicy Bypass -File scripts/install-windows-ml-runtime.ps1 -PythonPath "$env:CONDA_PREFIX\python.exe"
 python scripts/verify_install.py
 cd UltraDarkFusion
@@ -51,4 +54,9 @@ automatic first-use downloads. The legacy editable-install setup and the
 application and mixed mutually exclusive ONNX Runtime packages.
 
 An installed standalone application can be checked with `DarkFusion.exe --verify`.
+This verifies the bundled media executables and their pinned versions, not tools
+elsewhere on your PC. Source users can repair just these tools with
+`python scripts/install-media-tools.py` from the repository root. After initial
+setup, `--offline` reuses verified cached downloads and `--verify-only` checks the
+installed bundle without downloading anything.
 See the [installer guide](../installer/README.md) for building/testing the EXE.

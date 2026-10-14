@@ -36,6 +36,8 @@ REQUIRED_FILES = (
     "darkfusion_windows_ml.py",
     "darkfusion_onnx_settings.py",
     "darkfusion_onnx_performance.py",
+    "darkfusion_media_tools.py",
+    "media-tools.json",
     "darkfusion_negative_crops.py",
     "darkfusion_dataset_statistics.py",
     "darkfusion_class_semantics.py",
@@ -167,6 +169,15 @@ def main() -> int:
 
     missing_files = [name for name in REQUIRED_FILES if not (APP_ROOT / name).is_file()]
     import_failures: list[str] = verify_onnx_backend()
+    if sys.platform == "win32":
+        try:
+            from darkfusion_media_tools import verify_bundled_media_tools
+            media_failures = verify_bundled_media_tools(APP_ROOT)
+            import_failures.extend(media_failures)
+            if not media_failures:
+                print("Bundled FFmpeg/FFprobe/Deno verified; system PATH is not required.")
+        except Exception as exc:
+            import_failures.append(f"Private media tools: {exc}")
     for module_name in REQUIRED_IMPORTS:
         try:
             importlib.import_module(module_name)

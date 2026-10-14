@@ -101,8 +101,9 @@ PyAutoGUI==0.9.54
 SpeechRecognition==3.14.3
 python-dotenv==1.2.2
 requests==2.34.2
-# The default extra installs yt-dlp-ejs. YouTube also requires Deno >=2.3;
-# on Windows install it with: winget install --id DenoLand.Deno --exact
+# The default extra installs yt-dlp-ejs. The Windows installer also supplies
+# private hash-pinned FFmpeg/FFprobe/Deno via scripts/install-media-tools.py.
+# These are real executables, not the unrelated ffmpeg Python package.
 yt-dlp[default]==2026.8.19
 beautifulsoup4==4.13.4
 shapely==2.1.1
