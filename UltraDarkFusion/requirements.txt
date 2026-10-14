@@ -1,4 +1,7 @@
 # Compatibility entry point: use the same pinned dependencies as the supported
 # source installer. Run from a fresh Python 3.12 conda environment, not while
 # training is active. See ../README.md and INSTALL.md.
+# Python requirements alone do not provide FFmpeg/FFprobe/Deno executables.
+# From the repository root, run: python scripts/install-media-tools.py
+# install.ps1/fusion_install.bat do this automatically; standalone setup bundles them.
 -r ../requirements.txt

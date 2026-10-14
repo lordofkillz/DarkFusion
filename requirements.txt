@@ -11,6 +11,7 @@
 #   set PYTHONNOUSERSITE=1
 #   python -m pip install --upgrade pip setuptools wheel
 #   python -m pip install --no-user -r requirements.txt
+#   python scripts/install-media-tools.py
 #   powershell -ExecutionPolicy Bypass -File scripts/install-windows-ml-runtime.ps1 -PythonPath "$env:CONDA_PREFIX\python.exe"
 #   python scripts/verify_install.py
 # Do not install these requirements over another ORT variant in an existing env;
@@ -105,6 +106,7 @@ requests==2.34.2
 # private hash-pinned FFmpeg/FFprobe/Deno via scripts/install-media-tools.py.
 # These are real executables, not the unrelated ffmpeg Python package.
 yt-dlp[default]==2026.8.19
+yt-dlp-ejs==0.8.0
 beautifulsoup4==4.13.4
 shapely==2.1.1
 perlin-noise==1.14

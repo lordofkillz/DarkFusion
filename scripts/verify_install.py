@@ -100,6 +100,7 @@ REQUIRED_IMPORTS = (
     "ultralytics",
     "yaml",
     "yt_dlp",
+    "yt_dlp_ejs",
 )
 
 MODEL_BUNDLE_URL = (
