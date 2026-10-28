@@ -10,7 +10,7 @@ from pathlib import Path
 
 import torch
 from tqdm import tqdm
-from PIL import Image, ImageDraw, ImageFile
+from PIL import Image, ImageDraw
 from ultralytics import YOLO, YOLOE, SAM
 import cv2
 import numpy as np
@@ -20,7 +20,8 @@ from groundingdino.util.inference import load_image, predict
 from darkfusion_model_compat import load_groundingdino_model as load_model
 from prediction_size_filter import prediction_size_allowed_xyxy
 
-ImageFile.LOAD_TRUNCATED_IMAGES = True
+# Do not relax Pillow's decoder globally. Invalid files are skipped by
+# verify_image(); Dataset Analysis must still detect truncated pixel data.
 
 # -------------------------
 # Constants / Config

@@ -9,6 +9,12 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
 New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
+$repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+$productVersion = (Get-Content -Raw -LiteralPath (Join-Path $repoRoot 'VERSION')).Trim()
+if ($productVersion -notmatch '^\d+\.\d+\.\d+$') { throw 'VERSION must contain a three-part product version.' }
+$numericVersion = ($productVersion.Split('.') + @('0')) -join ','
+$versionHeader = Join-Path $OutputDirectory 'product-version.h'
+[IO.File]::WriteAllText($versionHeader, ('#define DARKFUSION_PRODUCT_VERSION L"{0}"' -f $productVersion), (New-Object Text.UTF8Encoding($false)))
 
 # Import the selected Visual Studio toolchain only into this build process.
 # No global environment variables, Python environments, or user settings change.
@@ -37,17 +43,34 @@ foreach ($line in $developerEnvironment) {
 
 $compiler = (Get-Command cl.exe -ErrorAction Stop).Source
 $common = @('/nologo', '/std:c++17', '/EHsc', '/O2', '/MT', '/W4', '/utf-8', '/DUNICODE', '/D_UNICODE', '/D_WIN32_WINNT=0x0A00')
+$common += "/FI$versionHeader"
 $libraries = @('user32.lib', 'gdi32.lib', 'shell32.lib', 'ole32.lib', 'comctl32.lib', 'uuid.lib')
 $manifest = Join-Path $PSScriptRoot 'app.manifest'
 $resourceCompiler = (Get-Command rc.exe -ErrorAction Stop).Source
 $icon = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\UltraDarkFusion\styles\icons\DarkFusion.ico')).ProviderPath
 $iconScript = Join-Path $OutputDirectory 'app-icon.rc'
 $iconResource = Join-Path $OutputDirectory 'app-icon.res'
-[IO.File]::WriteAllLines($iconScript, @('#include <windows.h>', ('201 ICON "{0}"' -f $icon.Replace('\','\\'))), (New-Object Text.UTF8Encoding($false)))
+$versionResource = @(
+    '#include <windows.h>',
+    ('201 ICON "{0}"' -f $icon.Replace('\','\\')),
+    '1 VERSIONINFO',
+    "FILEVERSION $numericVersion", "PRODUCTVERSION $numericVersion",
+    'FILEFLAGSMASK 0x3fL', 'FILEFLAGS 0x0L', 'FILEOS 0x40004L', 'FILETYPE 0x1L', 'FILESUBTYPE 0x0L',
+    'BEGIN', ' BLOCK "StringFileInfo"', ' BEGIN', '  BLOCK "040904b0"', '  BEGIN',
+    '   VALUE "CompanyName", "DarkFusion\0"',
+    '   VALUE "FileDescription", "DarkFusion application and installer\0"',
+    ('   VALUE "FileVersion", "{0}\0"' -f $productVersion),
+    '   VALUE "ProductName", "DarkFusion\0"',
+    ('   VALUE "ProductVersion", "{0}\0"' -f $productVersion),
+    '  END', ' END', ' BLOCK "VarFileInfo"', ' BEGIN', '  VALUE "Translation", 0x409, 1200', ' END', 'END'
+)
+[IO.File]::WriteAllLines($iconScript, $versionResource, (New-Object Text.UTF8Encoding($false)))
 & $resourceCompiler /nologo /c65001 "/fo$iconResource" $iconScript
 if ($LASTEXITCODE -ne 0) { throw 'Could not embed the DarkFusion application icon.' }
 if ($OnlineManifest) {
     $downloadManifest = (Resolve-Path -LiteralPath $OnlineManifest).ProviderPath
+    $downloadVersion = (Get-Content -Raw -LiteralPath $downloadManifest | ConvertFrom-Json).payload.version
+    if ($downloadVersion -ne $productVersion) { throw 'Installer manifest version does not match VERSION.' }
     $backend = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\windows\install-standalone.ps1')).ProviderPath
     $onlineBackend = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\windows\install-online.ps1')).ProviderPath
     $resourceScript = Join-Path $OutputDirectory 'setup-resources.rc'

@@ -188,6 +188,10 @@ class SahiPredictWrapper:
             device=device,
         )
 
+        if suffix == ".engine":
+            from darkfusion_tensorrt import enable_engine_cuda_graph
+            enable_engine_cuda_graph(getattr(detection_model, "model", None), model_path)
+
         # SAHI does not expose Ultralytics' half argument. Setting the model
         # override before its first prediction gives CUDA .pt models the same
         # shared FP16 choice as DarkFusion's other auto-label workflows.

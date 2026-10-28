@@ -75,6 +75,8 @@ try {
         throw "Could not upgrade pip build tools."
     }
 
+    & (Join-Path $repoRoot 'scripts\update-tensorrt.ps1') -PythonPath $privatePython
+
     Write-Host "Installing UltraDarkFusion dependencies..."
     & $conda @pythonArgs -m pip --isolated install --index-url https://pypi.org/simple --no-user --requirement $requirementsPath
     if ($LASTEXITCODE -ne 0) {

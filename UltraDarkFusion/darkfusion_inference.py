@@ -49,6 +49,9 @@ def load_inference_model(model_path, *, backend="auto", provider="auto", fp16=Fa
     else:
         from ultralytics import YOLO
         model = YOLO(model_path, task=task) if task else YOLO(model_path)
+    if selected == "ultralytics" and Path(model_path).suffix.lower() == ".engine":
+        from darkfusion_tensorrt import enable_engine_cuda_graph
+        enable_engine_cuda_graph(model, model_path)
     model._darkfusion_inference_backend = selected
     return model
 

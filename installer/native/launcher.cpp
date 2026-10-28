@@ -17,7 +17,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         // Training workers use sys.executable and piped stdout; pythonw.exe would lose that output.
         const auto python = runtime / L"python.exe";
         const auto script = verify ? root / L"app" / L"scripts" / L"verify_install.py"
-                                   : root / L"app" / L"UltraDarkFusion" / L"UltraDarkFusion_v5.2.py";
+                                   : root / L"app" / L"UltraDarkFusion" / L"UltraDarkFusion.py";
         const auto workingDirectory = root / L"app" / L"UltraDarkFusion";
         if (!std::filesystem::is_regular_file(python) || !std::filesystem::is_regular_file(script) ||
             !std::filesystem::is_directory(workingDirectory)) {

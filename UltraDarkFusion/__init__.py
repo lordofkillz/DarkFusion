@@ -1,3 +1,3 @@
 """UltraDarkFusion desktop application sources."""
 
-__version__ = "5.2"
+from .darkfusion_version import APP_VERSION as __version__

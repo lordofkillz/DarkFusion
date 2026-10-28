@@ -23,6 +23,7 @@ except Exception:
 
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
+REVIEW_BATCH_SIZE = 4
 
 
 def normalized(path):
@@ -574,6 +575,48 @@ def apply_review_decisions(report, decisions, suppressed_keys):
     return summary
 
 
+def review_predictions(model, images, *, chunk_size=REVIEW_BATCH_SIZE, **options):
+    """Bound actual inference batches, not just the number of yielded results.
+
+    Ultralytics loads a list source as one PIL/NumPy batch, even with stream=True
+    and batch=1. Keep each list small; chunk_size is not a dataset scan limit.
+    Preserve source order because list inputs can receive synthetic result names.
+    """
+    from ultralytics.engine.model import Model
+    from darkfusion_image_loading import prepared_review_sources
+    import torch
+
+    batch_size = max(1, min(REVIEW_BATCH_SIZE, int(chunk_size or REVIEW_BATCH_SIZE)))
+    prefetch = (isinstance(model, Model) and batch_size > 1 and len(images) > batch_size
+                and str(options.get("device", "")).lower() != "cpu" and torch.cuda.is_available())
+    sources = (prepared_review_sources(images, batch_size) if prefetch else
+               ((chunk, chunk[0] if len(chunk) == 1 else chunk)
+                for start in range(0, len(images), batch_size)
+                for chunk in [images[start:start + batch_size]]))
+    try:
+        for chunk, source in sources:
+            stream = model.predict(source=source, stream=True, batch=len(chunk), **options)
+            received = 0
+            try:
+                for result in stream:
+                    if received >= len(chunk):
+                        raise RuntimeError("Validation model returned more results than input images.")
+                    image_path = normalized(chunk[received])
+                    received += 1
+                    yield image_path, result
+                if received != len(chunk):
+                    raise RuntimeError(
+                        f"Validation model returned {received} results for {len(chunk)} images. "
+                        "The dataset review is incomplete."
+                    )
+            finally:
+                close = getattr(stream, "close", None)
+                if callable(close):
+                    close()
+    finally:
+        sources.close()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True)
@@ -590,7 +633,8 @@ def main():
     parser.add_argument("--start-index", type=int, default=0)
     parser.add_argument("--review-history", default="")
     parser.add_argument("--batch-state", default="")
-    parser.add_argument("--chunk-size", type=int, default=256)
+    parser.add_argument("--chunk-size", type=int, default=REVIEW_BATCH_SIZE,
+                        help="Images per inference call (capped at 4); does not limit dataset coverage.")
     args = parser.parse_args()
 
     images, class_names, _data = load_dataset(args.data, args.split)
@@ -652,27 +696,18 @@ def main():
     write_report(normalized(args.output), report)
     counts = {}
     processed = 0
-    chunk_size = max(1, min(2048, int(args.chunk_size or 256)))
-    for chunk_start in range(0, len(images), chunk_size):
-        chunk = images[chunk_start:chunk_start + chunk_size]
-        source = chunk[0] if len(chunk) == 1 else chunk
-        stream = model.predict(
-            source=source,
-            stream=True,
-            conf=max(0.001, min(1.0, args.conf)),
-            imgsz=max(32, int(args.imgsz)),
-            device=args.device,
-            save=False,
-            verbose=False,
-        )
-        for result_index, result in enumerate(stream):
+    batch_size = max(1, min(REVIEW_BATCH_SIZE, int(args.chunk_size or REVIEW_BATCH_SIZE)))
+    report["settings"]["inference_batch_size"] = batch_size
+    print(f"Reviewing all {len(images)} selected images in batches of up to {batch_size}.", flush=True)
+    stream = review_predictions(
+        model, images, chunk_size=batch_size,
+        conf=max(0.001, min(1.0, args.conf)),
+        imgsz=max(32, int(args.imgsz)),
+        device=args.device, save=False, verbose=False,
+    )
+    try:
+        for image_path, result in stream:
             processed += 1
-            # Ultralytics converts a list of paths into PIL images internally and
-            # may expose synthetic result names such as ``image83.jpg``.  The
-            # prediction stream preserves source order, so retain the matching
-            # real dataset path instead of writing an unusable temporary name to
-            # the validation review report.
-            image_path = normalized(chunk[result_index]) if result_index < len(chunk) else normalized(result.path)
             ground_truth, label_info = read_ground_truth(image_path, args.task, class_names)
             state = label_info["state"]
             report["label_state_counts"][state] = report["label_state_counts"].get(state, 0) + 1
@@ -712,6 +747,13 @@ def main():
                 counts = apply_review_decisions(report, review_decisions, suppressed_keys)
                 write_report(normalized(args.output), report)
                 print(f"Reviewed {processed}/{len(images)} images; {len(report['issues'])} issues", flush=True)
+    except Exception as error:
+        report.update(status="failed", stage="failed", error=str(error), processed_images=processed)
+        report["summary"] = dict(sorted(counts.items()))
+        write_report(normalized(args.output), report)
+        raise
+    finally:
+        stream.close()
 
     review_decisions = load_review_decisions(history_path)
     counts = apply_review_decisions(report, review_decisions, suppressed_keys)

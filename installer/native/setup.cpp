@@ -317,7 +317,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         RECT bounds{0, 0, px(612), px(406)};
         constexpr DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
         AdjustWindowRectExForDpi(&bounds, style, FALSE, 0, scale);
-        auto window = CreateWindowExW(0, windowClass.lpszClassName, L"DarkFusion Setup", style,
+        const auto title = std::wstring(L"DarkFusion Setup ") + df::productVersion;
+        auto window = CreateWindowExW(0, windowClass.lpszClassName, title.c_str(), style,
             CW_USEDEFAULT, CW_USEDEFAULT, bounds.right - bounds.left, bounds.bottom - bounds.top,
             nullptr, nullptr, instance, nullptr);
         if (!window) throw std::runtime_error("Cannot create the installer window.");

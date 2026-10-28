@@ -1,4 +1,4 @@
-# UltraDarkFusion 5.2.1
+# UltraDarkFusion 5.3.0
 
 > [!IMPORTANT]
 > **Before installing or using GPU inference, update Windows and your GPU driver.**
@@ -53,7 +53,34 @@ The [Python installation method](#python-installation) remains available below.
 GitHub's **Code → Download ZIP** provides the source for that method. For the
 recommended setup experience, use the **Download DarkFusionSetup.exe** link above.
 
-## What changed in 5.2.1
+## What changed in 5.3.0
+
+### Latest source updates
+
+- One product version in [VERSION](VERSION), stable application filenames, and
+  matching application/installer version information. Use `run_darkfusion.bat`
+  or `UltraDarkFusion/UltraDarkFusion.py`; DINO and SAHI keep stable module names.
+- Faster shared image loading, reusable Review thumbnails, and unchanged-label
+  save skipping preserve the annotation and preview workflow.
+- Video decoding, desktop capture, preprocessing, and display use bounded
+  background work; frames and their inference overlays retain matching identities.
+- Object Clarity supports annotated objects, drawn regions, and the existing
+  adjustable ROIs. View-only enhancement preserves source images and labels;
+  separate augmentation controls create labeled training variants.
+- SAM3 propagation warms after Snap when memory permits and stays ready across
+  ordinary Off/On toggles. Training and other heavy GPU jobs reclaim unused
+  models and pause optional annotation models until they can be used again.
+- Auto Scan repeats the normal navigation workflow with the selected tools and
+  delay. Reveal File follows the image currently shown in the editor.
+- Standalone folder moves continue when another dataset is opened, with progress
+  in their own panel and no completion dialog over other work.
+- Native TensorRT setup uses one matching CUDA package family. Windows ML/ONNX
+  provider comparisons, TensorRT CUDA graphs, and installer checks are updated.
+
+See the [user guide](USER_GUIDE.md) and [ONNX backend guide](ONNX_RUNTIME_BACKEND.md)
+for the current controls and runtime behavior.
+
+### Earlier 5.2.1 updates
 
 - FFmpeg, FFprobe and Deno are now supplied privately for video/YouTube workflows.
   Setup checks the bundled tools themselves, so system-installed copies cannot
@@ -265,7 +292,7 @@ $env:PYTHONNOUSERSITE = "1"
 python -m pip install --upgrade pip setuptools wheel
 python -m pip install --no-user -r requirements.txt
 python scripts\verify_install.py
-python UltraDarkFusion\UltraDarkFusion_v5.2.py
+python UltraDarkFusion\UltraDarkFusion.py
 ```
 
 ## Models

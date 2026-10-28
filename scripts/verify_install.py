@@ -15,14 +15,20 @@ if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
 REQUIRED_FILES = (
-    "UltraDarkFusion_v5.2.py",
-    "UltraDarkFusion_v5.2.ui",
-    "ui_ultradarkfusion_v5_2.py",
-    "dinov5_2.py",
-    "sahi_predict_wrapperv5.py",
+    "../VERSION",
+    "darkfusion_version.py",
+    "UltraDarkFusion.py",
+    "UltraDarkFusion.ui",
+    "ui_ultradarkfusion.py",
+    "darkfusion_dino.py",
+    "darkfusion_sahi.py",
     "prediction_size_filter.py",
     "splash_utils.py",
     "darkfusion_command_runner.py",
+    "darkfusion_environment.py",
+    "darkfusion_gpu_memory.py",
+    "darkfusion_image_loading.py",
+    "darkfusion_file_reveal.py",
     "darkfusion_ultralytics_batch.py",
     "darkfusion_ultralytics_cli.py",
     "darkfusion_ultralytics_train.py",
@@ -32,11 +38,23 @@ REQUIRED_FILES = (
     "darkfusion_theme_assets.py",
     "darkfusion_onnx_runtime.py",
     "darkfusion_inference.py",
+    "darkfusion_tensorrt.py",
     "darkfusion_onnx_tracking.py",
     "darkfusion_windows_ml.py",
     "darkfusion_onnx_settings.py",
     "darkfusion_onnx_performance.py",
     "darkfusion_media_tools.py",
+    "darkfusion_desktop_capture.py",
+    "darkfusion_video_capture.py",
+    "darkfusion_video_decode.py",
+    "darkfusion_video_display.py",
+    "darkfusion_video_preparation.py",
+    "darkfusion_video_window.py",
+    "darkfusion_dataset_operations.py",
+    "darkfusion_propagation.py",
+    "darkfusion_object_clarity.py",
+    "darkfusion_clarity_augmentation.py",
+    "licenses/Real-ESRGAN.txt",
     "media-tools.json",
     "darkfusion_negative_crops.py",
     "darkfusion_dataset_statistics.py",
@@ -45,6 +63,7 @@ REQUIRED_FILES = (
     "darkfusion_model_security.py",
     "darkfusion_borderline_llm_verifier.py",
     "darkfusion_ollama_auto_setup.py",
+    "darkfusion_ollama_memory.py",
     "darkfusion_review_feedback.py",
     "darkfusion_shape_verifier.py",
     "darkfusion_review_similarity.py",
@@ -53,6 +72,8 @@ REQUIRED_FILES = (
     "darkfusion_training_size.py",
     "darkfusion_tune_monitor.py",
     "darkfusion_tune_settings.py",
+    "darkfusion_training_runs.py",
+    "darkfusion_extraction.py",
     "darkfusion_verified_images.py",
     "darkfusion_dinov3/config.py",
     "darkfusion_dinov3/loader.py",
@@ -163,13 +184,53 @@ def verify_onnx_backend() -> list[str]:
     return failures
 
 
+def verify_tensorrt_backend() -> list[str]:
+    """TensorRT CUDA families share Python files and must not be stacked."""
+    import re
+    failures = []
+    packages = {}
+    for distribution in importlib.metadata.distributions():
+        name = re.sub(r"[-_.]+", "-", distribution.metadata.get("Name", "")).lower()
+        if name == "tensorrt" or re.fullmatch(r"tensorrt-cu(?:12|13)(?:-bindings|-libs)?", name):
+            packages[name] = distribution.version
+    families = [family for family in ("tensorrt-cu12", "tensorrt-cu13")
+                if any(name == family or name.startswith(family + "-") for name in packages)]
+    if len(families) != 1:
+        return ["TensorRT requires exactly one matching CUDA family; run install.ps1 to repair missing/overlapping packages."]
+    family = families[0]
+    version = packages.get(family)
+    if not version or any(packages.get(name) != version for name in (family + "-bindings", family + "-libs")):
+        failures.append("TensorRT package, bindings and native library versions do not match.")
+    if "tensorrt" in packages and packages["tensorrt"] != version:
+        failures.append("The unsuffixed TensorRT metapackage disagrees with the selected CUDA family.")
+    try:
+        import tensorrt
+        if tensorrt.__version__ != version:
+            failures.append("Imported TensorRT and installed package versions do not match.")
+    except Exception as exc:
+        failures.append(f"TensorRT import failed: {exc}")
+    return failures
+
+
+def verify_qt_material_backend() -> list[str]:
+    """Importability alone does not prove the theme package supports PyQt5."""
+    try:
+        widgets = importlib.import_module("PyQt5.QtWidgets")
+        material = importlib.import_module("qt_material")
+        if not getattr(material, "GUI", False) or getattr(material, "QColorDialog", None) is not widgets.QColorDialog:
+            return ["qt-material does not support the application's PyQt5 binding; reinstall the compatible version pinned in requirements.txt."]
+    except Exception as exc:
+        return [f"PyQt5/qt-material compatibility check failed: {exc}"]
+    return []
+
+
 def main() -> int:
     if sys.version_info[:2] != (3, 12):
         print(f"ERROR: Python 3.12 is required; found {sys.version.split()[0]}.")
         return 1
 
     missing_files = [name for name in REQUIRED_FILES if not (APP_ROOT / name).is_file()]
-    import_failures: list[str] = verify_onnx_backend()
+    import_failures: list[str] = verify_onnx_backend() + verify_tensorrt_backend() + verify_qt_material_backend()
     if sys.platform == "win32":
         try:
             from darkfusion_media_tools import verify_bundled_media_tools
@@ -235,6 +296,8 @@ def main() -> int:
     if missing_files or import_failures or translation_failures:
         return 1
 
+    from darkfusion_version import APP_VERSION
+    print(f"DarkFusion: {APP_VERSION}")
     print(f"Python: {sys.version.split()[0]}")
     try:
         import torch

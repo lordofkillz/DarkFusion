@@ -26,6 +26,7 @@ import requests
 import cv2
 import numpy as np
 from darkfusion_shape_verifier import shape_annotation_crop
+from darkfusion_ollama_memory import generate as generate_with_memory_tracking
 
 try:
     from darkfusion_ollama_auto_setup import ensure_ollama_ready, check_ollama_running
@@ -269,9 +270,9 @@ SUGGESTION: [class name if wrong, or "none" if correct]
 REASONING: [1-2 sentences explaining]"""
         
         try:
-            response = requests.post(
-                f"{self.ollama_host}/api/generate",
-                json={
+            response = generate_with_memory_tracking(
+                self.ollama_host,
+                {
                     "model": self.available_model,
                     "prompt": prompt,
                     "images": [image_b64],

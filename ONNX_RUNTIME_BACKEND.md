@@ -1,8 +1,78 @@
 # DarkFusion standalone ONNX Runtime backend
 
 `darkfusion_onnx_runtime.py` performs inference without importing Ultralytics.
+
+The GUI shares video capture and display optimizations across model backends.
+Finite FFmpeg playback overlaps one owned decoded frame with inference. File
+input waits for an inference slot instead of replacing pending file frames;
+live inputs retain bounded latest-frame delivery. Known live URL metadata and
+unknown-length network streams select that live policy, including HTTPS streams.
+
+Compatible 8-bit AV1 files and finite HTTP video can use the installed FFmpeg's
+NVIDIA decoder. Its first frame is checked against the original OpenCV decoder;
+unsupported hardware, mismatching pixels, and decoder failures use the original
+decoder. The Windows output pipe is bounded, as is the single prefetched frame
+(32 MiB maximum). Interactive seeks use the already-open software decoder to
+avoid restarting a CUDA process for each step. Other codecs keep their existing
+decoder, since hardware transfer costs do not establish an automatic speed win.
+
+Windows desktop capture uses Desktop Duplication for supported monitor layouts,
+with an MSS fallback. Capture-card/camera reads run on their owning background
+thread. Supported device formats/rates are negotiated at the requested resolution
+and buffer mode, with a 240 FPS software ceiling instead of a fixed 60 FPS cap.
+No driver exposure or image controls are changed.
+
+GPU video display uses an independent native Qt swapchain and reusable texture uploads
+so video frames are not coalesced with unrelated GUI updates. The compatible
+graphics-view GPU and CPU renderers remain automatic fallbacks. Existing display
+quality interpolation and full-source Label Frame snapshots remain separate;
+image editor/review thumbnail loading is unchanged. GUI startup also gives OpenCV
+a bounded resizing thread budget; standalone inference and training workers keep
+their own settings. These changes add no CUDA graph layer around Ultralytics.
+
+Large native video frames use reusable RGBA upload storage to reduce packed-RGB
+driver conversion overhead. The hidden graphics view is refreshed when needed
+for a renderer switch instead of receiving every native frame. CPU switching and
+native-surface failure both redraw the current retained original.
+
+The editor's normal image auto-label workflow prefetches the next two originals
+in processing order, including when the navigation index differs from the current
+batch. Existing previews, preprocessing, ROI handling and annotation writes still
+run through their original UI paths. Custom readers retain their decoding path;
+file-version checks and the shared 64 MiB lookahead budget still apply. Pending
+header-size estimates are reused until their corresponding image is consumed or
+discarded; thumbnails never enter the original-image queue.
+
 Ultralytics may still be used to train and export a model. The runtime accepts
 image paths, PIL RGB images, OpenCV BGR arrays, or lists of these.
+
+For file lists on GPU providers, bounded workers decode ordered image groups
+while the caller runs inference. Larger TensorRT RTX and DirectML lists can also
+prepare input tensors on up to eight reusable CPU workers when PyTorch with
+OpenMP is already loaded. Automatic provider comparison finishes before this
+preparation is enabled. The converters, normalization and inference batch sizes
+stay the same. The loading budget estimates queued originals, input tensors and
+preparation scratch together, with a 64 MiB limit.
+
+File-version tokens are checked before using prepared pixels, including after
+handoff from the coordinator. Session execution remains serialized on the
+caller. Closing a prediction stream drains its active preparation; idle CPU
+workers are reused until their model is released. These workers hold no GPU
+session or buffers. Single-image, live-array and CPU calls retain their existing
+loading path. This adds no Ultralytics or PyTorch dependency to standalone inference.
+
+The application's video worker can also prepare the next owned full frame on
+one CPU worker for TensorRT RTX and DirectML. It follows the existing latest
+pending-frame policy: one preparation in flight and one replaceable pending
+job, without adding an inference queue or changing playback pacing. The model
+and selected preprocessing settings are checked again before a prepared input
+is used. Cropped/replaced sources and failed or oversized preparations use the
+original foreground converter. Seek invalidation clears pending preparation,
+and stopping joins the CPU worker after inference finishes. CPU workers retain
+no model, session, tracker or Qt parent; session execution and tracking stay on
+the video inference thread. This does not change the native Ultralytics path.
+With Automatic provider selection, overlap starts after the first actual frame
+has finished provider comparison, so it also works when startup warmup is deferred.
 
 ## Basic use
 
@@ -47,6 +117,14 @@ usable through the legacy path. A source environment can migrate by replacing
 its existing ORT distribution with the Windows ML requirements; do not stack
 ORT variants or change installed runtime files while training/inference runs.
 Windows ML inference can coexist with PyTorch CUDA training in that environment.
+
+Native `.engine` export/inference uses the separate, pinned TensorRT CUDA 13
+package family. Updating that package does not change the Windows ML ONNX
+provider. TensorRT 10 engines generally require rebuilding for TensorRT 11;
+keep the original files and verify new exports before switching. The installer
+removes overlapping TensorRT families through `scripts/update-tensorrt.ps1`,
+with recovery wheels downloaded before replacement. The requirements include
+ModelOpt export helpers without its conflicting ONNX Runtime extras.
 
 To replace ONNX Runtime in an existing source environment, close DarkFusion and
 finish its training jobs, then run from the repository root:
@@ -112,15 +190,36 @@ registration path. Restart DarkFusion after updating the backend files so old
 sessions/native factories are no longer in use; separate training jobs can keep
 running.
 
+Stopped video workers release their model references immediately, including
+while Qt is waiting to delete the thread object. Keeping a retired DirectML
+session alive during RTX execution can cause a cuDNN enqueue failure on the
+tested stack. In-flight frame snapshots keep their own model reference until
+inference finishes. Automatic video comparisons start with actual frame pixels
+and verify outputs again after native graph capture. A failed RTX candidate
+does not disqualify a validated DirectML candidate, and rejection diagnostics
+remain available in the selection report.
+
+Provider comparison preserves the numeric tolerances for eligible detections,
+class IDs, scores and extra geometry. Only rows below the validation confidence
+floor on both sides can ignore unused background coordinates/class ordering;
+their scores still have to match. Lower requested thresholds lower that floor.
+This avoids rejecting otherwise matching FP16 end-to-end models because of
+underflow or unstable TopK ordering in near-zero-confidence background rows.
+
 TensorRT RTX dynamic image exports receive bounded min/opt/max input profiles,
 initially from their declared image dimensions/export metadata and subsequently
 from the actual inference tensor. This avoids the provider's implicit 1-pixel
 optimization shape, which is invalid for common dynamic YOLO graphs. Smaller final
 batches fit the existing profile; a size change or larger batch creates a matching
 session transactionally. Profile-specific runtime caches stay under the model's
-cache directory. CUDA graph capture is disabled by default for this NumPy-based
-adapter. Explicit complete profile/CUDA-graph options supplied through the Python
-API are preserved. None of this rewrites the ONNX file or its preprocessing/output
+cache directory. TensorRT RTX uses its native CUDA-graph capture/replay by default,
+including with NumPy inputs. The provider manages its device bindings and
+recaptures when they change; DarkFusion serializes execution and session changes.
+No PyTorch graph adapter is added to the ONNX path. Automatic speed comparisons
+are refreshed for this change. Explicit complete profile/CUDA-graph options
+supplied through the Python API are preserved, including
+`provider_options={"NvTensorRTRTXExecutionProvider": {"enable_cuda_graph": False}}`
+for diagnostics. None of this rewrites the ONNX file or its preprocessing/output
 contract, and the exporting Python environment is not needed for inference.
 
 The catalog currently supports TensorRT RTX, OpenVINO, MIGraphX, QNN and Vitis

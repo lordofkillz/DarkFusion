@@ -16,6 +16,11 @@
 #include <vector>
 
 namespace df {
+#ifndef DARKFUSION_PRODUCT_VERSION
+#define DARKFUSION_PRODUCT_VERSION L"development"
+#endif
+inline constexpr auto productVersion = DARKFUSION_PRODUCT_VERSION;
+
 inline std::wstring errorMessage(DWORD error = GetLastError()) {
     wchar_t* text = nullptr;
     FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |

@@ -19,6 +19,8 @@ import importlib
 import json
 import math
 import os
+import sys
+import threading
 import time
 import hashlib
 from dataclasses import dataclass
@@ -30,6 +32,7 @@ import cv2
 import numpy as np
 
 import darkfusion_windows_ml as windows_ml
+from darkfusion_image_loading import ImagePreparationPool, prefetched_file_batches
 
 try:
     ort = windows_ml.get_ort()
@@ -42,19 +45,42 @@ except ImportError as exc:  # pragma: no cover - exercised only in missing depen
 
 IMAGE_SUFFIXES = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 
-# Match the existing FP16 cast-then-multiply, including its rounding. Using
-# FP32 division followed by an FP16 cast would not produce identical values.
-_FP16_NORMALIZED_PIXELS = np.arange(256, dtype=np.float16)
-_FP16_NORMALIZED_PIXELS *= 1.0 / 255.0
+# Match Ultralytics' half().div_(255), not multiplication by an already rounded
+# FP16 reciprocal. All 256 byte values are representable exactly before division.
+_FP16_NORMALIZED_PIXELS = (np.arange(256, dtype=np.float32) / 255.0).astype(np.float16)
 _FP16_NORMALIZED_PIXELS.flags.writeable = False
 
 
 def _normalized_rgb_tensor(pixels: np.ndarray, input_type: str) -> np.ndarray:
-    """Normalize YOLO pixels without slow per-pixel CPU half arithmetic."""
+    """Contiguous RGB tensor, with the same byte normalization as Ultralytics.
+
+    DarkFusion already loads torch for its other models. Reuse its CPU kernels
+    to fuse the strided HWC->CHW copy with dtype conversion, without importing
+    torch (or initializing CUDA) in a standalone ONNX-only process. Every call
+    owns its output; no shared mutable scratch buffers or global thread changes.
+    """
     fp16 = "float16" in input_type
-    if fp16 and pixels.dtype == np.uint8:
-        return np.ascontiguousarray(_FP16_NORMALIZED_PIXELS[pixels])
-    # Preserve all previous behavior for FP32 and non-byte image inputs.
+    if pixels.dtype == np.uint8:
+        torch = sys.modules.get("torch")
+        if torch is not None:
+            if not pixels.flags.writeable or any(stride < 0 for stride in pixels.strides):
+                pixels = np.array(pixels, copy=True, order="C")
+            tensor = torch.from_numpy(pixels).to(
+                dtype=torch.float16 if fp16 else torch.float32,
+                memory_format=torch.contiguous_format,
+            )
+            return tensor.div_(255.0).numpy()
+        if fp16:
+            # LUT returns FP16 bit patterns through OpenCV's supported int16
+            # output type. Flattening also supports arbitrary tensor dimensions.
+            flat = np.ascontiguousarray(pixels).reshape(-1, 1)
+            if not flat.size:
+                return np.empty(pixels.shape, dtype=np.float16)
+            return cv2.LUT(flat, _FP16_NORMALIZED_PIXELS.view(np.int16)).view(np.float16).reshape(pixels.shape)
+        tensor = np.asarray(pixels, dtype=np.float32, order="C")
+        tensor /= 255.0
+        return tensor
+    # Preserve the existing non-byte source contract.
     tensor = np.asarray(pixels, dtype=np.float16 if fp16 else np.float32, order="C")
     tensor *= 1.0 / 255.0
     return tensor
@@ -132,6 +158,137 @@ def _onnx_image_input_contract(path: str, size: int, modified_ns: int):
     shape = tuple(dim.dim_value if dim.dim_value > 0 else dim.dim_param or None
                   for dim in value.type.tensor_type.shape.dim)
     return value.name, shape, {item.key: item.value for item in graph.metadata_props}
+
+
+def _directml_nms_padding_plan(model):
+    """Locate small, possibly empty detection-list Pads downstream of NMS.
+
+    DirectML can skip Pad when its data has a zero dimension, leaving the
+    nonempty padded result unwritten. Never touch spatial/network padding or
+    native NMS-free heads. The plan contains no model weights.
+    """
+    import onnx
+
+    downstream = set()
+    candidates = []
+    for index, node in enumerate(model.graph.node):
+        if node.domain not in ("", "ai.onnx"):
+            continue
+        if node.op_type == "NonMaxSuppression" or any(name in downstream for name in node.input):
+            downstream.update(node.output)
+            if node.op_type == "Pad" and node.input[0] in downstream:
+                candidates.append(index)
+    if not candidates:
+        return ()
+    # Exporters do not always retain intermediate value_info after simplifying.
+    inferred = onnx.shape_inference.infer_shapes(model)
+    values = {v.name: v.type.tensor_type for v in
+              (*inferred.graph.input, *inferred.graph.value_info, *inferred.graph.output)}
+    plan = []
+    for index in candidates:
+        node = model.graph.node[index]
+        if len(node.input) < 2:
+            raise OnnxBackendError("Export this embedded-NMS model with ONNX opset 11 or newer for DirectML.")
+        value = values.get(node.input[0])
+        if value is None or not value.HasField("shape"):
+            raise OnnxBackendError("Cannot verify DirectML's post-NMS padding contract; use another provider.")
+        dims = value.shape.dim
+        if len(dims) not in (1, 2) or all(d.HasField("dim_value") and d.dim_value > 0 for d in dims):
+            continue
+        if value.elem_type not in (onnx.TensorProto.FLOAT16, onnx.TensorProto.FLOAT):
+            raise OnnxBackendError("Unsupported DirectML post-NMS padding type; use another provider.")
+        mode = next((a.s for a in node.attribute if a.name == "mode"), b"constant")
+        if mode != b"constant" or (len(node.input) > 3 and node.input[3]):
+            raise OnnxBackendError("Unsupported DirectML post-NMS padding layout; use another provider.")
+        plan.append((index, (value.elem_type, len(dims))))
+    return tuple(plan)
+
+
+@lru_cache(maxsize=64)
+def _directml_nms_padding_contract(path, size, modified_ns):
+    del size, modified_ns  # Invalidate when the user replaces an export.
+    import onnx
+    model = onnx.load_model(path, load_external_data=False)
+    if not any(node.op_type == "NonMaxSuppression" for node in model.graph.node):
+        return ()
+    # External shape constants are needed to infer the final flattened Pad.
+    onnx.external_data_helper.load_external_data_for_model(model, os.path.dirname(path))
+    onnx.external_data_helper.convert_model_from_external_data(model)
+    return _directml_nms_padding_plan(model)
+
+
+def _directml_safe_nms_model(path, *, cpu_fallback=True):
+    """Return an in-memory compatibility graph, or the untouched original path.
+
+    An empty-list branch explicitly fills the padding instead of dispatching a
+    zero-input Pad to DirectML. Nonempty detections retain the original Pad.
+    User exports, checkpoints and metadata are never rewritten. No per-frame
+    conversion of the full network, extra inference or shared result buffers.
+    """
+    import onnx
+    stat = os.stat(path)
+    plan = dict(_directml_nms_padding_contract(path, stat.st_size, stat.st_mtime_ns))
+    if not plan:
+        return path
+    if not cpu_fallback:
+        raise OnnxBackendError(
+            "This embedded-NMS model needs CPU fallback for safe DirectML empty-result control flow. "
+            "Enable CPU fallback, choose another provider, or export without embedded NMS."
+        )
+    model = onnx.load_model(path)  # Resolve external weights before serializing.
+    onnx.external_data_helper.convert_model_from_external_data(model)
+    names = {name for node in model.graph.node for name in (*node.input, *node.output)}
+    names.update(item.name for item in (*model.graph.input, *model.graph.output, *model.graph.initializer))
+    nodes = []
+
+    def unique(base):
+        name = base
+        suffix = 0
+        while name in names:
+            suffix += 1
+            name = f"{base}_{suffix}"
+        names.add(name)
+        return name
+
+    for index, node in enumerate(model.graph.node):
+        if index not in plan:
+            nodes.append(node)
+            continue
+        dtype, rank = plan[index]
+        prefix = f"darkfusion_safe_pad_{index}"
+        inputs = list(node.input)
+
+        def constant(label, value):
+            name = unique(f"{prefix}_{label}")
+            model.graph.initializer.append(onnx.numpy_helper.from_array(np.asarray(value), name))
+            return name
+
+        def operation(op, args, label, **attrs):
+            output = unique(f"{prefix}_{label}")
+            nodes.append(onnx.helper.make_node(op, args, [output], **attrs))
+            return output
+
+        size = operation("Size", [inputs[0]], "size")
+        empty = operation("Equal", [size, constant("zero_size", np.int64(0))], "empty")
+        shape = operation("Shape", [inputs[0]], "shape")
+        begin = operation("Gather", [inputs[1], constant("begins", np.arange(rank, dtype=np.int64))], "begin")
+        end = operation("Gather", [inputs[1], constant("ends", np.arange(rank, 2 * rank, dtype=np.int64))], "end")
+        padded_shape = operation("Add", [operation("Add", [shape, begin], "partial_shape"), end], "padded_shape")
+        value = inputs[2] if len(inputs) > 2 and inputs[2] else constant(
+            "fill", np.array(0, dtype=np.float16 if dtype == onnx.TensorProto.FLOAT16 else np.float32))
+        filled = unique(f"{prefix}_filled")
+        nonempty = unique(f"{prefix}_nonempty")
+        then_branch = onnx.helper.make_graph(
+            [onnx.helper.make_node("Expand", [value, padded_shape], [filled])], prefix + "_empty", [],
+            [onnx.helper.make_tensor_value_info(filled, dtype, [None] * rank)])
+        else_branch = onnx.helper.make_graph(
+            [onnx.helper.make_node("Pad", inputs, [nonempty], mode="constant")], prefix + "_nonempty", [],
+            [onnx.helper.make_tensor_value_info(nonempty, dtype, [None] * rank)])
+        nodes.append(onnx.helper.make_node("If", [empty], list(node.output),
+                                          then_branch=then_branch, else_branch=else_branch))
+    del model.graph.node[:]
+    model.graph.node.extend(nodes)
+    return model.SerializeToString()
 
 
 class ArrayView:
@@ -613,6 +770,14 @@ class OrtResult:
 
 
 @dataclass(frozen=True)
+class _PreparedVideoFrame:
+    source: np.ndarray
+    key: tuple
+    batch: tuple
+    elapsed_ms: float
+
+
+@dataclass(frozen=True)
 class LetterboxInfo:
     original_shape: tuple[int, int]
     input_shape: tuple[int, int]
@@ -978,6 +1143,8 @@ class DarkFusionOnnxModel:
         self._performance_input = None
         self._provider_input_shape: tuple[int, ...] | None = None
         self._session_profile_bounds = None
+        self._session_lock = threading.RLock()
+        self._image_preparation_pool = None
         self._create_session()
 
     def _session_options(self, chain: Sequence[str]) -> ort.SessionOptions:
@@ -1037,10 +1204,11 @@ class DarkFusionOnnxModel:
             options.setdefault("trt_timing_cache_path", self.cache_dir)
         elif provider == "NvTensorRTRTXExecutionProvider":
             options.setdefault("device_id", self.device_id)
-            # CUDA graph capture needs stable device-bound I/O. This adapter uses
-            # NumPy inputs and recreatable sessions; explicitly keep capture off
-            # even when an installed provider version defaults it to on.
-            options.setdefault("enable_cuda_graph", False)
+            # RTX owns capture/replay and invalidates captures when its device
+            # bindings or shapes change. NumPy Run inputs are staged by ORT;
+            # no PyTorch graph or external buffers belong around this session.
+            # _session_lock serializes Run and session/profile replacement.
+            options.setdefault("enable_cuda_graph", True)
             cache_dir = self.cache_dir
             if self._uses_automatic_rtx_profile():
                 name, minimum, optimum, maximum = self._rtx_profile_shapes()
@@ -1065,6 +1233,7 @@ class DarkFusionOnnxModel:
         without disabling DirectML metacommands or changing image processing.
         CPU/non-Windows runtimes retain their existing registration path.
         """
+        source = self._session_model_source(chain)
         if windows_ml.installed() and chain[0] != "CPUExecutionProvider":
             devices = list(ort.get_ep_devices())
             index = 0 if automatic else self.device_id
@@ -1079,14 +1248,24 @@ class DarkFusionOnnxModel:
                 values = {key: windows_ml.option_string(value)
                           for key, value in self._provider_options(provider).items() if key != "device_id"}
                 options.add_provider_for_devices([selected[index]], values)
-            return ort.InferenceSession(self.model_path, sess_options=options)
+            return ort.InferenceSession(source, sess_options=options)
         registrations = []
         for provider in chain:
             values = self._provider_options(provider)
             if automatic:
                 values.pop("device_id", None)
             registrations.append((provider, values) if values else provider)
-        return ort.InferenceSession(self.model_path, sess_options=options, providers=registrations)
+        return ort.InferenceSession(source, sess_options=options, providers=registrations)
+
+    def _session_model_source(self, chain):
+        if "DmlExecutionProvider" not in chain:
+            return self.model_path
+        source = _directml_safe_nms_model(self.model_path, cpu_fallback=self.include_cpu_fallback)
+        if isinstance(source, bytes):
+            message = "DirectML compatibility: safe post-NMS empty-result branch enabled; model file unchanged."
+            if message not in self.setup_diagnostics:
+                self.setup_diagnostics.append(message)
+        return source
 
     def _create_session(self):
         values = self.requested_providers.split(",") if isinstance(self.requested_providers, str) else list(self.requested_providers)
@@ -1144,6 +1323,12 @@ class DarkFusionOnnxModel:
                 self.session = ort.InferenceSession(self.model_path, sess_options=options)
                 if any(windows_ml.is_experimental(name) for name in self.session.get_providers()):
                     raise OnnxBackendError("Automatic policy selected an experimental provider; using safe fallback.")
+                source = self._session_model_source(self.session.get_providers())
+                if isinstance(source, bytes):
+                    # Policy may choose DirectML. Replace its session before any
+                    # Run, while retaining the policy and CPU-fallback setting.
+                    self.session = None
+                    self.session = ort.InferenceSession(source, sess_options=options)
             else:
                 self.session = self._open_session(chain, options, automatic=automatic)
         except Exception as exc:
@@ -1362,7 +1547,8 @@ class DarkFusionOnnxModel:
                 str(key): dict(value) for key, value in provider_options.items()
             }
         candidate._create_session()
-        self.__dict__.update(candidate.__dict__)
+        with self._session_lock:
+            self.__dict__.update(candidate.__dict__)
         return self.providers
 
     @property
@@ -1442,7 +1628,7 @@ class DarkFusionOnnxModel:
         return tensor, info
 
     def _prepare_batch(
-        self, sources: Sequence[Any], imgsz: int | Sequence[int] | None
+        self, sources: Sequence[Any], imgsz: int | Sequence[int] | None, *, loaded_sources=None
     ) -> tuple[np.ndarray, list[np.ndarray], list[str], list[LetterboxInfo]]:
         target = _normalize_imgsz(imgsz, self.imgsz) if imgsz is not None else self.imgsz
         static_size = self._static_input_size()
@@ -1452,8 +1638,8 @@ class DarkFusionOnnxModel:
         paths: list[str] = []
         infos: list[LetterboxInfo] = []
         tensors: list[np.ndarray] = []
-        for source in sources:
-            image, path = _load_image(source)
+        loaded = loaded_sources if loaded_sources is not None else (_load_image(source) for source in sources)
+        for image, path in loaded:
             if self.framework == "damo":
                 tensor, info = self._damo_preprocess_image(image, target)
             elif self.framework == "darknet":
@@ -1496,7 +1682,101 @@ class DarkFusionOnnxModel:
         self.providers = list(candidate.providers)
         self._session_profile_bounds = candidate._session_profile_bounds
 
-    def _run_batch(self, tensor: np.ndarray) -> tuple[list[np.ndarray], float]:
+    def _file_preparation(self, imgsz, static_batch):
+        """Snapshot CPU-only preprocessing; never retain a session in workers."""
+        torch = sys.modules.get("torch")
+        if (type(self) is not DarkFusionOnnxModel or torch is None
+                or not getattr(getattr(torch.backends, "openmp", None), "is_available", lambda: False)()
+                or getattr(self._prepare_batch, "__func__", None) is not DarkFusionOnnxModel._prepare_batch):
+            return None
+        requested = getattr(self, "requested_providers", "cpu")
+        requested = requested.split(",") if isinstance(requested, str) else list(requested)
+        automatic = not requested or any(str(value).strip().lower() == "auto" for value in requested)
+        if (automatic and getattr(self, "runtime_options", {}).get("compare_providers", True)
+                and getattr(self, "_performance_input", None) is None):
+            return None  # Select/validate providers before starting reusable preparation.
+        with self._session_lock:
+            if getattr(self, "_image_preparation_pool", None) is None:
+                # OpenMP's thread allowance is local to the calling worker.
+                # Keep independent image jobs from each spawning a full team.
+                self._image_preparation_pool = ImagePreparationPool(
+                    initializer=lambda: torch.set_num_threads(1),
+                    max_workers=min(8, os.cpu_count() or 1))
+            pool = self._image_preparation_pool
+            template = object.__new__(DarkFusionOnnxModel)
+            for name in ("input_type", "framework", "task", "stride"):
+                setattr(template, name, getattr(self, name))
+            template.input_shape = list(self.input_shape)
+            template.imgsz = tuple(self.imgsz)
+            template.damo_resize = getattr(self, "damo_resize", "letterbox")
+        target = template._static_input_size() or (_normalize_imgsz(imgsz, template.imgsz) if imgsz is not None else template.imgsz)
+        element_bytes = 2 if "float16" in template.input_type else 4
+        # Include input/stack buffers and RGB/resize scratch in the same limit
+        # as original pixels. Final static-batch padding is budgeted in full.
+        extra_bytes = int(target[0]) * int(target[1]) * 3 * (2 * element_bytes + 2)
+
+        def prepare(loaded):
+            if static_batch and len(loaded) < static_batch:
+                loaded = loaded + [loaded[-1]] * (static_batch - len(loaded))
+            return template._prepare_batch([path for _, path in loaded], imgsz, loaded_sources=loaded)
+
+        return pool, prepare, extra_bytes
+
+    def _video_preparation_key(self, imgsz):
+        return (tuple(self.input_shape), self.input_type, self.framework, self.task,
+                self.stride, getattr(self, "damo_resize", "letterbox"),
+                _normalize_imgsz(imgsz, self.imgsz) if imgsz is not None else tuple(self.imgsz))
+
+    def _video_preparation_pending(self):
+        requested = getattr(self, "requested_providers", "cpu")
+        requested = requested.split(",") if isinstance(requested, str) else list(requested)
+        automatic = not requested or any(str(value).strip().lower() == "auto" for value in requested)
+        return (automatic and getattr(self, "runtime_options", {}).get("compare_providers", True)
+                and getattr(self, "_performance_input", None) is None)
+
+    def _video_preparation(self, imgsz=None):
+        """Return a CPU-only converter for an owned, full video frame."""
+        torch = sys.modules.get("torch")
+        if (type(self) is not DarkFusionOnnxModel or torch is None
+                or not getattr(getattr(torch.backends, "openmp", None), "is_available", lambda: False)()
+                or getattr(self._prepare_batch, "__func__", None) is not DarkFusionOnnxModel._prepare_batch
+                or (getattr(self, "providers", None) or [None])[0] not in
+                {"NvTensorRTRTXExecutionProvider", "DmlExecutionProvider"}
+                or (isinstance(self.input_shape[0], int) and self.input_shape[0] > 1)):
+            return None
+        if self._video_preparation_pending():
+            return None
+        with self._session_lock:
+            template = object.__new__(DarkFusionOnnxModel)
+            for name in ("input_type", "framework", "task", "stride"):
+                setattr(template, name, getattr(self, name))
+            template.input_shape = list(self.input_shape)
+            template.imgsz = tuple(self.imgsz)
+            template.damo_resize = getattr(self, "damo_resize", "letterbox")
+            key = template._video_preparation_key(imgsz)
+        target = template._static_input_size() or key[-1]
+        element_bytes = 2 if "float16" in template.input_type else 4
+        scratch_bytes = int(target[0]) * int(target[1]) * 3 * (2 * element_bytes + 2)
+        prepared_size = tuple(key[-1])
+
+        def prepare(frame):
+            # Two CPU jobs can coexist (running + pending). Bound their source,
+            # tensors and resize scratch to a combined estimated 64 MiB.
+            if frame.nbytes * 3 + scratch_bytes > 32 * 1024 * 1024:
+                return None
+            started = time.perf_counter()
+            batch = template._prepare_batch([frame], prepared_size)
+            return _PreparedVideoFrame(frame, key, batch, (time.perf_counter() - started) * 1000.0)
+
+        return prepare
+
+    def _run_batch(self, tensor: np.ndarray, *, confidence: float = 0.001) -> tuple[list[np.ndarray], float]:
+        # DirectML forbids simultaneous Run calls on one session. Protect its
+        # session selection/shape changes as well; preprocessing stays parallel.
+        with self._session_lock:
+            return self._run_batch_locked(tensor, confidence=confidence)
+
+    def _run_batch_locked(self, tensor: np.ndarray, *, confidence: float = 0.001) -> tuple[list[np.ndarray], float]:
         if self.session is None:
             raise OnnxBackendError("The ONNX Runtime session is closed.")
         self._provider_input_shape = tuple(tensor.shape)
@@ -1504,7 +1784,10 @@ class DarkFusionOnnxModel:
         automatic = not values or any(str(value).strip().lower() == "auto" for value in values)
         if (automatic and self.runtime_options["compare_providers"] and windows_ml.installed()
                 and self.runtime_options["auto_policy"] in {"max_performance", "prefer_gpu"}):
-            signature = (tuple(tensor.shape), str(tensor.dtype))
+            # Validate well below ordinary labeling thresholds. If a caller
+            # requests an even lower confidence, use a separate stricter cache.
+            self._comparison_confidence = min(0.001, max(0.0, float(confidence)))
+            signature = (tuple(tensor.shape), str(tensor.dtype), self._comparison_confidence)
             if signature != self._performance_input:
                 from darkfusion_onnx_performance import select_fastest
                 select_fastest(self, tensor)
@@ -1654,7 +1937,26 @@ class DarkFusionOnnxModel:
     ) -> tuple[np.ndarray, np.ndarray]:
         rows = np.asarray(rows, dtype=np.float32)
         if rows.ndim != 2 or rows.shape[1] < 6:
-            raise OnnxBackendError(f"Unsupported embedded-NMS output shape: {rows.shape}.")
+            raise OnnxBackendError(f"Unsupported end-to-end detection output shape: {rows.shape}.")
+        # A provider can successfully Run yet return uninitialized detection
+        # buffers (observed with DirectML + dynamic embedded NMS on empty frames).
+        # Fail closed rather than writing nonsense or silently treating a corrupt
+        # result as an empty image. Zero/negative-score padding remains permitted.
+        scores = rows[:, 4]
+        active = rows[scores > 0, :6]
+        bad = not np.isfinite(scores).all() or bool(np.any(scores > 1.0))
+        if active.size:
+            ids = active[:, 5]
+            bad |= not np.isfinite(active).all() or bool(np.any(ids < 0) | np.any(ids != np.floor(ids)))
+            names = getattr(self, "names", {})
+            if names:
+                bad |= bool(np.any(ids >= len(names)))
+        if bad:
+            providers = ", ".join(getattr(self, "providers", [])) or "the selected provider"
+            raise OnnxBackendError(
+                f"{providers} returned invalid detection scores/class IDs. No valid prediction can be made. "
+                "Try another execution provider or re-export with a compatible native detection head."
+            )
         valid = np.isfinite(rows[:, :6]).all(1) & (rows[:, 4] >= float(confidence))
         if classes is not None:
             valid &= np.isin(rows[:, 5].astype(np.int64), list(classes))
@@ -1690,14 +1992,21 @@ class DarkFusionOnnxModel:
                 f"{score_offset + class_count}. Set output_format and names explicitly."
             )
         scores = rows[:, score_offset:score_offset + class_count]
-        class_ids = np.argmax(scores, axis=1).astype(np.int64)
-        confidences = scores[np.arange(len(scores)), class_ids]
+        if class_count == 1:
+            class_ids = np.zeros(len(scores), dtype=np.int64)
+            confidences = scores[:, 0]
+        else:
+            class_ids = np.argmax(scores, axis=1).astype(np.int64)
+            confidences = scores[np.arange(len(scores)), class_ids]
         if score_offset == 5:
             confidences = confidences * rows[:, 4]
-        valid = np.isfinite(rows[:, :4]).all(1) & np.isfinite(confidences) & (confidences >= float(confidence))
+        valid = np.isfinite(confidences) & (confidences >= float(confidence))
         if classes is not None:
             valid &= np.isin(class_ids, list(classes))
         source_indices = np.flatnonzero(valid)
+        # Most raw YOLO candidates are below threshold. Check coordinates only
+        # on survivors, preserving the same invalid-box rejection before NMS.
+        source_indices = source_indices[np.isfinite(rows[source_indices, :4]).all(1)]
         if not source_indices.size:
             return _empty(0, 6), np.empty((0,), dtype=np.int64), np.empty((0, max(0, rows.shape[1] - extra_offset)), dtype=np.float32)
         if source_indices.size > int(max_nms):
@@ -1906,6 +2215,7 @@ class DarkFusionOnnxModel:
         batch: int | None = None,
         stream: bool = False,
         verbose: bool = False,
+        _prepared_video=None,
         **_kwargs,
     ) -> list[OrtResult] | Iterator[OrtResult]:
         del device, half, verbose  # provider/dtype are fixed by the loaded session
@@ -1921,33 +2231,62 @@ class DarkFusionOnnxModel:
         class_filter = {int(value) for value in classes} if classes is not None else None
 
         def generate():
-            for start in range(0, len(items), requested_batch):
-                chunk = items[start:start + requested_batch]
-                if static_batch and static_batch > len(chunk):
-                    padded = chunk + [chunk[-1]] * (static_batch - len(chunk))
-                else:
-                    padded = chunk
-                preprocess_started = time.perf_counter()
-                tensor, images, paths, infos = self._prepare_batch(padded, imgsz)
-                preprocess_ms = (time.perf_counter() - preprocess_started) * 1000.0 / max(1, len(padded))
-                outputs, inference_total_ms = self._run_batch(tensor)
-                if self.framework in {"darknet", "damo"} and len(outputs) == 2:
-                    predictions = np.empty((len(padded), 0, 6), dtype=np.float32)
-                elif self.task == "classify":
-                    predictions = np.asarray(outputs[0])
-                    if predictions.ndim == 1:
-                        predictions = predictions[None]
-                else:
-                    predictions = self._raw_predictions(outputs[0], len(padded))
-                inference_ms = inference_total_ms / max(1, len(padded))
-                for local_index in range(len(chunk)):
-                    result = self._decode_one(
-                        predictions[local_index], outputs, local_index,
-                        images[local_index], paths[local_index], infos[local_index], inference_ms,
-                        float(conf), float(iou), class_filter, bool(agnostic_nms), int(max_det), int(max_nms),
-                    )
-                    result.speed["preprocess"] = preprocess_ms
-                    yield result
+            prefetch = (len(items) > requested_batch
+                        and (getattr(self, "providers", None) or ["CPUExecutionProvider"])[0] != "CPUExecutionProvider"
+                        and all(isinstance(item, (str, os.PathLike)) for item in items))
+            preparation = (self._file_preparation(imgsz, static_batch)
+                           if prefetch and len(items) >= 8 and self.providers[0] in
+                           {"NvTensorRTRTXExecutionProvider", "DmlExecutionProvider"} else None)
+            chunks = (preparation[0].batches(items, requested_batch, _load_image, preparation[1], preparation[2])
+                      if preparation is not None else
+                      prefetched_file_batches(items, requested_batch, _load_image) if prefetch else
+                      ((items[start:start + requested_batch], None)
+                       for start in range(0, len(items), requested_batch)))
+            try:
+                load_started = time.perf_counter()
+                for chunk, loaded in chunks:
+                    if static_batch and static_batch > len(chunk):
+                        padded = chunk + [chunk[-1]] * (static_batch - len(chunk))
+                        if loaded is not None and preparation is None:
+                            loaded = loaded + [loaded[-1]] * (static_batch - len(chunk))
+                    else:
+                        padded = chunk
+                    preprocess_started = load_started
+                    if (type(_prepared_video) is _PreparedVideoFrame and len(items) == 1
+                            and chunk[0] is _prepared_video.source and len(padded) == 1
+                            and type(self) is DarkFusionOnnxModel
+                            and getattr(self._prepare_batch, "__func__", None) is DarkFusionOnnxModel._prepare_batch
+                            and _prepared_video.key == self._video_preparation_key(imgsz)):
+                        tensor, images, paths, infos = _prepared_video.batch
+                        preprocess_started = time.perf_counter() - _prepared_video.elapsed_ms / 1000.0
+                    elif loaded is not None and preparation is not None:
+                        tensor, images, paths, infos = loaded
+                    elif loaded is None:
+                        tensor, images, paths, infos = self._prepare_batch(padded, imgsz)
+                    else:
+                        tensor, images, paths, infos = self._prepare_batch(padded, imgsz, loaded_sources=loaded)
+                    preprocess_ms = (time.perf_counter() - preprocess_started) * 1000.0 / max(1, len(padded))
+                    outputs, inference_total_ms = self._run_batch(tensor, confidence=float(conf))
+                    if self.framework in {"darknet", "damo"} and len(outputs) == 2:
+                        predictions = np.empty((len(padded), 0, 6), dtype=np.float32)
+                    elif self.task == "classify":
+                        predictions = np.asarray(outputs[0])
+                        if predictions.ndim == 1:
+                            predictions = predictions[None]
+                    else:
+                        predictions = self._raw_predictions(outputs[0], len(padded))
+                    inference_ms = inference_total_ms / max(1, len(padded))
+                    for local_index in range(len(chunk)):
+                        result = self._decode_one(
+                            predictions[local_index], outputs, local_index,
+                            images[local_index], paths[local_index], infos[local_index], inference_ms,
+                            float(conf), float(iou), class_filter, bool(agnostic_nms), int(max_det), int(max_nms),
+                        )
+                        result.speed["preprocess"] = preprocess_ms
+                        yield result
+                    load_started = time.perf_counter()
+            finally:
+                chunks.close()
 
         iterator = generate()
         return iterator if stream else list(iterator)

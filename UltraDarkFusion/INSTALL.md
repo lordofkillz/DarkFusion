@@ -35,7 +35,7 @@ python scripts/install-media-tools.py
 powershell -ExecutionPolicy Bypass -File scripts/install-windows-ml-runtime.ps1 -PythonPath "$env:CONDA_PREFIX\python.exe"
 python scripts/verify_install.py
 cd UltraDarkFusion
-python UltraDarkFusion_v5.2.py
+python UltraDarkFusion.py
 ```
 
 This folder's `requirements.txt` includes the root requirements so both paths

@@ -1,17 +1,284 @@
-"""Dataset statistics built from the analysis worker's existing scan records.
+"""Dataset statistics and cached image-only checks for the analysis worker.
 
-No dataset files are opened here. Charts use compact report data; the scatter
-plot uses a deterministic reservoir sample so large datasets stay responsive.
+Charts reuse scan records without opening dataset files. ImageCheckCache reads
+image bytes, never annotations; the scatter plot uses a bounded sample.
 """
 from collections import Counter, defaultdict
+from concurrent.futures import Future, ThreadPoolExecutor
+import hashlib
+import io
+import json
 import math
+from pathlib import Path
 import random
+import sqlite3
 
+from PIL import Image, UnidentifiedImageError, __version__ as PILLOW_VERSION
 from PyQt5 import QtCore, QtWidgets
 
 SCATTER_LIMIT = 5000
 HISTOGRAM_BINS = 50
 QUALITY_DEFAULTS = {"blur": 100.0, "dark": 50.0, "bright": 200.0, "contrast": 10.0}
+
+
+class ImageCheckCache:
+    """Worker-owned, content-addressed image facts; storage is best-effort.
+
+    Hash the bytes on every scan, including cache hits. Size/mtime alone cannot
+    detect a same-size replacement with preserved timestamps. Thresholds and
+    labels are deliberately excluded: findings are rebuilt on every scan.
+    """
+
+    VERSION = 1  # Bump when decoding/quality measurement semantics change.
+    MAX_ENTRIES = 250_000
+    COMMIT_BATCH = 128
+
+    def __init__(self, path, max_entries=MAX_ENTRIES):
+        import cv2
+        self.path = Path(path)
+        self.max_entries = max(1, int(max_entries))
+        self.connection = None
+        self.disabled = False
+        self.hits = self.misses = self._writes = self._pending = 0
+        self.version = f"image-checks:{self.VERSION}:pillow:{PILLOW_VERSION}:opencv:{cv2.__version__}".encode()
+
+    def _disable(self):
+        self.disabled = True
+        if self.connection is not None:
+            try:
+                self.connection.close()
+            except sqlite3.Error:
+                pass
+            self.connection = None
+
+    def _open(self):
+        if self.disabled:
+            return None
+        if self.connection is None:
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                self.connection = sqlite3.connect(str(self.path), timeout=0.1)
+                self.connection.execute("PRAGMA journal_mode=WAL")
+                self.connection.execute(
+                    "CREATE TABLE IF NOT EXISTS image_checks (cache_key TEXT PRIMARY KEY, payload TEXT NOT NULL)"
+                )
+            except (OSError, sqlite3.Error):
+                self._disable()
+        return self.connection
+
+    @staticmethod
+    def _valid(record, quality):
+        if not isinstance(record, dict) or set(record) != {"size", "metrics", "error"}:
+            return False
+        if record["error"] is not None:
+            return (isinstance(record["error"], str) and bool(record["error"])
+                    and record["size"] is None and record["metrics"] is None)
+        size = record["size"]
+        if (not isinstance(size, (tuple, list)) or len(size) != 2
+                or not all(type(value) is int and value > 0 for value in size)):
+            return False
+        metrics = record["metrics"]
+        if not quality:
+            return metrics is None
+        if not isinstance(metrics, dict) or set(metrics) != {"blur", "brightness", "contrast"}:
+            return False
+        try:
+            return (all(type(value) in (int, float) and math.isfinite(value) and value >= 0
+                        for value in metrics.values())
+                    and metrics["brightness"] <= 255 and metrics["contrast"] <= 255)
+        except (ValueError, TypeError, OverflowError):
+            return False
+
+    @staticmethod
+    def _inspect(source, verify, quality_function):
+        """Decode the same snapshot for verify/load/quality; never cache resource errors."""
+        from_bytes = isinstance(source, bytes)
+        stage = "decode"
+        try:
+            if verify:
+                with Image.open(io.BytesIO(source) if from_bytes else source) as image:
+                    image.verify()
+            with Image.open(io.BytesIO(source) if from_bytes else source) as image:
+                if verify:
+                    image.load()
+                size = list(image.size)
+                stage = "quality"
+                metrics = quality_function(image) if quality_function is not None else None
+            return {"size": size, "metrics": metrics, "error": None}, True
+        except Exception as error:
+            message = "Unrecognized image format." if isinstance(error, UnidentifiedImageError) else str(error)
+            record = {"size": None, "metrics": None, "error": message or type(error).__name__}
+            # Permission/file access errors never reach this byte-backed path.
+            # A transient quality-function or memory failure must be retried.
+            cacheable = from_bytes and stage == "decode" and isinstance(error, (OSError, SyntaxError))
+            return record, cacheable
+
+    @classmethod
+    def inspect_uncached(cls, path, *, verify=False, quality_function=None):
+        return cls._inspect(path, verify, quality_function)[0]
+
+    def read_image(self, path, *, verify=False, quality_function=None):
+        connection = self._open()
+        if connection is None:
+            self.misses += 1
+            return self.inspect_uncached(path, verify=verify, quality_function=quality_function)
+        try:
+            image_bytes = Path(path).read_bytes()
+        except OSError:
+            # Do not persist access failures or missing files as corrupt images.
+            self.misses += 1
+            return self.inspect_uncached(path, verify=verify, quality_function=quality_function)
+        key = self._key(image_bytes, verify, quality_function)
+        quality = quality_function is not None
+        record = self._lookup(key, quality)
+        if record is not None:
+            self.hits += 1
+            return record
+        self.misses += 1
+        record, cacheable = self._inspect(image_bytes, verify, quality_function)
+        self._remember(key, record, cacheable, quality)
+        return record
+
+    def _key(self, image_bytes, verify, quality_function):
+        digest = hashlib.sha256(self.version)
+        digest.update(bytes((bool(verify), quality_function is not None)))
+        digest.update(image_bytes)
+        return digest.hexdigest()
+
+    def _lookup(self, key, quality):
+        connection = self.connection
+        if connection is None:
+            return None
+        try:
+            row = connection.execute("SELECT payload FROM image_checks WHERE cache_key = ?", (key,)).fetchone()
+            record = json.loads(row[0]) if row else None
+            if self._valid(record, quality):
+                return record
+        except sqlite3.Error:
+            self._disable()
+        except (ValueError, TypeError, UnicodeError):
+            # Malformed payloads are misses and are replaced after inspection.
+            record = None
+        return None
+
+    def _remember(self, key, record, cacheable, quality):
+        connection = self.connection
+        if connection is not None and cacheable and self._valid(record, quality):
+            try:
+                connection.execute("INSERT OR REPLACE INTO image_checks(cache_key, payload) VALUES (?, ?)",
+                                   (key, json.dumps(record, allow_nan=False)))
+                self._writes += 1
+                self._pending += 1
+                if self._pending >= self.COMMIT_BATCH:
+                    connection.commit()
+                    self._pending = 0
+            except (sqlite3.Error, ValueError, TypeError):
+                self._disable()
+
+    def read_images(self, paths, *, verify=False, quality_function=None, should_cancel=lambda: False):
+        """Prepare four image snapshots/checks at a time; SQLite stays on caller.
+
+        Only consumed results are persisted. Closing/canceling the generator
+        joins its bounded workers before the owning scan closes this cache.
+        Small scans retain the existing single-image path.
+        """
+        if len(paths) < 8:
+            for path in paths:
+                if should_cancel():
+                    return
+                yield path, self.read_image(path, verify=verify, quality_function=quality_function)
+            return
+
+        def snapshot(path):
+            try:
+                image_bytes = Path(path).read_bytes()
+                return image_bytes, self._key(image_bytes, verify, quality_function)
+            except OSError:
+                return None, None
+
+        quality = quality_function is not None
+        executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="image-check")
+        pending = []
+        try:
+            for start in range(0, len(paths), 4):
+                if should_cancel():
+                    return
+                chunk = paths[start:start + 4]
+                try:
+                    large_files = sum(Path(path).stat().st_size for path in chunk) > 64 * 1024 * 1024
+                except OSError:
+                    large_files = False
+                if large_files:
+                    for path in chunk:
+                        if should_cancel():
+                            return
+                        yield path, self.read_image(path, verify=verify, quality_function=quality_function)
+                    continue
+                self._open()
+                snapshots = [executor.submit(snapshot, path) for path in chunk] if self.connection is not None else []
+                pending = list(snapshots)
+                checks = []
+                for index, path in enumerate(chunk):
+                    if should_cancel():
+                        return
+                    image_bytes, key = snapshots[index].result() if snapshots else (None, None)
+                    record = self._lookup(key, quality) if key is not None else None
+                    future = None
+                    if record is None:
+                        source = image_bytes if image_bytes is not None else path
+                        # Large decoded images run alone. Header inspection is
+                        # only for misses: cache hits still never open a decoder.
+                        try:
+                            with Image.open(io.BytesIO(source) if isinstance(source, bytes) else source) as image:
+                                large_image = image.width * image.height * 16 > 32 * 1024 * 1024
+                        except Exception:
+                            large_image = False
+                        if large_image:
+                            for job in pending:
+                                job.result()
+                            future = Future()
+                            future.set_result(self._inspect(source, verify, quality_function))
+                        else:
+                            future = executor.submit(self._inspect, source, verify, quality_function)
+                        pending.append(future)
+                    checks.append((path, key, record, future))
+                for path, key, record, future in checks:
+                    if should_cancel():
+                        return
+                    # An earlier image in this window may have the same content.
+                    duplicate = self._lookup(key, quality) if key is not None and record is None else None
+                    if record is not None or duplicate is not None:
+                        self.hits += 1
+                        yield path, record if record is not None else duplicate
+                    else:
+                        record, cacheable = future.result()
+                        self.misses += 1
+                        if key is not None:
+                            self._remember(key, record, cacheable, quality)
+                        yield path, record
+                pending = []
+        finally:
+            for future in pending:
+                future.cancel()
+            executor.shutdown(wait=True, cancel_futures=True)
+
+    def close(self):
+        connection = self.connection
+        if connection is None:
+            return
+        try:
+            if self._writes:
+                excess = connection.execute("SELECT COUNT(*) FROM image_checks").fetchone()[0] - self.max_entries
+                if excess > 0:
+                    connection.execute(
+                        "DELETE FROM image_checks WHERE rowid IN (SELECT rowid FROM image_checks ORDER BY rowid LIMIT ?)",
+                        (excess,),
+                    )
+                connection.commit()
+        except sqlite3.Error:
+            pass
+        finally:
+            self._disable()
 
 
 def annotation_metrics(parsed, image_size):

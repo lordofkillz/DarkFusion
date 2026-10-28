@@ -193,7 +193,7 @@ try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $client = New-Object Net.Http.HttpClient
     $client.Timeout = [TimeSpan]::FromMinutes(5)
-    $client.DefaultRequestHeaders.UserAgent.ParseAdd('DarkFusionSetup/5.2')
+    $client.DefaultRequestHeaders.UserAgent.ParseAdd(('DarkFusionSetup/{0}' -f $manifest.payload.version))
     $payload = Join-Path $cache 'payload.zip'
     if (-not (Test-Download $payload ([long]$manifest.payload.archive_size_bytes) ([string]$manifest.payload.sha256))) {
         $downloaded = @()

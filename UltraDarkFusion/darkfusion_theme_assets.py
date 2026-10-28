@@ -1,6 +1,6 @@
 """Optional DarkFusion art adapter. Qt5 only; no inference or annotation changes.
 
-Installed beside UltraDarkFusion_v5.2.py. The single apply_stylesheet hook calls
+Installed beside UltraDarkFusion.py. The single apply_stylesheet hook calls
 apply_theme_assets(window, selected_style, style_folder). Switching to any other
 theme restores the original icons and removes all decorative artwork.
 """

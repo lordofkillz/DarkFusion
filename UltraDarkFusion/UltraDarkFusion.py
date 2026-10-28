@@ -1,10 +1,15 @@
+from darkfusion_environment import configure_runtime
+from darkfusion_version import APP_VERSION
+configure_runtime()
+from darkfusion_environment import configure_gui_opencv_threads
+
 import warnings
 from darkfusion_windows_ml import configure as configure_onnx_runtime
 from darkfusion_windows_ml import settings as onnx_runtime_settings
 from darkfusion_inference import load_inference_model, inference_backend_for_path, normalize_inference_backend, read_onnx_model_names
 from darkfusion_dataset_statistics import (
     DatasetStatisticsWidget, QUALITY_DEFAULTS, build_statistics,
-    image_quality_metrics, quality_findings,
+    image_quality_metrics, quality_findings, ImageCheckCache,
 )
 from darkfusion_training_size import TrainingSizeAnalysis, candidate_sizes as training_candidate_sizes
 from darkfusion_verified_images import VerifiedImagesTracker, get_verified_images_for_scan
@@ -12,6 +17,27 @@ from darkfusion_shape_verifier import ShapeProfiler, shape_verification_score, s
 from darkfusion_borderline_llm_verifier import BorderlineLLMVerifier
 from darkfusion_ollama_auto_setup import ensure_ollama_ready, check_ollama_running
 from darkfusion_media_tools import yt_dlp_options
+from darkfusion_dataset_operations import (
+    delete_image_label_pair, natural_image_key, excluded_video_frames,
+    sparse_video_navigation, update_health_report_after_deletion, is_placeholder_path,
+    DatasetFileTransaction,
+)
+from darkfusion_propagation import (
+    LazyPropagationRecords, propagation_status, run_propagation_worker, sam3_frame_source,
+    save_propagation_outputs,
+    undo_propagation_outputs,
+    find_yolo_box_gaps, compute_yolo_box_gap_proposals,
+)
+from darkfusion_extraction import ExtractionCheckpoint, ExtractionWriteError, save_extraction_outputs
+from darkfusion_image_loading import OriginalImagePrefetch
+from darkfusion_gpu_memory import (
+    gpu_work, model_allowed as gpu_model_allowed, attach as attach_gpu_memory,
+    ensure_detector as ensure_gpu_detector, auto_label_resources, sam_batch_resources,
+    analysis_resources, release_worker_models, release_analysis_models, start_gpu_worker,
+    adopt_saved_training, GpuWorkBusy,
+)
+from darkfusion_video_preparation import LatestFramePreparation
+from darkfusion_video_capture import optimize_video_capture, negotiated_capture_properties
 import ast
 import os
 import xml.etree.ElementTree as ET
@@ -96,15 +122,14 @@ import matplotlib.patches as mpatches
 from perlin_noise import PerlinNoise
 from PyQt5.QtMultimedia import QMediaContent, QMediaPlayer
 from PyQt5.QtWidgets import QAction
-from sahi_predict_wrapperv5 import SahiPredictWrapper
+from darkfusion_sahi import SahiPredictWrapper
 from sahi.slicing import get_slice_bboxes as get_sahi_slice_bboxes
 from PyQt5.QtWidgets import (QDialog, QLineEdit,QPushButton, QSpinBox, QComboBox,QDoubleSpinBox)
-from ui_ultradarkfusion_v5_2 import Ui_mainWindow
+from ui_ultradarkfusion import Ui_mainWindow
 from PyQt5.QtCore import QItemSelectionModel
 import uuid
 from darkfusion_model_security import install_checkpoint_guard
 install_checkpoint_guard()
-from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_inpaint import StableDiffusionInpaintPipeline
 from yt_dlp import YoutubeDL
 from collections import defaultdict
 try:
@@ -1094,6 +1119,7 @@ PROJECT_SETTING_KEYS = {
     "reviewSearchText",
     "propagationOverwriteExisting",
     "roiState",
+    "activeRoiId",
     "stats",
     "anchors",
     "avg_iou",
@@ -1287,6 +1313,92 @@ QProgressBar#label_progress {
 """
 
 
+def dock_chrome_stylesheet(stylesheet, manifest=None):
+    """Theme-aware dock boundaries only; never style a canvas or its contents."""
+    # Ignore an earlier generated block when applying/scaling a theme again.
+    source = re.sub(r"/\* DarkFusion dock chrome start \*/.*?/\* DarkFusion dock chrome end \*/",
+                    "", stylesheet or "", flags=re.DOTALL)
+    source = re.sub(r"/\*.*?\*/", "", source, flags=re.DOTALL)
+    rules = re.findall(r"([^{}]+)\{([^{}]*)\}", source)
+
+    def css_color(selectors, properties):
+        result = None
+        for selector, body in rules:
+            if not set(part.strip() for part in selector.split(",")).intersection(selectors):
+                continue
+            for declaration in body.split(";"):
+                name, _, value = declaration.partition(":")
+                if name.strip().lower() not in properties:
+                    continue
+                matches = re.findall(r"#[0-9a-fA-F]{3,8}\b", value)
+                candidate = QColor(matches[-1] if matches else value.strip())
+                if candidate.isValid():
+                    result = candidate
+        return result
+
+    def color(name, fallback):
+        candidate = QColor(str((manifest or {}).get(name, "")))
+        return candidate if candidate.isValid() else fallback
+
+    def mix(first, second, amount):
+        return QColor(*(round(a * (1 - amount) + b * amount)
+                        for a, b in zip(first.getRgb()[:3], second.getRgb()[:3])))
+
+    panel = color("panel", css_color({"QDockWidget"}, {"background", "background-color"})
+                  or css_color({"QWidget", "QMainWindow"}, {"background", "background-color"}) or QColor("#171b21"))
+    border = color("border", css_color({"QDockWidget"}, {"border", "border-color"})
+                   or css_color({"QFrame", "QGroupBox"}, {"border", "border-color"})
+                   or mix(panel, QColor("white") if panel.lightness() < 128 else QColor("black"), .22))
+    accent = color("accent", css_color({"QPushButton:hover", "QLineEdit:focus"}, {"border", "border-color"})
+                   or css_color({"QTabBar::tab:selected", "QMenu::item:selected"}, {"background", "background-color"})
+                   or QColor("#65b7ff"))
+    separator = mix(panel, border, .45).name()
+    hover = mix(panel, accent, .22).name()
+    border, accent = border.name(), accent.name()
+    return f"""
+/* DarkFusion dock chrome start */
+QDockWidget {{
+    border: none;
+}}
+QDockWidget::title {{
+    border: 1px solid {border};
+    padding: 5px 10px;
+    text-align: left;
+    font-weight: 600;
+}}
+QWidget[darkfusionDockBody="true"] {{
+    border: 1px solid {border};
+    border-top: none;
+    border-bottom-left-radius: 3px;
+    border-bottom-right-radius: 3px;
+}}
+QDockWidget::close-button:hover, QDockWidget::float-button:hover {{
+    background-color: {hover};
+    border-color: {accent};
+}}
+QToolButton[darkfusionDockHelp="true"] {{
+    background: transparent;
+    border: 1px solid {border};
+    border-radius: 3px;
+    padding: 0px;
+    margin: 0px;
+    font-weight: 700;
+}}
+QToolButton[darkfusionDockHelp="true"]:hover {{
+    background-color: {hover};
+    border-color: {accent};
+}}
+QMainWindow::separator {{
+    width: 6px;
+    height: 6px;
+    margin: 0px;
+    background-color: {separator};
+}}
+QMainWindow::separator:hover {{ background-color: {accent}; }}
+/* DarkFusion dock chrome end */
+"""
+
+
 def connect_weak_bound_signal(signal, callback):
     """Connect a Qt signal to a bound method without keeping the owner alive."""
     weak_callback = weakref.WeakMethod(callback)
@@ -1331,23 +1443,12 @@ class DockHelpButtonController(QObject):
         self.button = QtWidgets.QToolButton(dock)
         self.button.setText("?")
         self.button.setObjectName(f"{dock.objectName()}_help_button")
+        self.button.setProperty("darkfusionDockHelp", True)
         self.button.setToolTip(f"About the {dock.windowTitle()} dock")
         self.button.setAccessibleName(f"Help for {dock.windowTitle()} dock")
         self.button.setAutoRaise(True)
         self.button.setCursor(Qt.PointingHandCursor)
         self.button.setFixedSize(20, 20)
-        self.button.setStyleSheet(
-            "QToolButton {"
-            "font-weight: 700;"
-            "border: 1px solid rgba(128, 144, 160, 120);"
-            "border-radius: 4px;"
-            "padding: 0;"
-            "}"
-            "QToolButton:hover {"
-            "border-color: #38bdf8;"
-            "background-color: rgba(56, 189, 248, 45);"
-            "}"
-        )
         self.button.clicked.connect(callback)
         dock.installEventFilter(self)
         dock.topLevelChanged.connect(self._on_top_level_changed)
@@ -1654,23 +1755,21 @@ def read_json_file(file_path, default=None):
 def write_json_file_atomic(file_path, data):
     file_path = os.path.abspath(file_path)
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
-    tmp_path = f"{file_path}.{os.getpid()}.tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4)
+    descriptor, tmp_path = tempfile.mkstemp(prefix=".darkfusion-json-", suffix=".tmp", dir=os.path.dirname(file_path))
     try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            descriptor = None
+            json.dump(data, stream, indent=4)
         os.replace(tmp_path, file_path)
-    except PermissionError:
-        try:
-            if os.path.exists(file_path):
-                os.remove(file_path)
-            os.replace(tmp_path, file_path)
-        except Exception:
-            if os.path.exists(tmp_path):
-                try:
-                    os.remove(tmp_path)
-                except OSError:
-                    pass
-            raise
+        tmp_path = None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if tmp_path is not None:
+            try:
+                os.remove(tmp_path)
+            except FileNotFoundError:
+                pass
 
 
 def label_file_version(file_path):
@@ -1694,7 +1793,16 @@ def class_name_index(class_name, class_names):
 
 
 def write_label_text_atomic(file_path, text):
-    """Replace a complete annotation file; a failed write preserves the old file."""
+    """Skip byte-identical content; replace real changes atomically."""
+    encoded = text.encode("utf-8")
+    try:
+        with open(file_path, "rb") as existing:
+            if existing.read(len(encoded) + 1) == encoded:
+                return
+    except OSError:
+        # Missing/unreadable old content must retain the normal atomic save
+        # path, including support for a writable but unreadable target.
+        pass
     directory = os.path.dirname(os.path.abspath(file_path))
     descriptor, temporary_path = tempfile.mkstemp(prefix=".darkfusion-label-", suffix=".tmp", dir=directory)
     try:
@@ -2252,6 +2360,10 @@ class FastFrameViewer(QtWidgets.QWidget):
         self._active_renderer = "cpu"
         self._renderer_fallback_reason = ""
         self._renderer_generation = 0
+        self._renderer_pending = False
+        self._native_video_window = None
+        self._native_video_container = None
+        self._native_video_failed = False
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -2270,7 +2382,8 @@ class FastFrameViewer(QtWidgets.QWidget):
                 self._view_box.setMouseEnabled(x=False, y=False)
                 self._view_box.setDefaultPadding(0)
                 self._view_box.invertY(True)
-                self._image_item = pg.ImageItem(axisOrder="row-major")
+                from darkfusion_video_display import VideoImageItem
+                self._image_item = VideoImageItem(axisOrder="row-major")
                 self._image_item.setAutoDownsample(False)
                 self._view_box.addItem(self._image_item)
                 layout.addWidget(self._pg_widget)
@@ -2302,6 +2415,8 @@ class FastFrameViewer(QtWidgets.QWidget):
     def renderer_status_text(self):
         if self.active_renderer() == "gpu":
             return "GPU active (OpenGL)"
+        if self._renderer_pending:
+            return "GPU display initializes when video is shown"
         reason = str(getattr(self, "_renderer_fallback_reason", "") or "").strip()
         if reason and self.renderer_mode() in {"auto", "gpu"}:
             return f"CPU fallback — {reason}"
@@ -2333,11 +2448,13 @@ class FastFrameViewer(QtWidgets.QWidget):
         return True, ""
 
     def _activate_cpu_renderer(self, reason=""):
+        self._close_native_video_surface()
         self._renderer_generation += 1
         self._active_renderer = "cpu"
         self._renderer_fallback_reason = str(reason or "")
         pg_widget = getattr(self, "_pg_widget", None)
         if pg_widget is not None:
+            pg_widget.show()
             viewport = pg_widget.viewport()
             if isinstance(viewport, getattr(QtWidgets, "QOpenGLWidget", ())):
                 cpu_viewport = QtWidgets.QWidget(pg_widget)
@@ -2346,11 +2463,72 @@ class FastFrameViewer(QtWidgets.QWidget):
             pg_widget.setViewportUpdateMode(QtWidgets.QGraphicsView.BoundingRectViewportUpdate)
             pg_widget.viewport().update()
 
+    def _close_native_video_surface(self):
+        surface = getattr(self, '_native_video_window', None)
+        container = getattr(self, '_native_video_container', None)
+        self._native_video_window = self._native_video_container = None
+        if container is not None:
+            container.hide()
+        if surface is not None:
+            surface.shutdown()
+        if container is not None:
+            container.deleteLater()
+
+    def _native_video_surface_failed(self, message):
+        sender = self.sender()
+        if isinstance(sender, QtGui.QOpenGLWindow) and sender is not self._native_video_window:
+            return
+        if self._native_video_window is None:
+            return
+        self._close_native_video_surface()
+        self._native_video_failed = True
+        self._active_renderer = 'cpu'
+        self._pg_widget.show()
+        logger.debug('Native video surface unavailable; trying the compatible GPU view: %s', message)
+        self._activate_gpu_renderer()
+        if self._source_frame_ref is not None:
+            self.set_frame(self._source_frame_ref)
+
+    def display_viewport(self):
+        """The active GPU surface, also used by local playback diagnostics."""
+        if self._native_video_window is not None and self.active_renderer() == 'gpu':
+            return self._native_video_window
+        widget = getattr(self, '_pg_widget', None)
+        return widget.viewport() if widget is not None else None
+
     def _activate_gpu_renderer(self):
         available, reason = self._gpu_renderer_available()
         if not available:
             self._activate_cpu_renderer(reason)
             return False
+
+        if QtGui.QGuiApplication.platformName() == 'windows' and not self._native_video_failed:
+            try:
+                from darkfusion_video_window import VideoWindow
+                surface = VideoWindow()
+                surface.immediate = True
+                self._native_video_window = surface
+                container = QtWidgets.QWidget.createWindowContainer(surface, self)
+                self._native_video_container = container
+                container.setFocusPolicy(Qt.NoFocus)
+                container.setGeometry(self._pg_widget.geometry())
+                self.layout().addWidget(container)
+                surface.failed.connect(self._native_video_surface_failed, Qt.QueuedConnection)
+                self._pg_widget.hide()
+                surface.set_frame(self._frame_ref if self._frame_ref is not None else self._source_frame_ref,
+                                  self.quality_mode() != 'fast')
+                container.show()
+                self._renderer_generation += 1
+                generation = self._renderer_generation
+                self._active_renderer = 'gpu'
+                self._renderer_fallback_reason = ''
+                QtCore.QTimer.singleShot(250, lambda generation=generation: self._verify_gpu_renderer(generation))
+                return True
+            except Exception as error:
+                self._close_native_video_surface()
+                self._native_video_failed = True
+                self._pg_widget.show()
+                logger.debug('Native video surface setup failed: %s', error)
 
         try:
             pg_widget = self._pg_widget
@@ -2386,6 +2564,11 @@ class FastFrameViewer(QtWidgets.QWidget):
             return
         if self.active_renderer() != "gpu" or not self.isVisible():
             return
+        surface = self._native_video_window
+        if surface is not None:
+            if not surface.isValid() or surface.context() is None:
+                self._native_video_surface_failed('Native OpenGL surface initialization failed')
+            return
         viewport = getattr(self, "_pg_widget", None)
         viewport = viewport.viewport() if viewport is not None else None
         valid = isinstance(viewport, getattr(QtWidgets, "QOpenGLWidget", ()))
@@ -2402,13 +2585,29 @@ class FastFrameViewer(QtWidgets.QWidget):
         """Select the display renderer while retaining an automatic CPU fallback."""
         mode = video_playback_renderer_key(mode)
         self._renderer_mode = mode
+        self._renderer_pending = False
         if mode == "cpu":
             self._activate_cpu_renderer()
-        elif not self._activate_gpu_renderer():
-            # _activate_gpu_renderer records the reason and completes fallback.
-            pass
+            if self._source_frame_ref is not None:
+                self.set_frame(self._source_frame_ref)
+        elif self.active_renderer() != "gpu":
+            # Creating an OpenGL child while the main window is restoring its
+            # styled docks can strand Qt's Windows event loop in native message
+            # handling. The idle image editor needs no video GPU surface. Keep
+            # the user's choice and initialize only for a visible video frame.
+            self._renderer_pending = True
+            self._apply_pending_renderer()
         self.update()
         return mode
+
+    def _apply_pending_renderer(self):
+        if (not self._renderer_pending or not self.isVisible()
+                or self._source_frame_ref is None):
+            return
+        # Viewport replacement can synchronously cause a resize/show event.
+        # Clear the flag first, so those events cannot re-enter initialization.
+        self._renderer_pending = False
+        self._activate_gpu_renderer()
 
     def quality_mode(self):
         return video_playback_quality_key(self._quality_mode)
@@ -2449,7 +2648,10 @@ class FastFrameViewer(QtWidgets.QWidget):
         if frame is None or frame.size == 0:
             return None
         target = self.size()
-        if getattr(self, "_pg_widget", None) is not None:
+        container = getattr(self, '_native_video_container', None)
+        if container is not None and self.active_renderer() == 'gpu':
+            target = container.size()
+        elif getattr(self, "_pg_widget", None) is not None:
             viewport = self._pg_widget.viewport()
             if viewport is not None:
                 target = viewport.size()
@@ -2485,6 +2687,8 @@ class FastFrameViewer(QtWidgets.QWidget):
         return cv2.resize(frame, target, dst=destination, interpolation=interpolation)
 
     def clear(self):
+        if self._native_video_window is not None:
+            self._native_video_window.set_frame(None)
         self._frame_ref = None
         self._source_frame_ref = None
         self._frame_size = None
@@ -2526,15 +2730,24 @@ class FastFrameViewer(QtWidgets.QWidget):
         if not frame.flags.c_contiguous:
             frame = np.ascontiguousarray(frame)
         self._source_frame_ref = frame
+        self._apply_pending_renderer()
         frame = self._frame_for_display(frame)
         if not frame.flags.c_contiguous:
             frame = np.ascontiguousarray(frame)
         height, width = frame.shape[:2]
         frame_size = (width, height)
         self._frame_ref = frame
+        if self._native_video_window is not None and self.active_renderer() == 'gpu':
+            self._native_video_window.set_frame(frame, self.quality_mode() != 'fast')
+            # The hidden graphics view is refreshed from the retained original
+            # when switching renderers. Updating it here schedules a second scene
+            # update for every native video frame.
+            return
 
         if self._image_item is not None:
-            self._image_item.setImage(frame, autoLevels=False, levels=(0, 255))
+            # Frames are already full-range uint8 RGB. Supplying identity levels
+            # makes pyqtgraph rescale every channel instead of wrapping RGB888.
+            self._image_item.setImage(frame, autoLevels=False, levels=None)
 
             if frame_size != self._frame_size:
                 rect = QtCore.QRectF(0, 0, width, height)
@@ -2581,6 +2794,7 @@ class FastFrameViewer(QtWidgets.QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        self._apply_pending_renderer()
         if self.active_renderer() == "gpu":
             generation = self._renderer_generation
             QtCore.QTimer.singleShot(
@@ -6143,7 +6357,13 @@ class SegmentationDrawer(QGraphicsPolygonItem):
         base_width = annotation_outline_width(self)
         hover_width = annotation_hover_width(self)
 
-        if flash_color is not None:
+        if base_alpha == 0:
+            fill_color = self._get_class_color(alpha=0)
+            outline_width = hover_width if is_hovered else base_width
+            if flash_color is not None and flash_color.alpha() > 0:
+                outline_color = QColor(flash_color)
+                outline_color.setAlpha(255)
+        elif flash_color is not None:
             fill_color = flash_color
             outline_width = hover_width if is_hovered else base_width
         elif is_hovered:
@@ -7382,6 +7602,238 @@ class BoundingBox:
 
 # Creates a graphical user interface (GUI) for the settings dialog.
 
+class CollapsibleSettingsGroup(QtWidgets.QGroupBox):
+    """Shared themed category; collapsing it never disables its controls."""
+
+    expandedChanged = QtCore.pyqtSignal(bool)
+
+    def __init__(self, title, parent=None, expanded=True):
+        super().__init__(parent)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Maximum)
+        self.setStyleSheet("CollapsibleSettingsGroup { margin-top: 0px; padding: 4px; }")
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(0)
+
+        self.header = QtWidgets.QToolButton(self)
+        self.header.setText(title)
+        self.header.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.header.setCheckable(True)
+        self.header.setChecked(bool(expanded))
+        self.header.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+        self.header.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        self.header.setFocusPolicy(Qt.StrongFocus)
+        self.header.setCursor(Qt.PointingHandCursor)
+        layout.addWidget(self.header)
+
+        self.content = QtWidgets.QWidget(self)
+        self.content.setProperty("settingsSectionContent", True)
+        self.content.setStyleSheet(
+            'QWidget[settingsSectionContent="true"] { background-color: transparent; }'
+        )
+        self.content.setVisible(bool(expanded))
+        layout.addWidget(self.content)
+        self.header.toggled.connect(self._set_expanded)
+
+    def _set_expanded(self, expanded):
+        self.header.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+        self.content.setVisible(expanded)
+        expanded_policy = getattr(self, "_expanded_size_policy", None)
+        if expanded_policy is not None:
+            policy = QtWidgets.QSizePolicy(expanded_policy)
+            if not expanded:
+                policy.setVerticalPolicy(QtWidgets.QSizePolicy.Maximum)
+            self.setSizePolicy(policy)
+        self.updateGeometry()
+        self.expandedChanged.emit(expanded)
+
+
+class CollapsibleSectionsController(QtCore.QObject):
+    """Apply the Settings category style without replacing any working controls.
+
+    Wrap the original group, preserving its layout, object name, signals and
+    explicit child visibility. This also covers dialogs created after startup.
+    """
+
+    BODY_STYLE = '''
+        QWidget[collapsibleSectionBody="true"] {
+            border: none; margin: 0px; padding: 0px; background: transparent;
+        }
+        QGroupBox[collapsibleSectionBody="true"]::title {
+            width: 0px; height: 0px; padding: 0px; border: none;
+            color: transparent; background: transparent;
+        }
+    '''
+
+    def __init__(self, host):
+        super().__init__(host)
+        self.host = host
+        self._installing = False
+        # C++ parenting alone does not keep Python wrapper attributes alive.
+        # Keep the original group/header pair until Qt destroys that tool.
+        self._sections = {}
+        self._app = QtWidgets.QApplication.instance()
+        self._app.installEventFilter(self)
+        self.install_tree(host)
+
+    def _belongs_to_host(self, widget):
+        current = widget
+        while current is not None:
+            if current is self.host:
+                return True
+            current = current.parent()
+        return False
+
+    def _source_title(self, group):
+        if not isinstance(group, QtWidgets.QGroupBox):
+            return str(group.property("collapsibleSectionTitle") or "")
+        translator = getattr(self.host, "ui_translation", None)
+        if translator is not None:
+            source = translator.source_text(group, "title")
+            if source:
+                return source
+        return group.title()
+
+    def section_key(self, group):
+        window = group.window()
+        # Generated controls have stable object names. Dialogs built in Python
+        # use their source category title instead, independent of translated UI.
+        scope = window.objectName() or type(window).__name__
+        if isinstance(window, QtWidgets.QDialog):
+            translator = getattr(self.host, "ui_translation", None)
+            title = translator.source_text(window, "window_title") if translator else ""
+            scope += ":" + (title or window.windowTitle())
+        parts = []
+        current = group
+        while current is not None and current is not window:
+            if not isinstance(current, CollapsibleSettingsGroup) and not current.property("settingsSectionContent"):
+                name = current.objectName()
+                if name:
+                    parts.append(name)
+            current = current.parentWidget()
+        if not group.objectName():
+            parts.insert(0, self._source_title(group))
+        return scope + "/" + "/".join(reversed(parts))
+
+    def _remember(self, key, expanded):
+        settings = self.host.settings
+        saved = settings.get("collapsibleSections", {})
+        states = dict(saved) if isinstance(saved, dict) else {}
+        states[key] = bool(expanded)
+        settings["collapsibleSections"] = states
+        if hasattr(self.host, "queue_settings_save"):
+            self.host.queue_settings_save(delay_ms=150)
+        elif hasattr(self.host, "saveSettings"):
+            self.host.saveSettings()
+
+    def install_tree(self, root):
+        if self._installing or not self._belongs_to_host(root):
+            return
+        self._installing = True
+        try:
+            groups = ([root] if isinstance(root, QtWidgets.QGroupBox) else [])
+            groups += root.findChildren(QtWidgets.QGroupBox)
+            groups += [frame for frame in root.findChildren(QtWidgets.QFrame)
+                       if frame.property("collapsibleSectionTitle")]
+            for section in groups:
+                if (isinstance(section, CollapsibleSettingsGroup) and section.property("persistCollapseState")
+                        and not getattr(section, "_collapse_state_registered", False)):
+                    key = self.section_key(section)
+                    saved = self.host.settings.get("collapsibleSections", {})
+                    expanded = saved.get(key) if isinstance(saved, dict) else None
+                    if isinstance(expanded, bool):
+                        section.header.setChecked(expanded)
+                    section.expandedChanged.connect(lambda value, key=key: self._remember(key, value))
+                    section._collapse_state_registered = True
+                    identity = id(section)
+                    self._sections[identity] = (None, section)
+                    section.setProperty("collapsibleSectionIdentity", str(identity))
+                    section.destroyed.connect(self._forget_section)
+            # Capture paths before wrapping any ancestors.
+            candidates = [(group, self.section_key(group)) for group in groups if (
+                not isinstance(group, CollapsibleSettingsGroup)
+                and not getattr(group, "_collapsible_section", None)
+                and not group.property("collapsibleSectionBody")
+                and not group.property("collapsibleSectionSkip")
+                and not (isinstance(group, QtWidgets.QGroupBox) and group.isCheckable())
+                and self._source_title(group).strip()
+                and group.layout() is not None and group.layout().count()
+            )]
+            for group, key in candidates:
+                self._wrap_group(group, key)
+        finally:
+            self._installing = False
+
+    def _wrap_group(self, group, key):
+        parent = group.parentWidget()
+        if parent is None or parent.layout() is None:
+            return
+        saved = self.host.settings.get("collapsibleSections", {})
+        expanded = saved.get(key, True) if isinstance(saved, dict) else True
+        expanded = expanded if isinstance(expanded, bool) else True
+        hidden = group.isHidden()
+        section = CollapsibleSettingsGroup(self._source_title(group), parent, expanded=expanded)
+        section.setObjectName((group.objectName() or "category") + "_section")
+        section.header.setObjectName(section.objectName() + "_header")
+        section.header.setAccessibleName(section.header.text())
+        section.header.setToolTip("Expand or collapse this category. Running tasks are not stopped.")
+        section.content.setObjectName(section.objectName() + "_content")
+        section._expanded_size_policy = QtWidgets.QSizePolicy(group.sizePolicy())
+        policy = QtWidgets.QSizePolicy(section._expanded_size_policy)
+        if not expanded:
+            policy.setVerticalPolicy(QtWidgets.QSizePolicy.Maximum)
+        section.setSizePolicy(policy)
+        item = parent.layout().replaceWidget(group, section, Qt.FindChildrenRecursively)
+        if item is None:
+            section.deleteLater()
+            return
+        section_layout = QtWidgets.QVBoxLayout(section.content)
+        section_layout.setContentsMargins(0, 0, 0, 0)
+        section_layout.setSpacing(0)
+        section_layout.addWidget(group)
+        group.setProperty("collapsibleSectionBody", True)
+        group.setStyleSheet(self.BODY_STYLE)
+        group._collapsible_section = section
+        section._source_group = group
+        section.content._source_group = group
+        group.setVisible(not hidden)
+        section.setVisible(not hidden)
+        section.expandedChanged.connect(lambda value, key=key: self._remember(key, value))
+        identity = id(group)
+        self._sections[identity] = (group, section)
+        group.setProperty("collapsibleSectionIdentity", str(identity))
+        group.destroyed.connect(self._forget_section)
+        del item  # replaceWidget transfers ownership of the old layout item.
+
+    @QtCore.pyqtSlot(QtCore.QObject)
+    def _forget_section(self, destroyed):
+        identity = destroyed.property("collapsibleSectionIdentity")
+        if identity:
+            self._sections.pop(int(identity), None)
+
+    def eventFilter(self, obj, event):
+        if self._installing:
+            return False
+        kind = event.type()
+        if kind == QtCore.QEvent.Show and isinstance(obj, (QtWidgets.QDialog, QtWidgets.QMainWindow, QtWidgets.QGroupBox)):
+            self.install_tree(obj)
+        elif kind in (QtCore.QEvent.ShowToParent, QtCore.QEvent.HideToParent) and isinstance(obj, QtWidgets.QWidget):
+            section = getattr(obj, "_collapsible_section", None)
+            if section is not None:
+                # Explicit feature hide/show still affects the whole category;
+                # hiding an ancestor while collapsing must not hide the header.
+                section.setVisible(not obj.isHidden())
+        elif kind == QtCore.QEvent.LayoutRequest:
+            group = getattr(obj, "_source_group", None)
+            section = (getattr(group, "_collapsible_section", None)
+                       if group is not None and not sip.isdeleted(group) else None)
+            if (section is not None and not sip.isdeleted(section) and isinstance(group, QtWidgets.QGroupBox)
+                    and group.title() and section.header.text() != group.title()):
+                section.header.setText(group.title())
+                section.header.setAccessibleName(group.title())
+        return False
+
+
 class SettingsDialog(QtWidgets.QDialog):
 
     def __init__(self, parent=None):
@@ -7432,10 +7884,28 @@ class SettingsDialog(QtWidgets.QDialog):
         self.init_general_tab()
         self.init_drawing_tab()
         self.init_video_tab()
+        for tab in (self.keybinds_tab, self.drawing_tab, self.video_tab):
+            self._scroll_settings_tab(tab)
 
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
         buttons.rejected.connect(self.accept)
         main_layout.addWidget(buttons)
+
+    @staticmethod
+    def _scroll_settings_tab(tab):
+        """Keep expanded categories reachable at smaller window/UI scales."""
+        original_layout = tab.layout()
+        if original_layout is None:
+            return
+        content = QtWidgets.QWidget()
+        content.setLayout(original_layout)
+        scroll = QtWidgets.QScrollArea(tab)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        scroll.setWidget(content)
+        layout = QtWidgets.QVBoxLayout(tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(scroll)
 
     def save_xy_lines_setting(self, checked):
         self.parent().settings["showXYLines"] = bool(checked)
@@ -7778,7 +8248,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.annotation_fill_spinbox.valueChanged.connect(
             lambda value: self.save_existing_drawing_control("shade_slider", "shadeSlider", value)
         )
-        markers_form.addRow("Fill opacity:", self.annotation_fill_spinbox)
+        markers_form.addRow("Label opacity:", self.annotation_fill_spinbox)
 
         self.annotation_font_spinbox = mirrored_spinbox("font_size_slider", 3, 10, 5, " pt")
         self.annotation_font_spinbox.setToolTip("Class label text size.")
@@ -7937,6 +8407,28 @@ class SettingsDialog(QtWidgets.QDialog):
         )
         playback_layout.addRow("Capture Buffer:", self.video_buffer_mode_combo)
 
+        self.video_stream_quality_combo = QtWidgets.QComboBox()
+        self.video_stream_quality_combo.setObjectName("video_stream_quality_combo")
+        self.video_stream_quality_combo.addItem("1080p (recommended)", "1080")
+        self.video_stream_quality_combo.addItem("720p (lower bandwidth)", "720")
+        self.video_stream_quality_combo.addItem("Best available (higher bandwidth)", "best")
+        stream_quality = video_stream_quality_key(
+            self.parent().settings.get("videoStreamQuality", "1080")
+        )
+        self.video_stream_quality_combo.setCurrentIndex(
+            self.video_stream_quality_combo.findData(stream_quality)
+        )
+        self.video_stream_quality_combo.setToolTip(
+            "Source resolution for YouTube/website playback links, preferring compatible H.264 streams. "
+            "Higher resolution preserves small-object detail but uses more bandwidth and decoding time. "
+            "This is separate from display scaling and FPS. Applies the next time a link is opened; "
+            "it does not change queued downloads or local video files."
+        )
+        self.video_stream_quality_combo.currentIndexChanged.connect(
+            self.on_video_stream_quality_changed
+        )
+        playback_layout.addRow("Website stream quality:", self.video_stream_quality_combo)
+
         playback_note = QtWidgets.QLabel(
             "Every input uses this display path. High performs Area/Lanczos resampling for maximum image quality; "
             "the GPU renderer handles final presentation and detection overlays remain anti-aliased. "
@@ -8069,6 +8561,10 @@ class SettingsDialog(QtWidgets.QDialog):
         mode = self.video_buffer_mode_combo.currentData()
         self.save_video_setting("videoBufferMode", mode)
 
+    def on_video_stream_quality_changed(self, _index):
+        quality = video_stream_quality_key(self.video_stream_quality_combo.currentData())
+        self.save_video_setting("videoStreamQuality", quality)
+
     def on_video_preset_changed(self, preset_text):
         """Apply video preset and update FPS spinbox."""
         presets = {
@@ -8100,13 +8596,45 @@ class SettingsDialog(QtWidgets.QDialog):
             if hasattr(parent, "saveSettings"):
                 parent.saveSettings()
 
+    def _general_settings_group(self, key, title):
+        states = self.parent().settings.get("generalSettingsSections", {})
+        expanded = states.get(key, True) if isinstance(states, dict) else True
+        expanded = expanded if isinstance(expanded, bool) else True
+        group = CollapsibleSettingsGroup(title, expanded=expanded)
+        group.setObjectName(f"general_settings_{key}")
+        group.header.setObjectName(f"general_settings_{key}_header")
+        group.content.setObjectName(f"general_settings_{key}_content")
+        group.expandedChanged.connect(
+            lambda expanded, key=key: self.save_general_section_state(key, expanded)
+        )
+        self.general_settings_sections[key] = group
+        return group
+
+    def save_general_section_state(self, key, expanded):
+        parent = self.parent()
+        saved = parent.settings.get("generalSettingsSections", {})
+        states = dict(saved) if isinstance(saved, dict) else {}
+        states[key] = bool(expanded)
+        parent.settings["generalSettingsSections"] = states
+        parent.saveSettings()
+
     def init_general_tab(self):
-        layout = QtWidgets.QVBoxLayout(self.general_tab)
+        outer_layout = QtWidgets.QVBoxLayout(self.general_tab)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        self.general_scroll_area = QtWidgets.QScrollArea(self.general_tab)
+        self.general_scroll_area.setObjectName("general_settings_scroll_area")
+        self.general_scroll_area.setWidgetResizable(True)
+        self.general_scroll_area.setFrameShape(QtWidgets.QFrame.NoFrame)
+        content = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(content)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
+        self.general_scroll_area.setWidget(content)
+        outer_layout.addWidget(self.general_scroll_area)
+        self.general_settings_sections = {}
 
-        appearance_group = QtWidgets.QGroupBox("Appearance")
-        appearance_layout = QtWidgets.QFormLayout(appearance_group)
+        appearance_group = self._general_settings_group("appearance", "Appearance")
+        appearance_layout = QtWidgets.QFormLayout(appearance_group.content)
         appearance_layout.setLabelAlignment(Qt.AlignRight)
         appearance_layout.setHorizontalSpacing(12)
         appearance_layout.setVerticalSpacing(8)
@@ -8181,8 +8709,8 @@ class SettingsDialog(QtWidgets.QDialog):
 
         layout.addWidget(appearance_group)
 
-        display_group = QtWidgets.QGroupBox("Display")
-        display_layout = QtWidgets.QGridLayout(display_group)
+        display_group = self._general_settings_group("display", "Display")
+        display_layout = QtWidgets.QGridLayout(display_group.content)
         display_layout.setContentsMargins(12, 12, 12, 12)
         display_layout.setHorizontalSpacing(24)
         display_layout.setVerticalSpacing(8)
@@ -8247,8 +8775,8 @@ class SettingsDialog(QtWidgets.QDialog):
         display_layout.setColumnStretch(1, 1)
         layout.addWidget(display_group)
 
-        audio_group = QtWidgets.QGroupBox("Audio")
-        audio_layout = QtWidgets.QVBoxLayout(audio_group)
+        audio_group = self._general_settings_group("audio", "Audio")
+        audio_layout = QtWidgets.QVBoxLayout(audio_group.content)
         audio_layout.setContentsMargins(12, 12, 12, 12)
         audio_layout.setSpacing(8)
         self.mute_audio_checkbox = QtWidgets.QCheckBox("Mute audio")
@@ -8292,8 +8820,8 @@ class SettingsDialog(QtWidgets.QDialog):
 
         display_layout.addLayout(crosshair_row, 2, 1)
 
-        preview_group = QtWidgets.QGroupBox("Review Preview")
-        preview_layout = QtWidgets.QFormLayout(preview_group)
+        preview_group = self._general_settings_group("review_preview", "Review Preview")
+        preview_layout = QtWidgets.QFormLayout(preview_group.content)
         preview_layout.setLabelAlignment(Qt.AlignRight)
         preview_layout.setHorizontalSpacing(12)
         preview_layout.setVerticalSpacing(8)
@@ -8892,6 +9420,54 @@ class InvalidAnnotationError(Exception): ...
 class InvalidImageError(Exception): ...
 
 
+class DatasetNaturalSortWorker(QThread):
+    """Sort an immutable snapshot without any filesystem calls or UI work."""
+    completed = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, image_files, directory, parent=None):
+        super().__init__(parent)
+        self.image_files = tuple(image_files)
+        self.directory = directory
+
+    def run(self):
+        try:
+            ordered = sorted(self.image_files, key=natural_image_key)
+            if not self.isInterruptionRequested():
+                self.completed.emit(ordered)
+        except Exception as error:
+            self.failed.emit(str(error))
+
+
+class GridImageDeleteWorker(QThread):
+    """Delete a checked snapshot; never access scene or widget state here."""
+    progress = pyqtSignal(int, int)
+    completed = pyqtSignal(object)
+
+    def __init__(self, image_files, directory, parent=None):
+        super().__init__(parent)
+        self.image_files = tuple(image_files)
+        self.directory = directory
+
+    def run(self):
+        deleted, failures = [], []
+        total = len(self.image_files)
+        for index, image_file in enumerate(self.image_files, 1):
+            if self.isInterruptionRequested():
+                break
+            try:
+                delete_image_label_pair(image_file)
+                deleted.append(image_file)
+            except Exception as error:
+                failures.append(f"{os.path.basename(image_file)}: {error}")
+                logger.error("Could not delete grid image pair %s: %s", image_file, error)
+            if index % 25 == 0 or index == total:
+                self.progress.emit(index, total)
+        self.completed.emit({"deleted_files": deleted, "delete_failures": failures,
+                             "directory": self.directory,
+                             "canceled": self.isInterruptionRequested()})
+
+
 class DatasetDirectoryScanWorker(QThread):
     """Read an image directory off the UI thread after its contents change."""
 
@@ -8953,6 +9529,7 @@ class DatasetAnalysisWorker(QThread):
     def is_cancel_requested(self):
         return bool(self._cancel_requested)
 
+    @release_analysis_models
     def run(self):
         try:
             result = self.scanner._run_scan_background(
@@ -8996,8 +9573,8 @@ class ScanAnnotations(QObject):
     """
     Safe dataset health check.
 
-    This scanner only reads dataset files and writes a DarkFusion report under
-    .darkfusion/scan_report.json. The scan itself does not rewrite labels,
+    This scanner only reads dataset files and writes its report and image-check
+    cache under .darkfusion. The scan itself does not rewrite labels,
     strip metadata, delete JSON files, or move bad files. The report dialog can
     move a selected issue into review or delete files matched by its filters,
     only after the user confirms the action.
@@ -9133,6 +9710,7 @@ class ScanAnnotations(QObject):
         self.annotation_family_records = []
         self.dominant_annotation_family = ""
         self._image_size_cache = {}
+        self._image_check_cache = None
         self._statistics_label_states = {}
         self._quality_records = {}
         self._ambiguous_image_stems = set()
@@ -9623,23 +10201,31 @@ class ScanAnnotations(QObject):
             label_files.append(self._normalize_path(entry.path))
         return sorted(label_files)
 
-    def _read_image_size(self, image_path):
+    def _read_image_size(self, image_path, *, facts=None):
         try:
-            if self._scan_check_enabled("image_checks"):
-                with Image.open(image_path) as img:
-                    img.verify()
-            with Image.open(image_path) as img:
-                if self._scan_check_enabled("image_checks"):
-                    img.load()
-                if self._scan_check_enabled("quality_checks"):
-                    metrics = image_quality_metrics(img)
-                    self._quality_records[image_path] = metrics
-                    for kind, message in quality_findings(metrics, self._scan_quality_thresholds):
-                        self.issues.append(self._make_issue(
-                            kind, "info", image_path, message,
-                            suggestion="Review image quality before removing or replacing it. Content and resolution affect these scores."
-                        ))
-                return img.size
+            cache = getattr(self, "_image_check_cache", None)
+            verify = self._scan_check_enabled("image_checks")
+            quality = self._scan_check_enabled("quality_checks")
+            # Label/statistics-only scans need headers, not full-file hashing.
+            read_image = (cache.read_image if cache is not None and (verify or quality)
+                          else ImageCheckCache.inspect_uncached)
+            if facts is None:
+                facts = read_image(
+                    image_path, verify=verify,
+                    quality_function=image_quality_metrics if quality else None,
+                )
+            if facts["error"] is not None:
+                raise OSError(facts["error"])
+            metrics = facts["metrics"]
+            if metrics is not None:
+                self._quality_records[image_path] = metrics
+                # Cached facts, fresh decisions: thresholds may have changed.
+                for kind, message in quality_findings(metrics, self._scan_quality_thresholds):
+                    self.issues.append(self._make_issue(
+                        kind, "info", image_path, message,
+                        suggestion="Review image quality before removing or replacing it. Content and resolution affect these scores."
+                    ))
+            return tuple(facts["size"])
         except Exception as e:
             self.bad_images += 1
             self.issues.append(self._make_issue(
@@ -12834,11 +13420,12 @@ class ScanAnnotations(QObject):
                 QMessageBox.warning(dialog, "Delete Failed", "Could not delete findings.")
                 return
 
-            # Remove from report
-            keys_to_delete = {issue_key(issue) for issue in visible_issues_for_navigation}
-            original_count = len(issues)
-            issues[:] = [issue for issue in issues if issue_key(issue) not in keys_to_delete]
-            deleted_count = original_count - len(issues)
+            # Failed writes keep their findings. Successful deletions shift
+            # subsequent persisted line numbers, so reindex those findings too.
+            reviewed_before = {id(issue) for issue in issues if issue_key(issue) in reviewed_issue_keys}
+            deleted_count = update_health_report_after_deletion(issues, result)
+            reviewed_issue_keys.clear()
+            reviewed_issue_keys.update(issue_key(issue) for issue in issues if id(issue) in reviewed_before)
 
             # Update report summary
             if deleted_count > 0 and isinstance(summary, dict):
@@ -13143,6 +13730,7 @@ class ScanAnnotations(QObject):
             report = {"dataset_dir": directory, "status": "not_started", "summary": {}, "issues": []}
         self.show_scan_report_dialog(report, self._report_path(directory))
 
+    @gpu_work("Dataset Analysis", keep=analysis_resources, until="_analysis_worker", owner_attr="parent")
     def _start_analysis_scan(self, dataset_dir=None):
         active_worker = getattr(self, "_analysis_worker", None)
         if active_worker is not None:
@@ -13326,7 +13914,12 @@ class ScanAnnotations(QObject):
 
         logger.info(f"Dataset Analysis scan started at {scan_start_time.isoformat()} for {dataset_dir}")
 
+        image_reads = None
         try:
+            # Connection ownership stays on this worker, never on the UI thread.
+            self._image_check_cache = ImageCheckCache(os.path.join(
+                dataset_dir, PROJECT_SETTINGS_DIR, "image_checks.sqlite3"
+            ))
             progress_callback(0, 0, "Finding images and labels...")
             image_files = self._background_image_files(dataset_dir, scan_context)
             if should_cancel():
@@ -13375,14 +13968,24 @@ class ScanAnnotations(QObject):
             progress_step = max(1, scan_total // 500)
             progress_callback(scan_progress, scan_total, "Reading image metadata...")
 
-            for image_file in image_files:
+            verify_images = self._scan_check_enabled("image_checks")
+            quality_images = self._scan_check_enabled("quality_checks")
+            if verify_images or quality_images:
+                image_reads = self._image_check_cache.read_images(
+                    image_files, verify=verify_images,
+                    quality_function=image_quality_metrics if quality_images else None,
+                    should_cancel=should_cancel,
+                )
+            else:
+                image_reads = ((path, None) for path in image_files)
+            for image_file, image_facts in image_reads:
                 if should_cancel():
                     return None
 
                 base_name = os.path.splitext(os.path.basename(image_file))[0].lower()
                 if (self._scan_check_enabled("image_checks") or self._scan_check_enabled("quality_checks")
                         or self._needs_annotation_records()):
-                    image_size = self._read_image_size(image_file)
+                    image_size = self._read_image_size(image_file, facts=image_facts)
                     if image_size:
                         self._image_size_cache[image_file] = image_size
                 if self._scan_check_enabled("file_checks") and base_name not in label_map:
@@ -13475,6 +14078,15 @@ class ScanAnnotations(QObject):
             )
             return report, report_path
         finally:
+            if image_reads is not None:
+                image_reads.close()
+            image_cache = self._image_check_cache
+            self._image_check_cache = None
+            if image_cache is not None:
+                image_cache.close()
+                if image_cache.hits or image_cache.misses:
+                    logger.info("Dataset Analysis image checks: %d reused, %d inspected.",
+                                image_cache.hits, image_cache.misses)
             self._scan_training_size_override = None
             self._scan_training_size_source_override = ""
             self._scan_polygon_preference_override = None
@@ -13726,6 +14338,9 @@ class VideoFrameReaderThread(QThread):
         self._pending_frame_emits = 0
         self._max_pending_frame_emits = 1
         self._lock = threading.Lock()
+        self._delivery_condition = threading.Condition(self._lock)
+        self._inference_gate = None
+        self._capture_interrupt = None
 
     @staticmethod
     def _normalize_max_emit_fps(value):
@@ -13740,10 +14355,14 @@ class VideoFrameReaderThread(QThread):
             self._running = False
             self._paused = False
             self._pending_frame_emits = 0
+            self._delivery_condition.notify_all()
+        if self._capture_interrupt is not None:
+            self._capture_interrupt()
 
     def set_paused(self, paused):
         with self._lock:
             self._paused = bool(paused)
+            self._delivery_condition.notify_all()
 
     def set_speed(self, speed):
         with self._lock:
@@ -13752,6 +14371,11 @@ class VideoFrameReaderThread(QThread):
             except Exception:
                 self._speed = 1.0
 
+    def set_inference_gate(self, gate):
+        # Only finite playback waits for a model's bounded input slot. Live
+        # capture keeps its existing latest-frame policy to avoid stale queues.
+        self._inference_gate = None if self.live_stream else gate
+
     def set_max_emit_fps(self, fps):
         with self._lock:
             self.max_emit_fps = self._normalize_max_emit_fps(fps)
@@ -13759,6 +14383,7 @@ class VideoFrameReaderThread(QThread):
     def seek(self, frame_number):
         with self._lock:
             self._pending_seek = max(0, int(frame_number))
+            self._delivery_condition.notify_all()
 
     def set_loop_range(self, enabled, start_frame=0, end_frame=None):
         with self._lock:
@@ -13779,6 +14404,13 @@ class VideoFrameReaderThread(QThread):
     def mark_frame_delivered(self):
         with self._lock:
             self._pending_frame_emits = max(0, int(self._pending_frame_emits or 0) - 1)
+            self._delivery_condition.notify_all()
+
+    def wait_for_frame_delivery(self):
+        with self._delivery_condition:
+            if (self._pending_frame_emits >= self._max_pending_frame_emits
+                    and self._running and not self._paused and self._pending_seek is None):
+                self._delivery_condition.wait(timeout=0.05)
 
     def emit_queue_full(self):
         with self._lock:
@@ -13834,6 +14466,8 @@ class VideoFrameReaderThread(QThread):
                 pass
 
     def run(self):
+        if self.live_stream and self.backend == cv2.CAP_DSHOW:
+            self.capture_properties = negotiated_capture_properties(self.source,self.capture_properties)
         if self.backend is None:
             cap = cv2.VideoCapture(self.source)
         else:
@@ -13853,7 +14487,17 @@ class VideoFrameReaderThread(QThread):
             if total_frames < 0:
                 total_frames = 0
 
+            if (not self.live_stream and total_frames == 0 and isinstance(self.source, str)
+                    and urlparse(self.source).scheme.lower() in {'http','https','rtsp','rtmp','mms'}):
+                self.live_stream = True
+                self._inference_gate = None
+
             self.metadata_ready.emit(float(fps), int(total_frames))
+            cap = optimize_video_capture(
+                cap, self.source, live_stream=self.live_stream,
+                capture_properties=self.capture_properties,
+            )
+            self._capture_interrupt = getattr(cap,'interrupt',None)
             pace_playback = fps > 1 or self.live_stream
             next_frame_time = time.perf_counter()
             live_frame_number = 0
@@ -13883,12 +14527,20 @@ class VideoFrameReaderThread(QThread):
                     continue
 
                 if not force_single_frame and not self.live_stream and self.emit_queue_full():
-                    self.msleep(2)
+                    self.wait_for_frame_delivery()
+                    next_frame_time = time.perf_counter()
+                    continue
+
+                gate = self._inference_gate
+                if not force_single_frame and gate is not None and not gate.wait(timeout=0.05):
                     next_frame_time = time.perf_counter()
                     continue
 
                 ret, frame = cap.read()
                 if not ret or frame is None:
+                    if getattr(self, "retry_failed_reads", False):
+                        self.msleep(10)
+                        continue
                     if loop_enabled and not self.live_stream:
                         cap.set(cv2.CAP_PROP_POS_FRAMES, loop_start)
                         next_frame_time = time.perf_counter()
@@ -13949,6 +14601,7 @@ class DesktopFrameReaderThread(QThread):
         self._pending_frame_emits = 0
         self._max_pending_frame_emits = 1
         self._lock = threading.Lock()
+        self._delivery_condition = threading.Condition(self._lock)
 
     @staticmethod
     def _normalize_max_emit_fps(value):
@@ -13963,10 +14616,12 @@ class DesktopFrameReaderThread(QThread):
             self._running = False
             self._paused = False
             self._pending_frame_emits = 0
+            self._delivery_condition.notify_all()
 
     def set_paused(self, paused):
         with self._lock:
             self._paused = bool(paused)
+            self._delivery_condition.notify_all()
 
     def set_monitor_index(self, monitor_index):
         with self._lock:
@@ -13991,6 +14646,13 @@ class DesktopFrameReaderThread(QThread):
     def mark_frame_delivered(self):
         with self._lock:
             self._pending_frame_emits = max(0, int(self._pending_frame_emits or 0) - 1)
+            self._delivery_condition.notify_all()
+
+    def wait_for_frame_delivery(self):
+        with self._delivery_condition:
+            if (self._pending_frame_emits >= self._max_pending_frame_emits
+                    and self._running and not self._paused):
+                self._delivery_condition.wait(timeout=0.05)
 
     def emit_queue_full(self):
         with self._lock:
@@ -14015,8 +14677,19 @@ class DesktopFrameReaderThread(QThread):
 
     def run(self):
         frame_number = 0
+        duplication = None
+        self.capture_backend_name = 'mss'
+        self.new_desktop_frames = 0
+        previous_new_frames = 0
         interval = 1.0 / max(1.0, self.current_max_emit_fps())
         next_frame_time = time.perf_counter()
+
+        def open_duplication(monitor):
+            try:
+                from darkfusion_desktop_capture import DesktopDuplication
+                return DesktopDuplication(monitor)
+            except (ImportError, OSError, RuntimeError):
+                return None
 
         try:
             with mss.mss() as sct:
@@ -14027,6 +14700,8 @@ class DesktopFrameReaderThread(QThread):
 
                 monitor_index = max(0, min(self.monitor_index, len(monitors) - 1))
                 monitor = monitors[monitor_index]
+                duplication = open_duplication(monitor)
+                self.capture_backend_name = 'dxgi' if duplication is not None else 'mss'
                 self.metadata_ready.emit(float(self.max_emit_fps), 0)
 
                 while True:
@@ -14036,8 +14711,13 @@ class DesktopFrameReaderThread(QThread):
 
                     requested_monitor_index = max(0, min(requested_monitor_index, len(monitors) - 1))
                     if requested_monitor_index != monitor_index:
+                        if duplication is not None:
+                            duplication.close()
                         monitor_index = requested_monitor_index
                         monitor = monitors[monitor_index]
+                        duplication = open_duplication(monitor)
+                        self.capture_backend_name = 'dxgi' if duplication is not None else 'mss'
+                        previous_new_frames = 0
                         next_frame_time = time.perf_counter()
 
                     if paused:
@@ -14045,13 +14725,26 @@ class DesktopFrameReaderThread(QThread):
                         continue
 
                     if self.emit_queue_full():
-                        self.msleep(2)
+                        self.wait_for_frame_delivery()
                         next_frame_time = time.perf_counter()
                         continue
 
-                    sct_img = sct.grab(monitor)
-                    frame = np.array(sct_img)
-                    frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+                    frame = None
+                    if duplication is not None:
+                        try:
+                            frame = duplication.grab_bgr()
+                            self.new_desktop_frames += duplication.new_frame_count-previous_new_frames
+                            previous_new_frames = duplication.new_frame_count
+                        except (OSError, RuntimeError):
+                            duplication.close()
+                            duplication = None
+                            self.capture_backend_name = 'mss'
+                    if duplication is None:
+                        sct_img = sct.grab(monitor)
+                        frame = cv2.cvtColor(np.asarray(sct_img), cv2.COLOR_BGRA2BGR)
+                    if frame is None:
+                        self.msleep(1)
+                        continue
                     frame_number += 1
                     self.emit_frame_if_ready(frame, frame_number, time.time())
 
@@ -14065,6 +14758,9 @@ class DesktopFrameReaderThread(QThread):
 
         except Exception as e:
             self.error.emit(str(e))
+        finally:
+            if duplication is not None:
+                duplication.close()
 
 
 class _PropagationFrameCache:
@@ -14138,9 +14834,15 @@ class VideoInferenceThread(QThread):
         super().__init__(parent)
         self._running = True
         self._event = threading.Event()
+        self.frame_submission_ready = threading.Event()
+        self.frame_submission_ready.set()
         self._lock = threading.Lock()
         self._latest_frame = None
         self._latest_frame_number = 0
+        self._latest_preparation = None
+        self._frame_preparer = None
+        self._refresh_preparation = False
+        self._preparation_worker = None
         self._frame_sequence = 0
         self._processing = False
         self._replaced_pending_frame_count = 0
@@ -14169,6 +14871,19 @@ class VideoInferenceThread(QThread):
         with self._lock:
             self._running = False
             self._latest_frame = None
+            self._latest_preparation = None
+            self._frame_preparer = None
+            self._refresh_preparation = False
+            if self._preparation_worker is not None:
+                self._preparation_worker.close(wait=False)
+            # A stopped QThread can survive until Qt processes deleteLater().
+            # Release retired model/session ownership now: overlapping idle
+            # DirectML and new RTX sessions can break cuDNN execution. An
+            # in-flight _snapshot() retains its own references until it returns.
+            self._model = None
+            self._net = None
+            if hasattr(self, "frame_submission_ready"):
+                self.frame_submission_ready.set()
         self._event.set()
 
     def configure_yolo(
@@ -14181,7 +14896,21 @@ class VideoInferenceThread(QThread):
         min_size_px=0.0,
         max_percent=1.0,
     ):
+        frame_preparer = None
+        refresh_preparation = False
+        if getattr(model, "_darkfusion_inference_backend", "") == "onnxruntime":
+            from darkfusion_onnx_runtime import DarkFusionOnnxModel
+            if type(model) is DarkFusionOnnxModel:
+                frame_preparer = model._video_preparation((model_kwargs or {}).get("imgsz"))
+                refresh_preparation = frame_preparer is None and model._video_preparation_pending()
         with self._lock:
+            self._latest_preparation = None
+            self._frame_preparer = frame_preparer
+            self._refresh_preparation = refresh_preparation
+            if self._preparation_worker is not None:
+                self._preparation_worker.clear()
+            elif frame_preparer is not None:
+                self._preparation_worker = LatestFramePreparation(initializer=lambda: torch.set_num_threads(1))
             yolo_kwargs = dict(model_kwargs or {})
             yolo_kwargs.setdefault("verbose", False)
             yolo_kwargs.setdefault("stream", False)
@@ -14216,6 +14945,11 @@ class VideoInferenceThread(QThread):
         max_percent,
     ):
         with self._lock:
+            self._frame_preparer = None
+            self._refresh_preparation = False
+            self._latest_preparation = None
+            if self._preparation_worker is not None:
+                self._preparation_worker.clear()
             self._mode = "dnn"
             self._net = net
             self._layer_names = list(layer_names or [])
@@ -14243,7 +14977,12 @@ class VideoInferenceThread(QThread):
             # Own the pixels associated with this result. A contiguous view is
             # not sufficient when a capture source reuses its input buffer.
             self._latest_frame = np.array(frame, copy=True, order="C")
+            if hasattr(self, "frame_submission_ready"):
+                self.frame_submission_ready.clear()
             self._latest_frame_number = int(frame_number or 0)
+            self._latest_preparation = (
+                self._preparation_worker.submit(self._latest_frame, self._frame_preparer)
+                if self._frame_preparer is not None else None)
 
         self._event.set()
         return True
@@ -14260,6 +14999,11 @@ class VideoInferenceThread(QThread):
         with self._lock:
             self._frame_sequence += 1
             self._latest_frame = None
+            self._latest_preparation = None
+            if hasattr(self, "frame_submission_ready"):
+                self.frame_submission_ready.set()
+            if self._preparation_worker is not None:
+                self._preparation_worker.clear()
 
     def is_current_frame_sequence(self, sequence):
         with self._lock:
@@ -14300,11 +15044,15 @@ class VideoInferenceThread(QThread):
             frame = self._latest_frame
             frame_number = self._latest_frame_number
             self._latest_frame = None
+            if hasattr(self, "frame_submission_ready"):
+                self.frame_submission_ready.set()
             self._processing = bool(running and frame is not None)
 
             config = {
                 "mode": self._mode,
                 "frame_sequence": self._frame_sequence,
+                "prepared_frame": self._latest_preparation,
+                "refresh_preparation": self._refresh_preparation,
                 "model": self._model,
                 "model_kwargs": self._model_kwargs,
                 "tracking_enabled": self._tracking_enabled,
@@ -14322,6 +15070,7 @@ class VideoInferenceThread(QThread):
                 "min_size_px": self._min_size_px,
                 "max_percent": self._max_percent,
             }
+            self._latest_preparation = None
 
         return running, frame, frame_number, config
 
@@ -14332,6 +15081,8 @@ class VideoInferenceThread(QThread):
 
             running, frame, frame_number, config = self._snapshot()
             if not running:
+                if self._preparation_worker is not None:
+                    self._preparation_worker.close()
                 return
 
             if frame is None:
@@ -14414,6 +15165,15 @@ class VideoInferenceThread(QThread):
             except Exception as e:
                 logging.warning(f"Failed to extract ROI for inference: {e}")
 
+        prepared = config.get("prepared_frame")
+        if prepared is not None and infer_frame is frame:
+            try:
+                payload = prepared.result()
+                if payload is not None:
+                    model_kwargs = dict(model_kwargs, _prepared_video=payload)
+            except Exception:
+                pass  # Keep the original foreground converter on worker failure.
+
         autocast_ctx = (
             torch.autocast(device_type="cuda", dtype=torch.float16)
             if config.get("autocast_enabled")
@@ -14445,6 +15205,18 @@ class VideoInferenceThread(QThread):
                         results = model(infer_frame, **model_kwargs)
                 else:
                     results = model(infer_frame, **model_kwargs)
+
+        if config.get("refresh_preparation"):
+            # Automatic selection needs actual pixels before we snapshot its
+            # CPU converter. Enable overlap after that first successful frame.
+            converter = model._video_preparation(model_kwargs.get("imgsz"))
+            with self._lock:
+                if (self._running and self._model is model
+                        and self._model_kwargs is config["model_kwargs"]):
+                    self._refresh_preparation = False
+                    self._frame_preparer = converter
+                    if converter is not None and self._preparation_worker is None:
+                        self._preparation_worker = LatestFramePreparation(initializer=lambda: torch.set_num_threads(1))
 
         if results and results[0] is not None:
             result = results[0]
@@ -14514,6 +15286,16 @@ class VideoInferenceThread(QThread):
 
         if hasattr(result, "boxes") and result.boxes is not None:
             boxes = result.boxes
+
+            # Native Ultralytics fields are views into one tensor. Download it
+            # once, retaining the native class/track layout and field behavior.
+            if (type(boxes).__module__ == "ultralytics.engine.results"
+                    and type(boxes).__name__ == "Boxes"
+                    and getattr(getattr(boxes, "data", None), "is_cuda", False)):
+                try:
+                    boxes = boxes.cpu()
+                except Exception:
+                    pass  # Retain the existing per-field compatibility path.
 
             xyxy = to_numpy(getattr(boxes, "xyxy", None))
             class_ids = to_numpy(getattr(boxes, "cls", None))
@@ -14687,6 +15469,11 @@ class VideoInferenceThread(QThread):
             img_height=frame_h,
             min_size_px=config.get("min_size_px", 0.0),
             max_percent=config.get("max_percent", 1.0),
+        )
+        filtered_overlay["_size_filter_signature"] = (
+            int(frame_w), int(frame_h),
+            float(config.get("min_size_px", 0.0)),
+            float(config.get("max_percent", 1.0)),
         )
         return filtered_overlay
 
@@ -14870,6 +15657,21 @@ def video_playback_quality_key(value, default="smooth"):
         "lanczos": "high",
     }
     return aliases.get(key, default)
+
+
+def video_stream_quality_key(value):
+    """Website source quality, independent of player scaling and output FPS."""
+    key = str(value or "1080").strip().lower()
+    return key if key in {"720", "1080", "best"} else "1080"
+
+
+def video_stream_format_selector(quality):
+    quality = video_stream_quality_key(quality)
+    limit = "" if quality == "best" else f"[height<={quality}]"
+    return (
+        f"bestvideo[vcodec^=avc1]{limit}/bestvideo{limit}/"
+        "bestvideo[vcodec^=avc1]/bestvideo/best"
+    )
 
 
 def video_playback_renderer_key(value, default="auto"):
@@ -15276,10 +16078,19 @@ class FrameExtractionThread(QThread):
         self._lock = threading.Lock()
         self._resume_checkpoint = False
         self._checkpoint_frame_count = 0
+        self._checkpoint_saved_count = 0
+        self._resume_decision = threading.Event()
+        self._checkpoint = ExtractionCheckpoint(self.config)
+        self._last_completed_frame = -1
+        self._saved_total = 0
+        self._checkpoint_bucket = 0
 
     def stop(self):
         with self._lock:
             self._running = False
+
+        # Stop must also release a job waiting for the resume prompt.
+        self._resume_decision.set()
 
     def is_stopping(self):
         with self._lock:
@@ -15295,43 +16106,32 @@ class FrameExtractionThread(QThread):
 
         return True
 
-    def set_resume_checkpoint(self, resume, frame_count):
+    def set_resume_checkpoint(self, resume, frame_count, saved_count=0):
         """Set whether to resume from checkpoint and the frame number to start from."""
-        self._resume_checkpoint = bool(resume)
-        self._checkpoint_frame_count = int(frame_count or 0)
+        with self._lock:
+            self._resume_checkpoint = bool(resume)
+            self._checkpoint_frame_count = max(0, int(frame_count or 0))
+            self._checkpoint_saved_count = max(0, int(saved_count or 0)) if resume else 0
+        self._resume_decision.set()
 
     def _checkpoint_path(self, output_dir):
         """Get path to checkpoint file."""
         return os.path.join(output_dir, '.extraction_checkpoint.json')
 
     def _load_checkpoint(self, output_dir):
-        """Load checkpoint if it exists. Returns dict or None."""
-        checkpoint_file = self._checkpoint_path(output_dir)
-        if not os.path.isfile(checkpoint_file):
-            return None
-
-        try:
-            with open(checkpoint_file, 'r') as f:
-                checkpoint = json.load(f)
-            return checkpoint
-        except Exception as e:
-            logger.warning(f"Failed to load checkpoint: {e}")
-            return None
+        """Only offer checkpoints verified against this source and settings."""
+        return self._checkpoint.load()
 
     def _save_checkpoint(self, output_dir, frame_count, saved_count):
-        """Save extraction checkpoint for resume capability."""
-        checkpoint_file = self._checkpoint_path(output_dir)
-        try:
-            checkpoint = {
-                'last_frame_count': int(frame_count),
-                'frames_saved_before': int(saved_count),
-                'timestamp': datetime.now().isoformat(),
-                'extraction_dir': output_dir,
-            }
-            with open(checkpoint_file, 'w') as f:
-                json.dump(checkpoint, f)
-        except Exception as e:
-            logger.debug(f"Failed to save checkpoint: {e}")
+        return self._checkpoint.save(int(frame_count), int(saved_count))
+
+    def _record_completed_frame(self, frame_count, saved_count):
+        self._last_completed_frame = int(frame_count)
+        self._saved_total = self._checkpoint_saved_count + int(saved_count)
+        bucket = self._saved_total // 50
+        if bucket > self._checkpoint_bucket:
+            self._save_checkpoint(self.config.get("output_dir"), frame_count, self._saved_total)
+            self._checkpoint_bucket = bucket
 
     def run(self):
         summary = {
@@ -15342,14 +16142,21 @@ class FrameExtractionThread(QThread):
             "stopped": False,
         }
 
-        # Check for checkpoint before starting
         output_dir = self.config.get("output_dir", "")
-        checkpoint = self._load_checkpoint(output_dir)
-        if checkpoint and not self._resume_checkpoint:
-            # Emit signal for UI to ask user about resuming
-            self.checkpoint_resume_request.emit(checkpoint)
-
         try:
+            checkpoint = self._load_checkpoint(output_dir)
+            if checkpoint and not self._resume_decision.is_set():
+                self.checkpoint_resume_request.emit(checkpoint)
+                # A queued Qt signal does not wait for the GUI answer. Do not
+                # open/decode/write anything until the user has decided.
+                while self.should_continue() and not self._resume_decision.wait(0.1):
+                    pass
+            if not self.should_continue():
+                return
+            if self._resume_checkpoint:
+                self._last_completed_frame = self._checkpoint_frame_count
+                self._saved_total = self._checkpoint_saved_count
+                self._checkpoint_bucket = self._saved_total // 50
             kind = self.config.get("kind")
             if kind == "desktop":
                 self._extract_desktop(summary)
@@ -15361,15 +16168,17 @@ class FrameExtractionThread(QThread):
             self.error.emit(str(e))
             summary["error"] = str(e)
         finally:
-            summary["stopped"] = self.is_stopping()
-            # Clean up checkpoint on successful completion
-            if not summary.get("error") and not self.is_stopping():
-                try:
-                    checkpoint_file = self._checkpoint_path(output_dir)
-                    if os.path.isfile(checkpoint_file):
-                        os.remove(checkpoint_file)
-                except Exception:
-                    pass
+            summary["stopped"] = self.is_stopping() or (self.owner is not None and not getattr(self.owner, "extracting_frames", False))
+            summary["frames_saved_total"] = self._saved_total
+            try:
+                if summary.get("error") or summary["stopped"]:
+                    # Include the final completed frame, not the failed write.
+                    self._save_checkpoint(output_dir, self._last_completed_frame, self._saved_total)
+                else:
+                    self._checkpoint.complete()
+            except OSError as error:
+                summary["checkpoint_error"] = str(error)
+                self.warning.emit(f"Could not update extraction resume checkpoint: {error}")
             self.extraction_finished.emit(summary)
 
     def _should_extract_frame(self, frame_count):
@@ -15404,11 +16213,7 @@ class FrameExtractionThread(QThread):
         except OSError:
             pass
 
-        if not save_cv_image(frame_filepath, save_frame):
-            self.warning.emit(f"Failed to save frame: {frame_filepath}")
-            return False
-
-        return True
+        return save_extraction_outputs(frame_filepath, save_frame, save_cv_image)
 
     def _save_frame(self, frame, frame_count, output_dir):
         if not self._should_extract_frame(frame_count):
@@ -15432,184 +16237,107 @@ class FrameExtractionThread(QThread):
         source = self.config.get("capture_source", self.config.get("source"))
         output_dir = self.config.get("output_dir")
         os.makedirs(output_dir, exist_ok=True)
-
         cap = cv2.VideoCapture(source) if backend is None else cv2.VideoCapture(source, backend)
-        if not cap.isOpened():
+        saved_count = read_count = 0
+        try:
+            if not cap.isOpened():
+                raise RuntimeError(f"Unable to open video source: {self.config.get('original_source', source)}")
+            if backend == cv2.CAP_DSHOW:
+                properties = {
+                    cv2.CAP_PROP_FRAME_WIDTH: 1920, cv2.CAP_PROP_FRAME_HEIGHT: 1080,
+                    cv2.CAP_PROP_FPS: float(self.config.get("capture_fps", 60)),
+                    cv2.CAP_PROP_FOURCC: cv2.VideoWriter_fourcc(*"MJPG"),
+                    cv2.CAP_PROP_BUFFERSIZE: 1 if self.config.get("buffer_mode") == "latency" else 5,
+                }
+                for key, value in properties.items():
+                    try:
+                        cap.set(key, value)
+                    except Exception:
+                        pass  # Capture drivers may ignore unsupported properties.
             try:
-                cap.release()
-            except Exception:
-                pass
-            raise RuntimeError(f"Unable to open video source: {self.config.get('original_source', source)}")
-
-        if backend == cv2.CAP_DSHOW:
-            try:
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
-                cap.set(cv2.CAP_PROP_FPS, 200)
-                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-                # Use higher buffer for extraction to prevent frame loss
-                buffer_size = 5 if getattr(self, '_extraction_mode', False) else 1
-                cap.set(cv2.CAP_PROP_BUFFERSIZE, buffer_size)
-            except Exception:
-                pass
-
-        try:
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-        except Exception:
-            total_frames = 0
-
-        has_known_total = total_frames > 0 and backend is None
-        start_frame = self.config.get("start_frame")
-        end_frame = self.config.get("end_frame")
-
-        try:
-            start_frame = max(0, int(start_frame)) if start_frame is not None else 0
-        except Exception:
-            start_frame = 0
-
-        try:
-            end_frame = max(0, int(end_frame)) if end_frame is not None else None
-        except Exception:
-            end_frame = None
-
-        if end_frame is not None and end_frame < start_frame:
-            start_frame, end_frame = end_frame, start_frame
-
-        if has_known_total:
-            last_frame = max(0, total_frames - 1)
-            start_frame = min(start_frame, last_frame)
-            if end_frame is not None:
-                end_frame = min(end_frame, last_frame)
-
-        # Handle checkpoint resume
-        if self._resume_checkpoint and self._checkpoint_frame_count > 0:
-            start_frame = self._checkpoint_frame_count + 1
-            logger.info(f"Resuming extraction from frame {start_frame}")
-
-        if backend is None and start_frame > 0:
-            try:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-            except Exception:
-                pass
-
-        if has_known_total:
-            end_for_progress = end_frame if end_frame is not None else total_frames - 1
-            total_work_frames = max(1, end_for_progress - start_frame + 1)
-        else:
-            total_work_frames = 0
-
-        if has_known_total:
-            self.progress_range.emit(0, 100, "%p%")
-            self.progress_value.emit(0)
-        else:
-            self.progress_range.emit(0, 0, "Reading stream...")
-
-        try:
-            frame_count = int(cap.get(cv2.CAP_PROP_POS_FRAMES) or start_frame)
-        except Exception:
+                total_frames = max(0, int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0))
+            except (TypeError, ValueError, OverflowError):
+                total_frames = 0
+            has_known_total = total_frames > 0 and backend is None
+            start_frame = max(0, int(self.config.get("start_frame") or 0))
+            end_value = self.config.get("end_frame")
+            end_frame = max(0, int(end_value)) if end_value is not None else None
+            if end_frame is not None and end_frame < start_frame:
+                start_frame, end_frame = end_frame, start_frame
+            if has_known_total:
+                start_frame = min(start_frame, total_frames - 1)
+                end_frame = min(end_frame, total_frames - 1) if end_frame is not None else total_frames - 1
+            if self._resume_checkpoint:
+                start_frame = max(start_frame, self._checkpoint_frame_count + 1)
+                logger.info("Resuming extraction from frame %s", start_frame)
+            if backend is None and start_frame > 0:
+                if not cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame):
+                    raise RuntimeError(f"Cannot seek to extraction frame {start_frame}; no frames were saved.")
+                actual_position = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+                if actual_position != start_frame:
+                    raise RuntimeError(f"Video seek reached frame {actual_position}, not {start_frame}; extraction stopped.")
             frame_count = start_frame
-
-        saved_count = 0
-        read_count = 0
-
-        try:
-            # Get frame step from parent settings if available
-            frame_step = 1
-            if hasattr(self, '_parent_window'):
-                try:
-                    frame_step_enabled = self._parent_window.settings.get('videoFrameStepEnabled', False)
-                    if frame_step_enabled:
-                        frame_step = max(1, int(self._parent_window.settings.get('videoFrameStepValue', 1)))
-                except Exception:
-                    pass
-
+            total_work = max(1, end_frame - start_frame + 1) if has_known_total else 0
+            self.progress_range.emit(0, 100 if has_known_total else 0, "%p%" if has_known_total else "Reading capture...")
+            self.progress_value.emit(0)
             while self.should_continue() and (not has_known_total or frame_count < total_frames):
                 if end_frame is not None and frame_count > end_frame:
                     break
-
                 ret, frame = cap.read()
                 if not ret or frame is None:
+                    if self.is_stopping():
+                        break
+                    if backend == cv2.CAP_DSHOW:
+                        raise RuntimeError("Camera/capture-card read failed. Extraction stopped; completed frames were kept.")
+                    if has_known_total and frame_count < total_frames:
+                        raise RuntimeError(f"Video read failed at frame {frame_count}; resume checkpoint was kept.")
                     break
-
-                if not isinstance(frame, np.ndarray) or frame.size == 0:
-                    frame_count += 1
-                    continue
-
-                # Apply frame step skip
-                if frame_step > 1 and (frame_count - start_frame) % frame_step != 0:
-                    frame_count += 1
-                    continue
-
                 read_count += 1
+                if not isinstance(frame, np.ndarray) or frame.size == 0:
+                    raise RuntimeError(f"Invalid decoded frame at {frame_count}; extraction stopped.")
                 if self._save_frame(frame, frame_count, output_dir):
                     saved_count += 1
-
+                self._record_completed_frame(frame_count, saved_count)
                 frame_count += 1
-                # Save checkpoint every 50 frames for resume capability
-                if saved_count > 0 and saved_count % 50 == 0:
-                    self._save_checkpoint(output_dir, frame_count - 1, saved_count)
-                self._emit_progress(read_count, total_work_frames, has_known_total, saved_count)
+                self._emit_progress(read_count, total_work, has_known_total, saved_count)
         finally:
             cap.release()
-
-        summary["frames_read"] = read_count
-        summary["frames_saved"] = saved_count
+            summary["frames_read"] = read_count
+            summary["frames_saved"] = saved_count
 
     def _extract_desktop(self, summary):
         output_dir = self.config.get("output_dir")
         os.makedirs(output_dir, exist_ok=True)
         self.progress_range.emit(0, 0, "Reading desktop...")
-
-        # Get frame step from parent settings if available
-        frame_step = 1
-        if hasattr(self, '_parent_window'):
-            try:
-                frame_step_enabled = self._parent_window.settings.get('videoFrameStepEnabled', False)
-                if frame_step_enabled:
-                    frame_step = max(1, int(self._parent_window.settings.get('videoFrameStepValue', 1)))
-            except Exception:
-                pass
-
         monitor_index = int(self.config.get("monitor_index", 1) or 1)
-        # Handle checkpoint resume for desktop capture
-        frame_count = self._checkpoint_frame_count + 1 if self._resume_checkpoint else 0
-        saved_count = 0
-
-        with mss.mss() as sct:
-            monitors = sct.monitors
-            monitor_index = max(0, min(monitor_index, len(monitors) - 1))
-            monitor = monitors[monitor_index]
-
-            while self.should_continue():
-                sct_img = sct.grab(monitor)
-                frame = np.array(sct_img)
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
-
-                # Apply frame step skip
-                if frame_step > 1 and frame_count % frame_step != 0:
+        frame_count = saved_count = 0
+        try:
+            with mss.mss() as sct:
+                monitors = sct.monitors
+                monitor_index = max(0, min(monitor_index, len(monitors) - 1))
+                monitor = monitors[monitor_index]
+                while self.should_continue():
+                    frame = cv2.cvtColor(np.array(sct.grab(monitor)), cv2.COLOR_BGRA2BGR)
+                    if self._save_frame(frame, frame_count, output_dir):
+                        saved_count += 1
+                    self._record_completed_frame(frame_count, saved_count)
                     frame_count += 1
+                    self._emit_progress(frame_count, 0, False, saved_count)
                     self.msleep(1)
-                    continue
-
-                if self._save_frame(frame, frame_count, output_dir):
-                    saved_count += 1
-
-                frame_count += 1
-                # Save checkpoint every 50 frames for resume capability
-                if saved_count > 0 and saved_count % 50 == 0:
-                    self._save_checkpoint(output_dir, frame_count - 1, saved_count)
-                self._emit_progress(frame_count, 0, False, saved_count)
-                self.msleep(1)
-
-        summary["frames_read"] = frame_count
-        summary["frames_saved"] = saved_count
+        finally:
+            summary["frames_read"] = frame_count
+            summary["frames_saved"] = saved_count
 
     def _emit_progress(self, frame_count, total_frames, has_known_total, saved_count):
         if has_known_total and total_frames > 0:
-            self.progress_value.emit(int(min(100, (frame_count / total_frames) * 100)))
+            percent = int(min(100, (frame_count / total_frames) * 100))
+            if percent != getattr(self, "_last_progress_percent", None):
+                self._last_progress_percent = percent
+                self.progress_value.emit(percent)
             return
 
-        if saved_count and saved_count % 10 == 0:
+        if saved_count and saved_count % 10 == 0 and saved_count != getattr(self, "_last_progress_saved", None):
+            self._last_progress_saved = saved_count
             self.progress_format.emit(f"Saved {saved_count} frames...")
 
 
@@ -15741,6 +16469,8 @@ class ImageProcessingThread(QThread):
 
     def load_stable_diffusion_pipeline(self):
         try:
+            from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_inpaint import StableDiffusionInpaintPipeline
+
             pipe = StableDiffusionInpaintPipeline.from_pretrained(
                 "runwayml/stable-diffusion-inpainting",
                 trust_remote_code=False,
@@ -15772,6 +16502,7 @@ class ImageProcessingThread(QThread):
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         return float(np.std(gray)) < std_threshold
 
+    @release_worker_models("sam_model", "stable_diffusion_pipeline")
     def run(self):
         if self.should_cancel():
             return
@@ -16824,6 +17555,8 @@ class SahiSettingsDialog(QDialog):
                 if names:
                     return names
                 return self._read_sidecar_model_classes(model_path)
+            if not gpu_model_allowed(self.main_window, "detector"):
+                return self._read_sidecar_model_classes(model_path)
             model = load_inference_model(model_path)
             names = self._normalize_model_names(getattr(model, "names", None))
             try:
@@ -17299,16 +18032,16 @@ class AutoLabelDialog(QDialog):
 
     def _build_shared_settings_group(self, parent_layout):
         group = QtWidgets.QGroupBox("Shared Auto Label Settings")
+        self.shared_settings_group = group
         layout = QVBoxLayout(group)
         layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(6)
 
         note = QLabel(
             "These settings apply to Weights, DINO/YOLOE, and SAHI whenever the selected "
-            "model supports them. ONNX backend choices affect ONNX files; .engine files use TensorRT."
+            "model supports them."
         )
         note.setWordWrap(True)
-        note.setMinimumHeight(34)
         note.setStyleSheet("color: #9aa4af;")
         layout.addWidget(note)
 
@@ -17407,26 +18140,48 @@ class AutoLabelDialog(QDialog):
         option_row.addStretch(1)
         layout.addLayout(option_row)
 
+        teammate_row = QtWidgets.QHBoxLayout()
+        teammate_row.setSpacing(8)
+        teammate_label = QLabel("Teammate certainty:")
+        teammate_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        teammate_row.addWidget(teammate_label)
+        teammate_row.addWidget(self.teammate_threshold_spin, 1)
+        layout.addLayout(teammate_row)
+        parent_layout.addWidget(group)
+
+        # Provider controls are a sibling category, not nested inside Shared.
+        # Collapsing Shared must never hide provider selection/setup.
+        self.onnx_runtime_section = CollapsibleSettingsGroup("ONNX / Windows ML", expanded=False)
+        self.onnx_runtime_section.setObjectName("onnx_provider_setup")
+        self.onnx_runtime_section.setProperty("persistCollapseState", True)
+        self.onnx_runtime_toggle = self.onnx_runtime_section.header
+        self.onnx_runtime_toggle.setToolTip("Expand ONNX provider selection, setup, and troubleshooting.")
+        provider_content = QWidget()
+        provider_content.setObjectName("auto_label_onnx_settings_body")
+        provider_content.setProperty("settingsSectionContent", True)
+        provider_layout = QVBoxLayout(provider_content)
+        provider_layout.setContentsMargins(6, 6, 6, 6)
+        provider_layout.setSpacing(6)
+        provider_note = QLabel("These settings affect ONNX files. .pt files use Ultralytics; .engine files use TensorRT.")
+        provider_note.setWordWrap(True)
+        provider_note.setStyleSheet("color: #9aa4af;")
+        provider_layout.addWidget(provider_note)
+
         backend_row = QtWidgets.QHBoxLayout()
         backend_row.setSpacing(8)
         provider_label = QLabel("ONNX provider:")
         provider_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         backend_row.addWidget(provider_label)
         backend_row.addWidget(self.onnx_provider_combo, 1)
-        layout.addLayout(backend_row)
+        provider_layout.addLayout(backend_row)
 
         detail_row = QtWidgets.QHBoxLayout()
         detail_row.setSpacing(8)
         available_label = QLabel("Available now:")
         available_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        teammate_label = QLabel("Teammate certainty:")
-        teammate_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         detail_row.addWidget(available_label)
         detail_row.addWidget(self.onnx_provider_status, 1)
-        detail_row.addSpacing(8)
-        detail_row.addWidget(teammate_label)
-        detail_row.addWidget(self.teammate_threshold_spin, 2)
-        layout.addLayout(detail_row)
+        provider_layout.addLayout(detail_row)
 
         from darkfusion_onnx_settings import OnnxRuntimeSettings
         self.onnx_runtime_widget = OnnxRuntimeSettings(
@@ -17434,18 +18189,21 @@ class AutoLabelDialog(QDialog):
             self.main_window.settings.get("onnxRuntimeOptions", {}), self,
             backend_combo=self.inference_backend_combo,
         )
-        self.onnx_runtime_toggle = QtWidgets.QToolButton()
-        self.onnx_runtime_toggle.setText("ONNX provider setup")
-        self.onnx_runtime_toggle.setCheckable(True)
+        self.onnx_runtime_widget.setProperty("collapsibleSectionSkip", True)
+        self.onnx_runtime_widget.setProperty("collapsibleSectionBody", True)
+        self.onnx_runtime_widget.setStyleSheet(CollapsibleSectionsController.BODY_STYLE)
+        provider_layout.addWidget(self.onnx_runtime_widget)
         self.onnx_runtime_scroll = QtWidgets.QScrollArea()
+        self.onnx_runtime_scroll.setObjectName("auto_label_onnx_settings_scroll")
         self.onnx_runtime_scroll.setWidgetResizable(True)
+        self.onnx_runtime_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.onnx_runtime_scroll.setMinimumHeight(200)
         self.onnx_runtime_scroll.setMaximumHeight(300)
-        self.onnx_runtime_scroll.setWidget(self.onnx_runtime_widget)
-        self.onnx_runtime_scroll.hide()
-        self.onnx_runtime_toggle.toggled.connect(self.onnx_runtime_scroll.setVisible)
-        layout.addWidget(self.onnx_runtime_toggle)
-        layout.addWidget(self.onnx_runtime_scroll)
-        parent_layout.addWidget(group)
+        self.onnx_runtime_scroll.setWidget(provider_content)
+        section_layout = QVBoxLayout(self.onnx_runtime_section.content)
+        section_layout.setContentsMargins(0, 0, 0, 0)
+        section_layout.addWidget(self.onnx_runtime_scroll)
+        parent_layout.addWidget(self.onnx_runtime_section)
 
     def _path_row(self, line_edit, browse_callback, placeholder=""):
         row = QtWidgets.QHBoxLayout()
@@ -17458,9 +18216,18 @@ class AutoLabelDialog(QDialog):
 
     def _build_weights_tab(self):
         tab = QWidget()
-        layout = QVBoxLayout(tab)
+        tab_layout = QVBoxLayout(tab)
+        tab_layout.setContentsMargins(0, 0, 0, 0)
+        content = QWidget(tab)
+        layout = QVBoxLayout(content)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
+        scroll = QtWidgets.QScrollArea(tab)
+        scroll.setObjectName("weights_auto_label_scroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        scroll.setWidget(content)
+        tab_layout.addWidget(scroll, 1)
 
         model_group = QtWidgets.QGroupBox("Model / Weights")
         model_form = QtWidgets.QFormLayout(model_group)
@@ -17526,6 +18293,17 @@ class AutoLabelDialog(QDialog):
         self.weight_batch_spin.setMaximumWidth(120)
         detect_form.addRow("Batch size:", self.weight_batch_spin)
 
+        self.weights_sam3_assist_check = QCheckBox("SAM3 assist: refine boxes and fill short gaps")
+        self.weights_sam3_assist_check.setToolTip(
+            "Refine new YOLO boxes when a SAM3 mask agrees; uncertain adjustments "
+            "keep the YOLO box. For numbered sequential images, also fill gaps of "
+            "up to 3 images when YOLO detects the object on both sides and "
+            "forward/backward propagation agrees. Existing saved labels are kept "
+            "unless overwrite is enabled. Teammate-ignore, ROI and class filters "
+            "still apply. Detection boxes only; adds processing time."
+        )
+        detect_form.addRow(self.weights_sam3_assist_check)
+
         layout.addWidget(detect_group)
 
         action_row = QtWidgets.QHBoxLayout()
@@ -17536,7 +18314,7 @@ class AutoLabelDialog(QDialog):
         run_btn.clicked.connect(self.run_weights_auto_label)
         action_row.addWidget(apply_btn)
         action_row.addWidget(run_btn)
-        layout.addLayout(action_row)
+        tab_layout.addLayout(action_row)
         layout.addStretch()
 
         self.tabs.addTab(tab, "Weights")
@@ -17810,6 +18588,10 @@ class AutoLabelDialog(QDialog):
                 )
             if self.auto_settings.contains("weights_batch_size"):
                 self.weight_batch_spin.setValue(int(self.auto_settings.value("weights_batch_size", self.weight_batch_spin.value())))
+            self.weights_sam3_assist_check.setChecked(
+                self._settings_bool("weights_sam3_assist", False)
+            )
+            self.main_window.auto_label_sam3_assist = self.weights_sam3_assist_check.isChecked()
             if self.auto_settings.contains("shared_fp16"):
                 shared_fp16 = self._settings_bool("shared_fp16", self.shared_fp16_check.isChecked())
             elif self.auto_settings.contains("weights_fp16"):
@@ -17893,6 +18675,7 @@ class AutoLabelDialog(QDialog):
             (self.weight_height_spin, "valueChanged"),
             (self.weight_width_spin, "valueChanged"),
             (self.weight_batch_spin, "valueChanged"),
+            (self.weights_sam3_assist_check, "stateChanged"),
         ):
             try:
                 getattr(widget, signal_name).connect(save_weights)
@@ -17944,6 +18727,8 @@ class AutoLabelDialog(QDialog):
         self.auto_settings.setValue("weights_height", self.weight_height_spin.value())
         self.auto_settings.setValue("weights_width", self.weight_width_spin.value())
         self.auto_settings.setValue("weights_batch_size", self.weight_batch_spin.value())
+        self.auto_settings.setValue("weights_sam3_assist", self.weights_sam3_assist_check.isChecked())
+        self.main_window.auto_label_sam3_assist = self.weights_sam3_assist_check.isChecked()
         self.save_shared_settings()
 
     def save_shared_settings(self):
@@ -19130,6 +19915,139 @@ class ImageListModel(QAbstractListModel):
             return str(path).replace("\\", "/")
 
 
+class EditorImageSource:
+    """Share one unmodified editor image with its review crops on the UI thread.
+
+    Preprocessing receives a separate array. Other review images and formats
+    with different Qt decoding semantics retain their existing QPixmap loader.
+    """
+
+    def __init__(self):
+        self._prefetch = OriginalImagePrefetch(lambda path: cv2.imread(path), self.file_version)
+        self.clear()
+
+    def clear(self):
+        self._prefetch.clear()
+        self._clear_current()
+
+    def _clear_current(self):
+        self._version = None
+        self._bgr = None
+        self._pixmap = None
+        self._review_compatible = None
+
+    def prefetch(self, paths):
+        self._prefetch.request(paths)
+
+    def close(self):
+        self.clear()
+        self._prefetch.close()
+
+    @staticmethod
+    def file_version(path):
+        try:
+            path = os.path.normcase(os.path.abspath(path))
+            stat = os.stat(path)
+            return (path, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size, stat.st_ino)
+        except (OSError, TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def can_share_review(path):
+        # Qt retains transparency/profiles and uses different EXIF defaults.
+        # Inspect headers only; preserve its loader for those special cases.
+        try:
+            # Gameplay PNGs contain many small IDAT chunks. A bounded larger
+            # buffer avoids a filesystem read/seek for every chunk on Windows.
+            with open(path, "rb", buffering=512 * 1024) as stream:
+                size = os.fstat(stream.fileno()).st_size
+                if stream.read(8) == b"\x89PNG\r\n\x1a\n":
+                    have_header = False
+                    while stream.tell() + 12 <= size:
+                        chunk = stream.read(8)
+                        length, kind = int.from_bytes(chunk[:4], "big"), chunk[4:]
+                        if length > size - stream.tell() - 4:
+                            return False
+                        if kind == b"IHDR":
+                            if have_header or length != 13:
+                                return False
+                            info = stream.read(13)
+                            if info[8] != 8 or info[9] not in (0, 2):
+                                return False
+                            have_header = True
+                            stream.seek(4, os.SEEK_CUR)
+                        elif kind == b"IEND":
+                            return have_header and length == 0
+                        elif kind in (b"IDAT", b"pHYs") and have_header:
+                            stream.seek(length + 4, os.SEEK_CUR)
+                        else:
+                            # Metadata after IDAT must also keep Qt's original
+                            # profile, transparency, EXIF and animation behavior.
+                            return False
+                    return False
+                stream.seek(0)
+                with Image.open(stream) as header:
+                    return (
+                        header.format == "JPEG"
+                        and header.mode in {"RGB", "L"}
+                        and header.getexif().get(274, 1) == 1
+                        and not any(key in header.info for key in ("transparency", "icc_profile", "gamma"))
+                    )
+        except Exception:
+            return False
+
+    def read(self, path):
+        version = self.file_version(path)
+        if version is not None and version == self._version and self._bgr is not None:
+            return self._bgr.copy()
+
+        # Neighbor futures contain full originals, never review thumbnails.
+        image = self._prefetch.take(path, version) if version is not None else None
+        self._clear_current()
+        if image is None:
+            image = cv2.imread(path)
+        if image is not None and image.size and version is not None and version == self.file_version(path):
+            self._version = version
+            self._bgr = image.copy()
+            self._bgr.setflags(write=False)
+        return image
+
+    def review_pixmap(self, path):
+        version = self.file_version(path)
+        if version is not None and version == self._version and self._bgr is not None:
+            if self._review_compatible is None:
+                self._review_compatible = self.can_share_review(path)
+            if self._review_compatible and version == self.file_version(path):
+                if self._pixmap is None:
+                    height, width = self._bgr.shape[:2]
+                    image = QImage(
+                        self._bgr.data, width, height, self._bgr.strides[0], QImage.Format_RGB888
+                    ).rgbSwapped()
+                    self._pixmap = QPixmap.fromImage(image)
+                # Qt detaches this implicitly shared copy if a caller paints on it.
+                return QPixmap(self._pixmap)
+        return QPixmap(path)
+
+
+class FileRevealSignals(QObject):
+    completed = pyqtSignal(str, bool, str)
+
+
+class FileRevealWorker(QRunnable):
+    def __init__(self, image_file):
+        super().__init__()
+        self.image_file = image_file
+        self.signals = FileRevealSignals()
+
+    def run(self):
+        try:
+            from darkfusion_file_reveal import reveal_file
+            selected = reveal_file(self.image_file)
+            self.signals.completed.emit(self.image_file, selected, "")
+        except Exception as error:
+            self.signals.completed.emit(self.image_file, False, str(error))
+
+
 class GridThumbnailSignals(QObject):
     ready = pyqtSignal(str, object, int, int)
 
@@ -19314,7 +20232,8 @@ class GridThumbnailModel(QAbstractListModel):
             return Qt.NoItemFlags
         return Qt.ItemIsEnabled | Qt.ItemIsSelectable
 
-    def set_files(self, image_files, render_context=None):
+    def set_files(self, image_files, render_context=None, preserve_cache=False):
+        keep_cache = preserve_cache and self._render_context == dict(render_context or {})
         self.beginResetModel()
         self._image_files = list(image_files or [])
         self._row_by_path = {
@@ -19324,8 +20243,12 @@ class GridThumbnailModel(QAbstractListModel):
         self._render_context = dict(render_context or {})
         self._generation += 1
         self._pending.clear()
-        self._pixmaps.clear()
-        self._annotation_counts.clear()
+        if keep_cache:
+            self._pixmaps = OrderedDict((path, pixmap) for path, pixmap in self._pixmaps.items() if path in self._row_by_path)
+            self._annotation_counts = {path: count for path, count in self._annotation_counts.items() if path in self._row_by_path}
+        else:
+            self._pixmaps.clear()
+            self._annotation_counts.clear()
         self.endResetModel()
 
     def is_checked(self, index_or_row):
@@ -19347,6 +20270,23 @@ class GridThumbnailModel(QAbstractListModel):
         model_index = self.index(row, 0)
         self.dataChanged.emit(model_index, model_index, [Qt.CheckStateRole])
         return image_file in self._checked_files
+
+    def check_range(self, first_row, last_row):
+        """Check one visible-order range without decoding images or per-row signals."""
+        first_row, last_row = sorted((int(first_row), int(last_row)))
+        if not (0 <= first_row <= last_row < len(self._image_files)):
+            return False
+        new_files = set(self._image_files[first_row:last_row + 1]) - self._checked_files
+        if not new_files:
+            return False
+        self._checked_files.update(new_files)
+        self.dataChanged.emit(
+            self.index(first_row, 0), self.index(last_row, 0), [Qt.CheckStateRole]
+        )
+        return True
+
+    def checked_count(self):
+        return len(self._checked_files)
 
     def checked_files(self):
         return [path for path in self._image_files if path in self._checked_files]
@@ -19412,6 +20352,7 @@ class GridReviewView(QtWidgets.QListView):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._checkbox_press_active = False
+        self._checkbox_range_anchor = None
 
     def _checkbox_rect(self, index):
         item_rect = self.visualRect(index)
@@ -19426,9 +20367,22 @@ class GridReviewView(QtWidgets.QListView):
             and hasattr(model, "toggle_checked")
             and self._checkbox_rect(index).contains(event.pos())
         ):
-            model.toggle_checked(index)
-            self.viewport().update(self.visualRect(index))
-            self.checkedChanged.emit(len(model.checked_files()))
+            image_file = model.data(index, Qt.UserRole)
+            if event.modifiers() & Qt.ShiftModifier and hasattr(model, "check_range"):
+                # Remember the file, not its row: a filter/reset can reorder or
+                # remove rows between the first click and the Shift-click.
+                anchor_row = model._row_by_path.get(self._checkbox_range_anchor)
+                if anchor_row is None:
+                    anchor_row = index.row()
+                    self._checkbox_range_anchor = image_file
+                model.check_range(anchor_row, index.row())
+                self.viewport().update()
+            else:
+                model.toggle_checked(index)
+                self._checkbox_range_anchor = image_file
+                self.viewport().update(self.visualRect(index))
+            count = model.checked_count() if hasattr(model, "checked_count") else len(model.checked_files())
+            self.checkedChanged.emit(count)
             self._checkbox_press_active = True
             event.accept()
             return
@@ -19953,7 +20907,7 @@ class ReviewSimilarityWorker(QThread):
                 self.completed.emit(self.request_id, [], [], True)
             else:
                 self.failed.emit(self.request_id, str(error) +
-                                 " You can select Appearance and shape in Settings > Display > Review Preview.")
+                                 " You can select Appearance and shape in Settings > General > Review Preview.")
         finally:
             if matcher is not None:
                 matcher.close()
@@ -20560,6 +21514,67 @@ class ClassColorButton(QPushButton):
         super().mousePressEvent(event)
 
 
+class ClearLabelsWorker(QThread):
+    """Clear a fixed label-file snapshot without doing disk I/O on the GUI thread."""
+
+    progress = pyqtSignal(int, int)
+
+    def __init__(self, targets, class_index, write_lines, parent=None):
+        super().__init__(parent)
+        self.targets = list(targets)
+        self.class_index = int(class_index)
+        self.write_lines = write_lines  # Filesystem-only atomic label writer.
+        self.result = dict(processed=0, changed=[], failures=[], canceled=False)
+
+    def run(self):
+        total = len(self.targets)
+        last_progress = time.monotonic()
+        self.progress.emit(0, total)
+        for index, (image_file, label_file) in enumerate(self.targets, start=1):
+            if self.isInterruptionRequested():
+                self.result["canceled"] = True
+                break
+            try:
+                if self.class_index == -2 or not os.path.isfile(image_file) or not os.path.isfile(label_file):
+                    continue
+                source_version = label_file_version(label_file)
+                try:
+                    with open(label_file, "r", encoding="utf-8-sig") as stream:
+                        lines = stream.readlines()
+                except UnicodeDecodeError:
+                    with open(label_file, "r", encoding="latin-1") as stream:
+                        lines = stream.readlines()
+                kept = []
+                if self.class_index != -1:
+                    for line in lines:
+                        try:
+                            remove = int(float(line.split()[0])) == self.class_index
+                        except (ValueError, IndexError):
+                            remove = False  # Keep unknown rows when clearing one class.
+                        if not remove:
+                            kept.append(line)
+                if kept == lines:
+                    continue
+                if self.isInterruptionRequested():
+                    self.result["canceled"] = True
+                    break
+                if not os.path.isfile(image_file) or label_file_version(label_file) != source_version:
+                    raise OSError("The image or labels changed while clearing was prepared.")
+                if not self.write_lines(label_file, kept):
+                    raise OSError("The annotation file could not be replaced.")
+                self.result["changed"].append(label_file)
+            except Exception as error:
+                logging.error("Clear Labels kept %s unchanged: %s", label_file, error)
+                self.result["failures"].append(f"{os.path.basename(label_file)}: {error}")
+            finally:
+                self.result["processed"] = index
+                now = time.monotonic()
+                if index == total or now - last_progress >= .05:
+                    self.progress.emit(index, total)
+                    last_progress = now
+        self.progress.emit(self.result["processed"], total)
+
+
 class ClassLabelRemapWorker(QThread):
     """Remap dataset class IDs without blocking the Qt event loop."""
 
@@ -20567,66 +21582,45 @@ class ClassLabelRemapWorker(QThread):
     completed = pyqtSignal(int)
     failed = pyqtSignal(str)
 
-    def __init__(self, directory, id_map, parent=None):
+    def __init__(self, directory, id_map, parent=None, *, classes_path=None, classes=None):
         super().__init__(parent)
         self.directory = str(directory or "")
         self.id_map = {int(key): value for key, value in dict(id_map or {}).items()}
+        self.classes_path = classes_path
+        self.classes = None if classes is None else list(classes)
 
     def _label_files(self):
         skip_names = {"classes.txt", "obj.names", "names.txt", "model_classes.txt"}
         image_stems = set()
         text_paths = []
-        try:
-            with os.scandir(self.directory) as entries:
-                for entry in entries:
-                    if not entry.is_file():
-                        continue
-                    stem, suffix = os.path.splitext(entry.name)
-                    suffix = suffix.lower()
-                    if suffix in OUTPUT_IMAGE_SUFFIXES:
-                        image_stems.add(stem)
-                    elif suffix == ".txt" and entry.name.lower() not in skip_names:
-                        text_paths.append((stem, entry.path))
-        except OSError:
-            return []
+        with os.scandir(self.directory) as entries:
+            for entry in entries:
+                if not entry.is_file():
+                    continue
+                stem, suffix = os.path.splitext(entry.name)
+                suffix = suffix.lower()
+                if suffix in OUTPUT_IMAGE_SUFFIXES:
+                    image_stems.add(stem)
+                elif suffix == ".txt" and entry.name.lower() not in skip_names:
+                    text_paths.append((stem, entry.path))
         return sorted(
             path for stem, path in text_paths
             if not image_stems or stem in image_stems
         )
 
-    @staticmethod
-    def _write_label_lines_atomic(label_file, lines):
-        directory = os.path.dirname(os.path.abspath(label_file))
-        descriptor, temporary_path = tempfile.mkstemp(
-            prefix=".darkfusion-class-remap-",
-            suffix=".tmp",
-            dir=directory,
-        )
-        try:
-            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
-                descriptor = None
-                stream.write("\n".join(lines) + ("\n" if lines else ""))
-            os.replace(temporary_path, label_file)
-            temporary_path = None
-        finally:
-            if descriptor is not None:
-                os.close(descriptor)
-            if temporary_path is not None:
-                try:
-                    os.remove(temporary_path)
-                except FileNotFoundError:
-                    pass
-
     def run(self):
+        transaction = None
         try:
             label_files = self._label_files()
+            transaction = DatasetFileTransaction(self.directory)
             total = len(label_files)
             changed_files = 0
             self.progress.emit(0, total)
 
             for index, label_file in enumerate(label_files, start=1):
-                with open(label_file, "r", encoding="utf-8") as stream:
-                    original_lines = stream.readlines()
+                with open(label_file, "rb") as stream:
+                    original_bytes = stream.read()
+                original_lines = original_bytes.decode("utf-8-sig").splitlines()
 
                 new_lines = []
                 changed = False
@@ -20651,15 +21645,25 @@ class ClassLabelRemapWorker(QThread):
                     new_lines.append(" ".join(parts))
 
                 if changed:
-                    self._write_label_lines_atomic(label_file, new_lines)
+                    text = "\n".join(new_lines) + ("\n" if new_lines else "")
+                    transaction.stage(label_file, text.encode("utf-8"), expected=original_bytes, check_expected=True)
                     changed_files += 1
 
                 if index == total or index % 100 == 0:
                     self.progress.emit(index, total)
 
+            if self.classes is not None:
+                if not self.classes_path:
+                    raise ValueError("A class-list path is required for a class-list change.")
+                text = "\n".join(self.classes) + ("\n" if self.classes else "")
+                transaction.stage(self.classes_path, text.encode("utf-8"))
+            transaction.commit()
             self.completed.emit(changed_files)
         except Exception:
             self.failed.emit(traceback.format_exc())
+        finally:
+            if transaction is not None:
+                transaction.close()
 
 
 class ClassPickerDialog(QDialog):
@@ -21442,16 +22446,15 @@ class ClassPickerDialog(QDialog):
         path = self.class_file_path()
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w", encoding="utf-8") as f:
-                f.write("\n".join(classes) + ("\n" if classes else ""))
+            write_label_text_atomic(path, "\n".join(classes) + ("\n" if classes else ""))
             return True
         except Exception as e:
             QMessageBox.critical(self, "Save Error", f"Could not save classes.txt:\n{e}")
             return False
 
-    def apply_class_list(self, classes, check_state=None, current_index=None):
+    def apply_class_list(self, classes, check_state=None, current_index=None, persist=True):
         check_state = check_state or {}
-        if not self.write_classes_file(classes):
+        if persist and not self.write_classes_file(classes):
             return False
 
         self.main_window.class_names = list(classes)
@@ -21496,7 +22499,7 @@ class ClassPickerDialog(QDialog):
         elif not busy:
             self.set_class_warning("")
 
-    def remap_label_files_async(self, id_map, on_completed):
+    def remap_label_files_async(self, id_map, on_completed, *, classes=None):
         worker = self._label_remap_worker
         if worker is not None and worker.isRunning():
             return False
@@ -21506,11 +22509,31 @@ class ClassPickerDialog(QDialog):
             or getattr(self.main_window, "output_path", None)
             or os.getcwd()
         )
-        worker = ClassLabelRemapWorker(directory, id_map, self)
+        worker = ClassLabelRemapWorker(directory, id_map, self,
+            classes_path=self.class_file_path() if classes is not None else None, classes=classes)
         self._label_remap_worker = worker
         self._set_class_editing_busy(True, "Updating label class IDs in the background…")
+        # Block editing, not the event loop, until labels and classes.txt agree.
+        class ClassEditProgress(QtWidgets.QProgressDialog):
+            def reject(inner_self):
+                pass
+            def closeEvent(inner_self, event):
+                if worker.isRunning():
+                    event.ignore()
+                else:
+                    super().closeEvent(event)
+        progress_dialog = ClassEditProgress("Preparing dataset class changes…", "", 0, 0, self)
+        progress_dialog.setCancelButton(None)
+        progress_dialog.setWindowTitle("Updating Dataset Classes")
+        progress_dialog.setWindowModality(Qt.ApplicationModal)
+        progress_dialog.setAutoClose(False)
+        progress_dialog.setAutoReset(False)
+        progress_dialog.setMinimumDuration(0)
+        progress_dialog.show()
 
         def update_progress(current, total):
+            progress_dialog.setMaximum(max(1, total))
+            progress_dialog.setValue(current)
             if total:
                 self.set_class_warning(
                     f"Updating label class IDs in the background… {current:,}/{total:,}"
@@ -21518,7 +22541,15 @@ class ClassPickerDialog(QDialog):
 
         def completed(changed_files):
             try:
-                on_completed(int(changed_files))
+                active_directory = (getattr(self.main_window, "image_directory", None)
+                                    or getattr(self.main_window, "output_path", None) or os.getcwd())
+                if os.path.normcase(os.path.abspath(active_directory)) == os.path.normcase(os.path.abspath(directory)):
+                    on_completed(int(changed_files))
+                    current = getattr(self.main_window, "current_file", None)
+                    if current and getattr(self.main_window, "annotation_scene_active", False):
+                        self.main_window.display_image(current, rebuild_preview=True)
+                    if hasattr(self.main_window, "queue_live_inference_refresh"):
+                        self.main_window.queue_live_inference_refresh("dataset classes changed")
             finally:
                 self._set_class_editing_busy(False)
 
@@ -21528,10 +22559,13 @@ class ClassPickerDialog(QDialog):
             QMessageBox.critical(
                 self,
                 "Label Update Error",
-                "DarkFusion could not update the dataset label IDs. See the terminal log for details.",
+                "Class editing failed. Completed file changes were rolled back where possible. "
+                "Check the terminal log for details and any retained recovery files.",
             )
 
         def cleanup():
+            progress_dialog.close()
+            progress_dialog.deleteLater()
             if self._label_remap_worker is worker:
                 self._label_remap_worker = None
             worker.deleteLater()
@@ -21630,11 +22664,11 @@ class ClassPickerDialog(QDialog):
         current_index = min(rows[0], max(0, len(new_classes) - 1)) if new_classes else 0
 
         def finish_removal(_changed_files):
-            if self.apply_class_list(new_classes, check_state, current_index=current_index):
+            if self.apply_class_list(new_classes, check_state, current_index=current_index, persist=False):
                 if hasattr(self.main_window, "remove_class_metadata"):
                     self.main_window.remove_class_metadata(names)
 
-        self.remap_label_files_async(id_map, finish_removal)
+        self.remap_label_files_async(id_map, finish_removal, classes=new_classes)
 
     def merge_selected_classes(self):
         classes = self.class_names()
@@ -21683,7 +22717,7 @@ class ClassPickerDialog(QDialog):
         merged_names = [classes[row] for row in selected_rows if row != target_old_idx]
 
         def finish_merge(_changed_files):
-            if self.apply_class_list(new_classes, check_state, current_index=target_new_idx):
+            if self.apply_class_list(new_classes, check_state, current_index=target_new_idx, persist=False):
                 if hasattr(self.main_window, "merge_class_metadata"):
                     self.main_window.merge_class_metadata(
                         target_name,
@@ -21691,7 +22725,7 @@ class ClassPickerDialog(QDialog):
                         original_survivor_name=original_target_name,
                     )
 
-        self.remap_label_files_async(id_map, finish_merge)
+        self.remap_label_files_async(id_map, finish_merge, classes=new_classes)
 
     def move_current_class(self, direction):
         classes = self.class_names()
@@ -21715,9 +22749,9 @@ class ClassPickerDialog(QDialog):
         check_state = self.snapshot_check_state()
 
         def finish_move(_changed_files):
-            self.apply_class_list(new_classes, check_state, current_index=new_idx)
+            self.apply_class_list(new_classes, check_state, current_index=new_idx, persist=False)
 
-        self.remap_label_files_async(id_map, finish_move)
+        self.remap_label_files_async(id_map, finish_move, classes=new_classes)
 
     def show_context_menu(self, pos):
         index = self.class_list.indexAt(pos)
@@ -22338,7 +23372,7 @@ class DinoWorker(QThread):
                 self.error.emit("No classes selected from DarkFusion dropdown.")
                 return
 
-            import dinov5_2 as dino_runtime
+            import darkfusion_dino as dino_runtime
 
             # The UI captures this before the worker starts. Never access Qt
             # widgets from this thread just to discover the active ROI.
@@ -22901,67 +23935,6 @@ class UiLoader:
         logger.info("Preview table UI setup completed.")
 
 
-class ROIControlWindow(QDialog):
-    """Small floating ROI adjustment window; stays open (non-modal) until closed.
-
-    A dropdown selects which ROI (1 or 2) the shared control panel edits.
-    """
-
-    def __init__(self, parent_window):
-        super().__init__(parent_window)
-        self.setWindowTitle("ROI")
-        self.setModal(False)
-        self.setWindowFlags(self.windowFlags() | Qt.Tool)
-        self.setMinimumWidth(320)
-
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(8)
-
-        selector_row = QtWidgets.QHBoxLayout()
-        selector_row.addWidget(QLabel("ROI"))
-        self.roi_selector = QtWidgets.QComboBox(self)
-        self.roi_selector.addItems(["ROI 1", "ROI 2"])
-        selector_row.addWidget(self.roi_selector, 1)
-        layout.addLayout(selector_row)
-
-        self.stack = QtWidgets.QStackedWidget(self)
-        self.stack.addWidget(self._roi_group(parent_window, 1))
-        self.stack.addWidget(self._roi_group(parent_window, 2))
-        layout.addWidget(self.stack)
-
-        self.roi_selector.currentIndexChanged.connect(self.stack.setCurrentIndex)
-
-    @staticmethod
-    def _roi_group(window, roi_id):
-        suffix = "" if roi_id == 1 else "_2"
-        group = QtWidgets.QGroupBox(f"ROI {roi_id}")
-        grid = QtWidgets.QGridLayout(group)
-        grid.setSpacing(6)
-        grid.addWidget(getattr(window, f"roi_checkbox{suffix}"), 0, 0, 1, 3)
-        rows = (("X", "x"), ("Y", "y"), ("W", "width"), ("H", "height"))
-        for row, (label, name) in enumerate(rows, start=1):
-            slider = getattr(window, f"{name}_spin_slider{suffix}")
-            spin = QtWidgets.QSpinBox(group)
-            spin.setRange(slider.minimum(), slider.maximum())
-            spin.setValue(slider.value())
-            spin.setFixedWidth(72)
-            # Two-way sync; slider bound as default arg so each row keeps its own.
-            def _slider_to_spin(value, spin=spin, slider=slider):
-                spin.blockSignals(True)
-                spin.setRange(slider.minimum(), slider.maximum())
-                spin.setValue(value)
-                spin.blockSignals(False)
-            slider.valueChanged.connect(_slider_to_spin)
-            slider.rangeChanged.connect(lambda lo, hi, spin=spin: spin.setRange(lo, hi))
-            spin.valueChanged.connect(slider.setValue)
-            grid.addWidget(QLabel(label), row, 0)
-            grid.addWidget(slider, row, 1)
-            grid.addWidget(spin, row, 2)
-        grid.setColumnStretch(1, 1)
-        return group
-
-
 class ROIEdgeSliders(QtCore.QObject):
     """Four sliders stuck to the edges of the display that drive the active ROI.
 
@@ -22995,9 +23968,12 @@ class ROIEdgeSliders(QtCore.QObject):
             "y": self.left,
             "height": self.right,
         }
-        for edge in self._edges.values():
+        for name, edge in self._edges.items():
             edge.setStyleSheet(style)
-            edge.setToolTip("ROI edge control")
+            edge.setToolTip({"x": "Move the selected ROI left/right.",
+                             "y": "Move the selected ROI up/down.",
+                             "width": "Adjust the selected ROI width (image pixels).",
+                             "height": "Adjust the selected ROI height (image pixels)."}[name])
             edge.hide()
 
         self.top.valueChanged.connect(lambda v: self._drive("x", v))
@@ -23099,6 +24075,19 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
     rightClicked = pyqtSignal(QModelIndex)
     leftClicked = pyqtSignal(QModelIndex)
     signalThumbnailCreated = QtCore.pyqtSignal(int, QtGui.QPixmap)
+    status_message_requested = pyqtSignal(str, int)
+    sam3_startup_warmup_finished = pyqtSignal()
+
+    @pyqtSlot(str, int)
+    def _show_status_message(self, message, timeout):
+        """Only this GUI-thread slot may create/update the status bar."""
+        self.statusBar().showMessage(message, timeout)
+
+    def post_status_message(self, message, timeout=3000):
+        if QThread.currentThread() == self.thread():
+            self._show_status_message(str(message), int(timeout))
+        else:
+            self.status_message_requested.emit(str(message), int(timeout))
 
     def _ensure_language_dropdown(self):
         dropdown = getattr(self, "language_dropdown", None)
@@ -23143,6 +24132,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         style_name = self.styleComboBox.currentText()
         apply_theme_assets(self, style_name, Path(APP_DIR) / "styles")
+        QtCore.QTimer.singleShot(0, self._reflow_status_label_tools)
 
     def recommended_ui_scale_percent(self, screen=None):
         """Return an extra app scale based on Qt's available logical pixels."""
@@ -23202,6 +24192,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
     def _style_with_global_line_spacing(self, stylesheet):
         base = self._stylesheet_with_ui_scale(stylesheet)
+        base = re.sub(r"/\* DarkFusion dock chrome start \*/.*?/\* DarkFusion dock chrome end \*/",
+                      "", base, flags=re.DOTALL).rstrip()
         prefix_additions = []
         if GLOBAL_LINE_SPACING_QSS.strip() not in base:
             prefix_additions.append(GLOBAL_LINE_SPACING_QSS)
@@ -23211,6 +24203,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             parts.append("\n\n".join(prefix_additions).rstrip())
         if base.strip():
             parts.append(base.rstrip())
+
+        parts.append(dock_chrome_stylesheet(base, self._theme_manifest_for_style()).strip())
 
         # This must remain last so incomplete theme-specific indicator rules
         # cannot make unchecked boxes transparent or borderless.
@@ -23262,6 +24256,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         root = root or self
 
         for layout in root.findChildren(QtWidgets.QLayout):
+            if layout.property("preserveCompactSpacing"):
+                continue
             if layout.spacing() < UI_LAYOUT_SPACING:
                 layout.setSpacing(UI_LAYOUT_SPACING)
             try:
@@ -23288,6 +24284,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         for label in root.findChildren(QtWidgets.QLabel):
             if label.margin() < 1:
                 label.setMargin(1)
+            if label.property("preserveWordWrap"):
+                label.setWordWrap(True)
+                label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+                continue
             label.setWordWrap(False)
             label.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
 
@@ -23431,6 +24431,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self._compact_augment_convert_panel()
         self._compact_train_export_panels()
         self._compact_advanced_panels()
+        self._consolidate_label_workflow()
+        for page_name in ("tab_20", "tab_21", "tab_2"):
+            page = getattr(self, page_name, None)
+            if page is not None and page.layout() is not None:
+                page.layout().setContentsMargins(8, 8, 8, 8)
+                page.layout().setSpacing(10)
+                page.layout().setAlignment(Qt.AlignTop)
         self.setStyleSheet(self._style_with_global_line_spacing(self.styleSheet()))
 
     def setup_dock_context_help(self):
@@ -23440,8 +24447,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             "Status dock",
             (
                 "Shows current operation progress and the controls used while reviewing "
-                "images: annotation mode, active class, navigation, theme, language, "
-                "Auto Scan, and CUDA activity."
+                "images: annotation mode, active class, navigation, Auto Scan, ROI, "
+                "and shared Label Tools. Appearance and language are in Settings."
             ),
             "2-understand-the-workflow",
         )
@@ -23449,8 +24456,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             getattr(self, "menu_dock", None),
             "Workflow dock",
             (
-                "Contains the main workflow tabs for collecting data, labeling, review, "
-                "dataset preparation, training/export, and advanced tools. Resize or float "
+                "Contains the main workflow tabs for collecting data, review, dataset "
+                "preparation, training/export, and advanced tools. Label Tools remain in the top dock. Resize or float "
                 "this dock when a panel needs more horizontal space."
             ),
             "2-understand-the-workflow",
@@ -23459,6 +24466,15 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
     def register_dock_context_help(self, dock, help_title, summary, guide_section):
         if not isinstance(dock, QtWidgets.QDockWidget):
             return
+        body = dock.widget()
+        if body is not None and not body.property("darkfusionDockBody"):
+            # Native floating docks do not paint the QDockWidget box. Frame the
+            # existing body instead; never wrap/reparent the controls or viewer.
+            body.setProperty("darkfusionDockBody", True)
+            body.style().unpolish(body)
+            body.style().polish(body)
+            body.updateGeometry()
+            body.update()
         if bool(dock.property("darkfusionContextHelpRegistered")):
             return
 
@@ -23695,7 +24711,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         controls["status"].setMinimumHeight(26)
         controls["status"].setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        controls["status"].setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        controls["status"].setWordWrap(True)
+        controls["status"].setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
 
         controls["speed"].setMinimumSize(88, 30)
         controls["speed"].setMaximumWidth(104)
@@ -23743,12 +24760,15 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         info_row.addWidget(controls["frame"])
         info_row.addWidget(controls["status"], 1)
 
-        transport_row = QtWidgets.QHBoxLayout()
+        transport_row = QtWidgets.QGridLayout()
         transport_row.setObjectName("video_playback_transport_row")
         transport_row.setContentsMargins(0, 0, 0, 0)
         transport_row.setSpacing(6)
-        for key in ("back", "prev_frame", "play", "next_frame", "forward"):
-            transport_row.addWidget(controls[key], 1)
+        for column, key in enumerate(("back", "play", "forward")):
+            transport_row.addWidget(controls[key], 0, column)
+            transport_row.setColumnStretch(column, 1)
+        transport_row.addWidget(controls["prev_frame"], 1, 0)
+        transport_row.addWidget(controls["next_frame"], 1, 1)
         if not hasattr(self, "video_label_frame_button"):
             self.video_label_frame_button = QtWidgets.QPushButton("Label Frame", playback_group)
             self.video_label_frame_button.setObjectName("video_label_frame_button")
@@ -23758,7 +24778,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             )
             self.video_label_frame_button.setMinimumHeight(32)
             self.video_label_frame_button.clicked.connect(self.label_current_video_frame)
-        transport_row.addWidget(self.video_label_frame_button, 1)
+        transport_row.addWidget(self.video_label_frame_button, 1, 2)
         if not hasattr(self, "video_propagate_labels_button"):
             self.video_propagate_labels_button = QtWidgets.QPushButton(
                 "Propagate", playback_group
@@ -23773,11 +24793,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             self.video_propagate_labels_button.clicked.connect(
                 lambda: self.open_label_propagation_dialog("video")
             )
-            # Hidden per user request: the Label tab's Propagate toggle covers
+            # Hidden per user request: the Status dock's Propagate toggle covers
             # both images and video, so this Collect-tab copy stays out of sight.
             # Re-enable with setVisible(True) if it is ever needed again.
             self.video_propagate_labels_button.setVisible(False)
-        transport_row.addWidget(self.video_propagate_labels_button, 1)
+        transport_row.addWidget(self.video_propagate_labels_button, 2, 0, 1, 3)
 
         options_row = QtWidgets.QHBoxLayout()
         options_row.setObjectName("video_playback_options_row")
@@ -23983,6 +25003,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         while extract_layout.count():
             extract_layout.takeAt(0)
+        for label in extract_group.findChildren(QtWidgets.QLabel, options=Qt.FindDirectChildrenOnly):
+            label.hide()  # Unmanaged Designer captions must not float over the rebuilt rows.
 
         extract_layout.setContentsMargins(12, 16, 12, 12)
         extract_layout.setHorizontalSpacing(10)
@@ -24084,13 +25106,15 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         size_row.setSpacing(8)
         size_row.addWidget(controls["crop"])
         size_row.addWidget(controls["resize"])
-        size_row.addStretch(1)
         size_row.addWidget(field_label("Mode", 40))
         size_row.addWidget(controls["resize_policy"])
-        size_row.addWidget(field_label("Frame W", 54))
-        size_row.addWidget(controls["width"])
-        size_row.addWidget(field_label("Frame H", 54))
-        size_row.addWidget(controls["height"])
+        size_row.addStretch(1)
+        dimensions_row = self._row_layout()
+        dimensions_row.addWidget(field_label("Frame W", 54))
+        dimensions_row.addWidget(controls["width"])
+        dimensions_row.addWidget(field_label("Frame H", 54))
+        dimensions_row.addWidget(controls["height"])
+        dimensions_row.addStretch(1)
 
         output_row = QtWidgets.QHBoxLayout()
         output_row.setContentsMargins(0, 0, 0, 0)
@@ -24105,7 +25129,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         action_row.addWidget(controls["extract"], 1)
         action_row.addWidget(controls["stop"], 1)
 
-        for row, row_layout in enumerate((source_row, step_row, option_row, size_row, output_row, action_row)):
+        for row, row_layout in enumerate((source_row, step_row, option_row, size_row, dimensions_row, output_row, action_row)):
             extract_layout.addLayout(row_layout, row, 0, 1, 1)
         extract_layout.setColumnStretch(0, 1)
 
@@ -24210,11 +25234,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         playback_group.setTitle("Playback")
         playback_group.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
 
+        extract_group.setTitle("Capture / Extract")
         extract_group.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
 
         layout.addWidget(queue_group, 0, 0)
-        layout.addWidget(playback_group, 1, 0)
-        layout.addWidget(extract_group, 2, 0)
+        layout.addWidget(extract_group, 1, 0)
+        layout.addWidget(playback_group, 2, 0)
         layout.setColumnStretch(0, 1)
         for row in range(3):
             layout.setRowStretch(row, 0)
@@ -24225,7 +25250,57 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if isinstance(remove_download_button, QtWidgets.QWidget):
             remove_download_button.hide()
 
+        # Keep the actual buttons (and their existing single signal binding)
+        # outside the Workflow scroll area. Collapsing setup never hides Stop.
+        footer = QtWidgets.QFrame(self.dockWidgetContents)
+        footer.setObjectName("collect_action_footer")
+        footer.setProperty("workflowChrome", True)
+        footer.setStyleSheet('QFrame[workflowChrome="true"] { border: none; background: transparent; }')
+        footer_layout = QtWidgets.QGridLayout(footer)
+        footer_layout.setContentsMargins(8, 4, 8, 4)
+        footer_layout.setSpacing(6)
+        self.collect_task_label = QtWidgets.QLabel("Ready to extract", footer)
+        self.collect_task_label.setWordWrap(True)
+        self.collect_show_button = QtWidgets.QPushButton("Show Collect", footer)
+        self.collect_show_button.clicked.connect(self._show_collect_controls)
+        footer_layout.addWidget(self.collect_task_label, 0, 0)
+        footer_layout.addWidget(self.collect_show_button, 0, 1)
+        for column, button in enumerate((self.extract_button, self.stop_extract)):
+            self._take_layout_widget(extract_group.layout(), button)
+            button.setMaximumWidth(QtWidgets.QWIDGETSIZE_MAX)
+            footer_layout.addWidget(button, 1, column)
+        footer_layout.setColumnStretch(0, 1)
+        footer_layout.setColumnStretch(1, 1)
+        self.gridLayout_11.addWidget(footer, 1, 1)
+        self.gridLayout_11.setRowStretch(0, 1)
+        self.collect_action_footer = footer
+        self._update_collect_action_footer()
         self._collect_tab_layout_polished = True
+
+    def _show_collect_controls(self):
+        index = self.tab_index_by_text(self.tabWidget, ("Collect",))
+        if index >= 0:
+            self.tabWidget.setCurrentIndex(index)
+
+    def _update_collect_action_footer(self):
+        footer = getattr(self, "collect_action_footer", None)
+        if footer is None:
+            return
+        collecting = self.collect_workflow_is_active()
+        state = getattr(self, "_extraction_ui_state", "idle")
+        running = state in ("preparing", "running", "stopping")
+        footer.setVisible(collecting or running)
+        self.extract_button.setVisible(collecting)
+        self.collect_show_button.setVisible(not collecting and running)
+        caption = {"idle": "Ready to extract", "preparing": "Preparing extraction…",
+                   "running": "Extracting…", "stopping": "Stopping extraction…"}.get(state, "Ready to extract")
+        progress = getattr(self, "_extraction_progress_state", {}) or {}
+        value, maximum = progress.get("value"), progress.get("maximum")
+        if state == "running" and value is not None:
+            caption += f" {int(value):,}"
+            if maximum:
+                caption += f" / {int(maximum):,}"
+        self.collect_task_label.setText(caption)
 
     def _workflow_label(self, text, parent=None, width=72):
         label = QtWidgets.QLabel(text, parent)
@@ -24288,6 +25363,31 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
     def _compact_roi_extras_panel(self):
         self._compact_extra_label_panel()
+        # The Status dock and edge sliders are the only ROI editor. Preserve
+        # these original values/signals for every labeling/filtering backend.
+        for suffix in ("", "_2"):
+            for name in ("roi_checkbox", "x_spin_slider", "y_spin_slider", "width_spin_slider", "height_spin_slider"):
+                widget = getattr(self, name + suffix, None)
+                if widget is not None:
+                    widget.hide()
+        group = getattr(self, "groupBox_7", None)
+        if group is not None and not getattr(self, "_roi_filter_panel_compacted", False):
+            group.setTitle("Remove Labels Outside ROI")
+            group.setMaximumHeight(QtWidgets.QWIDGETSIZE_MAX)
+            group.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+            grid = group.layout()
+            self._take_layout_widget(grid, self.filter_button)
+            note = QtWidgets.QLabel(
+                "Keep labels touching either enabled ROI; remove labels outside both regions. "
+                "Images are kept. Adjust ROIs using the controls in the Status dock.", group)
+            note.setObjectName("roi_cleanup_explanation")
+            note.setProperty("preserveWordWrap", True)
+            note.setWordWrap(True)
+            grid.addWidget(note, 2, 0, 1, 5)
+            self.filter_button.setText("Remove Outside Labels")
+            self.filter_button.setToolTip("Apply the enabled ROI regions to the saved dataset labels. Images are not cropped.")
+            grid.addWidget(self.filter_button, 3, 0, 1, 5)
+            self._roi_filter_panel_compacted = True
 
     def _compact_extra_label_panel(self):
         if getattr(self, "_extra_label_panel_compacted", False):
@@ -24400,6 +25500,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             getattr(self, "frame_4", None),
             getattr(self, "groupBox_3", None),
             getattr(self, "groupBox", None),
+            getattr(self, "groupBox_7", None) if getattr(self, "groupBox_7", None) is not None and self.groupBox_7.parentWidget() is self.tab_20 else None,
             getattr(self, "groupBox_2", None),
         ]
         ordered_widgets = [widget for widget in ordered_widgets if isinstance(widget, QtWidgets.QWidget)]
@@ -24409,10 +25510,22 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             widget.setMinimumWidth(0)
             widget.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
 
+        # Designer's old bottom spacer occupied row 4. Adding Label Cleanup
+        # moved Move Images into that same row, so the spacer stretched a huge
+        # gap above it when the other categories were collapsed. Keep unused
+        # space after the whole stack through top alignment, not inside a row.
+        for index in range(layout.count() - 1, -1, -1):
+            if layout.itemAt(index).spacerItem() is not None:
+                layout.takeAt(index)
+        for row in range(layout.rowCount()):
+            layout.setRowStretch(row, 0)
+            layout.setRowMinimumHeight(row, 0)
+
         for row, widget in enumerate(ordered_widgets):
             layout.addWidget(widget, row, 0, 1, 1)
             layout.setRowStretch(row, 0)
 
+        layout.setAlignment(Qt.AlignTop)
         layout.setColumnStretch(0, 1)
         self._prepare_split_panels_reordered = True
 
@@ -24424,6 +25537,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         layout = frame.layout() if frame is not None else None
         if not isinstance(layout, QtWidgets.QGridLayout):
             return
+        frame.setProperty("collapsibleSectionTitle", "Create Train / Valid")
 
         names = ("label_4", "dropdown", "valid_percent", "import_button", "output_button")
         widgets = {name: getattr(self, name, None) for name in names}
@@ -24439,19 +25553,25 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         layout.setHorizontalSpacing(8)
         layout.setVerticalSpacing(8)
 
-        widgets["label_4"].setText("Train / Valid")
-        widgets["label_4"].setMinimumWidth(76)
+        widgets["label_4"].setText("List")
+        widgets["label_4"].setMinimumWidth(44)
         widgets["dropdown"].setMaximumWidth(120)
         widgets["valid_percent"].setMaximumWidth(92)
 
-        row = self._row_layout()
-        row.addWidget(widgets["label_4"])
-        row.addWidget(widgets["dropdown"])
-        row.addWidget(self._workflow_label("Valid %", frame, 54))
-        row.addWidget(widgets["valid_percent"])
-        row.addWidget(widgets["import_button"], 1)
-        row.addWidget(widgets["output_button"], 1)
-        layout.addLayout(row, 0, 0)
+        widgets["import_button"].setText("Choose Images...")
+        widgets["output_button"].setText("Create Files...")
+        widgets["import_button"].setToolTip("Choose the images used to create the training and validation lists.")
+        options = self._row_layout()
+        options.addWidget(widgets["label_4"])
+        options.addWidget(widgets["dropdown"])
+        options.addWidget(self._workflow_label("Validation %", frame, 86))
+        options.addWidget(widgets["valid_percent"])
+        options.addStretch(1)
+        actions = self._row_layout()
+        actions.addWidget(widgets["import_button"], 1)
+        actions.addWidget(widgets["output_button"], 1)
+        layout.addLayout(options, 0, 0)
+        layout.addLayout(actions, 1, 0)
 
         self._prepare_split_toolbar_compacted = True
 
@@ -24487,6 +25607,16 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         layout.addLayout(source_row, 0, 0)
         layout.addLayout(target_row, 1, 0)
         layout.addWidget(widgets["start_move_btn"], 2, 0)
+        widgets["start_move_btn"].setToolTip(
+            "Move images and matching labels between these folders in the background. "
+            "The source does not need to be open in the editor."
+        )
+        progress = QtWidgets.QProgressBar(group)
+        progress.setObjectName("bulk_move_progress")
+        progress.setRange(0, 100)
+        progress.hide()
+        layout.addWidget(progress, 3, 0)
+        self.bulk_move_progress = progress
 
         self._move_images_panel_compacted = True
 
@@ -24654,6 +25784,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             return
 
         self.ensure_tile_images_controls()
+        # Designer captions no longer belong to the rebuilt grid. Leaving
+        # them unmanaged can paint stale labels over the new controls.
+        for caption in group.findChildren(QtWidgets.QLabel, options=Qt.FindDirectChildrenOnly):
+            caption.hide()
 
         names = (
             "crop_img_button",
@@ -24675,30 +25809,34 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             self._take_layout_widget(layout, widget)
             self._compact_control(widget)
 
-        size_row = self._row_layout()
-        size_row.addWidget(self._workflow_label("Tile W", group, 52))
-        size_row.addWidget(widgets["w_img"])
-        size_row.addWidget(self._workflow_label("Tile H", group, 52))
-        size_row.addWidget(widgets["h_img"])
-        size_row.addWidget(self._workflow_label("Overlap", group, 56))
-        size_row.addWidget(widgets["tile_overlap_spinbox"])
-        size_row.addWidget(self._workflow_label("Visible", group, 52))
-        size_row.addWidget(widgets["tile_min_visible_spinbox"])
-        size_row.addStretch(1)
-
-        action_row = self._row_layout()
-        action_row.addWidget(self._workflow_label("Layout", group, 52))
-        action_row.addWidget(widgets["tile_layout_combo"])
-        action_row.addWidget(self._workflow_label("Format", group, 52))
-        action_row.addWidget(widgets["tile_format_combo"])
-        action_row.addWidget(widgets["tile_keep_empty_checkbox"])
-        action_row.addWidget(widgets["tile_pad_edges_checkbox"])
-        action_row.addStretch(1)
-        action_row.addWidget(widgets["crop_img_button"], 1)
-        action_row.addWidget(widgets["split_data"], 1)
-
-        layout.addLayout(size_row, 0, 0)
-        layout.addLayout(action_row, 1, 0)
+        parameters = QtWidgets.QGridLayout()
+        parameters.setObjectName("tile_dimensions_grid")
+        parameters.setHorizontalSpacing(8)
+        parameters.setVerticalSpacing(8)
+        for row, pairs in enumerate((("Tile W", "w_img", "Tile H", "h_img"),
+                                     ("Overlap", "tile_overlap_spinbox", "Visible", "tile_min_visible_spinbox"))):
+            for column, (caption, name) in enumerate(((pairs[0], pairs[1]), (pairs[2], pairs[3]))):
+                widgets[name].setMinimumWidth(72)
+                parameters.addWidget(self._workflow_label(caption, group, 52), row, column * 2)
+                parameters.addWidget(widgets[name], row, column * 2 + 1)
+        parameters.setColumnStretch(1, 1)
+        parameters.setColumnStretch(3, 1)
+        mode_row = self._row_layout()
+        mode_row.addWidget(self._workflow_label("Layout", group, 52))
+        mode_row.addWidget(widgets["tile_layout_combo"], 1)
+        format_row = self._row_layout()
+        format_row.addWidget(self._workflow_label("Format", group, 52))
+        format_row.addWidget(widgets["tile_format_combo"])
+        format_row.addStretch(1)
+        options = self._row_layout()
+        options.addWidget(widgets["tile_keep_empty_checkbox"])
+        options.addWidget(widgets["tile_pad_edges_checkbox"])
+        options.addStretch(1)
+        actions = self._row_layout()
+        actions.addWidget(widgets["crop_img_button"], 1)
+        actions.addWidget(widgets["split_data"], 1)
+        for row, child_layout in enumerate((parameters, mode_row, format_row, options, actions)):
+            layout.addLayout(child_layout, row, 0)
 
         self._tile_images_panel_compacted = True
 
@@ -25070,6 +26208,56 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
     def _compact_advanced_panels(self):
         self._compact_cfg_editor_panel()
         self._compact_anchor_panel()
+        self._group_cfg_editor_contents()
+
+    def _group_cfg_editor_contents(self):
+        """Keep the working editor inside its category, not as an empty panel."""
+        if getattr(self, "_cfg_editor_contents_grouped", False):
+            return
+        table = getattr(self, "cfg_table", None)
+        group = getattr(self, "groupBox_18", None)
+        if table is None or group is None or group.layout() is None:
+            return
+        for widget in (table, self.hide_activation_checkbox, self.btn_save_file):
+            parent = widget.parentWidget()
+            self._take_layout_widget(parent.layout() if parent is not None else None, widget)
+        table.setMinimumHeight(220)
+        table.setMaximumHeight(480)
+        table.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+        table.setFrameShape(QtWidgets.QFrame.NoFrame)
+        table.setToolTip("Parameters from the loaded CFG or YAML file. Edit values here.")
+        footer = self._row_layout()
+        self.hide_activation_checkbox.setText("Hide Activation Layers")
+        self.btn_save_file.setText("Save CFG As...")
+        footer.addWidget(self.hide_activation_checkbox)
+        footer.addStretch(1)
+        footer.addWidget(self.btn_save_file)
+        layout = group.layout()
+        if isinstance(layout, QtWidgets.QFormLayout):
+            layout.addRow(table)
+            layout.addRow(footer)
+        else:
+            layout.addWidget(table, layout.rowCount(), 0)
+            layout.addLayout(footer, layout.rowCount(), 0)
+        model = table.model()
+        model.rowsInserted.connect(self._sync_cfg_editor_visibility)
+        model.rowsRemoved.connect(self._sync_cfg_editor_visibility)
+        model.modelReset.connect(self._sync_cfg_editor_visibility)
+        self._sync_cfg_editor_visibility()
+        container = getattr(self, "frame_19", None)
+        if container is not None:
+            container.setFrameShape(QtWidgets.QFrame.NoFrame)
+            container.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Maximum)
+            container.layout().setContentsMargins(0, 0, 0, 0)
+            container.layout().setAlignment(Qt.AlignTop)
+        page = getattr(self, "tab_2", None)
+        if page is not None and page.layout() is not None:
+            page.layout().setAlignment(Qt.AlignTop)
+        self._cfg_editor_contents_grouped = True
+
+    @pyqtSlot()
+    def _sync_cfg_editor_visibility(self):
+        self.cfg_table.setVisible(self.cfg_table.rowCount() > 0)
 
     def _compact_cfg_editor_panel(self):
         if getattr(self, "_cfg_editor_panel_compacted", False):
@@ -25131,9 +26319,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             "width_spinbox",
             "height_spinbox",
             "show_checkbox",
-            "hide_activation_checkbox",
             "calculate_anchors_button",
-            "btn_save_file",
         )
         widgets = {name: getattr(self, name, None) for name in names}
         if any(widget is None for widget in widgets.values()):
@@ -25155,7 +26341,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         widgets["label_23"].setText("Clusters")
         widgets["show_checkbox"].setText("Graph")
-        widgets["hide_activation_checkbox"].setText("Hide Act")
 
         source_row = self._row_layout()
         source_row.addWidget(widgets["import_data_button"], 1)
@@ -25171,12 +26356,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         option_row = self._row_layout(12)
         option_row.addWidget(widgets["show_checkbox"])
-        option_row.addWidget(widgets["hide_activation_checkbox"])
         option_row.addStretch(1)
 
         action_row = self._row_layout()
         action_row.addWidget(widgets["calculate_anchors_button"], 1)
-        action_row.addWidget(widgets["btn_save_file"], 1)
 
         panel_layout.addLayout(source_row)
         panel_layout.addLayout(size_row)
@@ -25228,12 +26411,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         shell = QtWidgets.QFrame(contents)
         shell.setObjectName("status_shell_panel")
         shell.setFrameShape(QtWidgets.QFrame.NoFrame)
-        shell.setMinimumHeight(108)
+        shell.setMinimumHeight(0)
         shell.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
 
         shell_layout = QtWidgets.QVBoxLayout(shell)
-        shell_layout.setContentsMargins(4, 4, 4, 4)
-        shell_layout.setSpacing(8)
+        shell_layout.setContentsMargins(0, 0, 0, 0)
+        shell_layout.setSpacing(6)
 
         top_row = QtWidgets.QHBoxLayout()
         top_row.setContentsMargins(0, 0, 0, 0)
@@ -25255,9 +26438,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         preview.setMidLineWidth(0)
         preview.setAlignment(Qt.AlignCenter)
         preview.setScaledContents(False)
-        preview.setMinimumSize(120, 90)
-        preview.setMaximumSize(360, 220)
-        preview.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        preview.setMinimumSize(96, 64)
+        preview.setMaximumSize(120, 64)
+        preview.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
         preview.installEventFilter(self)
 
         top_row.addWidget(button)
@@ -25273,24 +26456,33 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         labeling.setObjectName("frame_27")
         labeling.setFrameShape(QtWidgets.QFrame.NoFrame)
         labeling.setFrameShadow(QtWidgets.QFrame.Plain)
-        labeling.setMinimumHeight(90)
-        labeling.setMaximumHeight(250)
-        labeling.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        labeling.setMinimumHeight(0)
+        labeling.setMaximumHeight(QtWidgets.QWIDGETSIZE_MAX)
+        labeling.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         labeling_layout = labeling.layout()
         if labeling_layout is not None:
             labeling_layout.setContentsMargins(0, 0, 0, 0)
             labeling_layout.setSpacing(0)
         self._rebuild_status_labeling_panel(labeling)
         shell_layout.addWidget(labeling)
+        # Themes may style every QFrame. Keep only the dock/category boundaries,
+        # not a stack of decorative rectangles around the same controls.
+        for frame in (shell, labeling, self.status_labeling_panel, self.status_labeling_controls):
+            frame.setProperty("workflowChrome", True)
+            frame.setStyleSheet('QFrame[workflowChrome="true"] { border: none; background: transparent; }')
 
         layout.addWidget(shell, 0, 0, 1, 2)
+        # Let the contents determine the dock height, including an expanded ROI
+        # selector or a second Label Tools row. Old saved dock heights must not
+        # stretch the toolbar or force a fixed pixel cap under larger UI fonts.
+        layout.setSizeConstraint(QtWidgets.QLayout.SetMinAndMaxSize)
         layout.setColumnStretch(0, 1)
         layout.setColumnStretch(1, 1)
         for row in range(layout.rowCount()):
             layout.setRowStretch(row, 0)
 
-        dock.setMinimumSize(320, 160)
-        dock.setMaximumHeight(260)
+        dock.setMinimumSize(320, 0)
+        dock.setMaximumHeight(QtWidgets.QWIDGETSIZE_MAX)
         contents.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         self._status_dock_polished = True
 
@@ -25357,8 +26549,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         panel = QtWidgets.QFrame(labeling)
         panel.setObjectName("status_labeling_panel")
         panel.setFrameShape(QtWidgets.QFrame.NoFrame)
-        panel.setMinimumHeight(100)
-        panel.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        panel.setMinimumHeight(0)
+        panel.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        self.status_labeling_panel = panel
 
         panel_layout = QtWidgets.QVBoxLayout(panel)
         panel_layout.setContentsMargins(0, 0, 0, 0)
@@ -25369,6 +26562,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         top_line.setSpacing(6)
 
         bottom_line = QtWidgets.QHBoxLayout()
+        bottom_line.setObjectName("status_navigation_row")
         bottom_line.setContentsMargins(0, 0, 0, 0)
         bottom_line.setSpacing(10)
 
@@ -25411,24 +26605,64 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         top_line.addWidget(segmentation_mode)
         top_line.addStretch(1)
 
-        bottom_line.addWidget(previous_button)
-        bottom_line.addWidget(img_index_number)
-        bottom_line.addWidget(total_images)
-        bottom_line.addWidget(next_button)
-        bottom_line.addWidget(delete_button)
-        bottom_line.addWidget(grid_view_button)
-        bottom_line.addWidget(auto_scan_checkbox)
+        bottom_line.addWidget(previous_button, 0, Qt.AlignTop)
+        bottom_line.addWidget(img_index_number, 0, Qt.AlignTop)
+        bottom_line.addWidget(total_images, 0, Qt.AlignTop)
+        bottom_line.addWidget(next_button, 0, Qt.AlignTop)
+        bottom_line.addWidget(delete_button, 0, Qt.AlignTop)
+        bottom_line.addWidget(grid_view_button, 0, Qt.AlignTop)
+        bottom_line.addWidget(auto_scan_checkbox, 0, Qt.AlignTop)
 
-        enable_roi_button = QtWidgets.QPushButton("Enable ROI", labeling)
+        roi_tools = QtWidgets.QFrame(panel)
+        roi_tools.setObjectName("status_roi_tools")
+        roi_tools.setFrameShape(QtWidgets.QFrame.NoFrame)
+        roi_tools.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+        roi_tools.setProperty("workflowChrome", True)
+        roi_tools.setStyleSheet('QFrame[workflowChrome="true"] { border: none; background: transparent; }')
+        roi_layout = QtWidgets.QVBoxLayout(roi_tools)
+        roi_layout.setContentsMargins(0, 0, 0, 0)
+        roi_layout.setSpacing(6)
+        enable_roi_button = QtWidgets.QPushButton("Enable ROI", roi_tools)
         enable_roi_button.setObjectName("enable_roi_button")
-        enable_roi_button.setToolTip("Open the ROI adjustment panel.")
+        enable_roi_button.setCheckable(True)
+        enable_roi_button.setToolTip(
+            "Turn ROI filtering on/off. Starts with ROI 1; select ROI 2 below to add the second region."
+        )
+        enable_roi_button.setStyleSheet(
+            "QPushButton#enable_roi_button:checked { background-color: #237a3b; color: white; "
+            "border: 1px solid #6fcb85; font-weight: 600; }"
+            "QPushButton#enable_roi_button:checked:hover { background-color: #2d9149; }"
+        )
         enable_roi_button.setMinimumHeight(28)
         enable_roi_button.setMaximumHeight(30)
-        enable_roi_button.setMinimumWidth(88)
-        enable_roi_button.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
-        enable_roi_button.clicked.connect(self.show_roi_window)
+        enable_roi_button.setMinimumWidth(126)
+        enable_roi_button.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        enable_roi_button.toggled.connect(self._toggle_roi_master)
         self.enable_roi_button = enable_roi_button
-        bottom_line.addWidget(enable_roi_button)
+        roi_layout.addWidget(enable_roi_button)
+        self.roi_selector = QtWidgets.QComboBox(roi_tools)
+        self.roi_selector.setObjectName("roi_selector")
+        self.roi_selector.addItem("ROI 1", 1)
+        self.roi_selector.addItem("ROI 2", 2)
+        self.roi_selector.setMinimumHeight(28)
+        self.roi_selector.setAccessibleName("ROI to adjust")
+        self.roi_selector.setToolTip(
+            "Choose the ROI to adjust with the view-edge sliders. Selecting ROI 2 adds it; ROI 1 stays enabled."
+        )
+        self.roi_selector.currentIndexChanged.connect(self._on_roi_selected)
+        self.roi_selector.hide()
+        roi_layout.addWidget(self.roi_selector)
+        self.roi_clarity_checkbox = QtWidgets.QCheckBox("Clarity in ROI", roi_tools)
+        self.roi_clarity_checkbox.setObjectName("roi_clarity_enabled")
+        self.roi_clarity_checkbox.setChecked(bool(getattr(self, "settings", {}).get("objectClarityUseROI", False)))
+        self.roi_clarity_checkbox.setToolTip(
+            "Enhance enabled ROIs in the annotation view using the existing ROI sliders. "
+            "The border turns cyan and shows Clarity active when ready. "
+            "This checkbox leaves inference settings unchanged."
+        )
+        self.roi_clarity_checkbox.toggled.connect(self._roi_clarity_changed)
+        roi_layout.addWidget(self.roi_clarity_checkbox)
+        bottom_line.addWidget(roi_tools, 0, Qt.AlignTop)
         bottom_line.addStretch(1)
 
         for preference_combo in (style_combo, gif_combo, language_dropdown):
@@ -25437,8 +26671,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         controls_panel = QtWidgets.QFrame(panel)
         controls_panel.setObjectName("status_labeling_controls")
         controls_panel.setFrameShape(QtWidgets.QFrame.NoFrame)
-        controls_panel.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        controls_panel.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         controls_panel.setMinimumWidth(0)
+        self.status_labeling_controls = controls_panel
 
         controls_column = QtWidgets.QVBoxLayout(controls_panel)
         controls_column.setContentsMargins(0, 0, 0, 0)
@@ -25449,15 +26684,32 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         body_line = QtWidgets.QHBoxLayout()
         body_line.setContentsMargins(0, 0, 0, 0)
         body_line.setSpacing(10)
-        body_line.addWidget(controls_panel, 3)
-        body_line.addStretch(1)
+        body_line.addWidget(controls_panel, 1, Qt.AlignTop)
 
         preview = getattr(self, "image_label_2", None)
         if preview is not None:
             body_line.addWidget(preview, 0, Qt.AlignRight | Qt.AlignVCenter)
 
         panel_layout.addLayout(body_line)
-        panel_layout.addStretch(1)
+
+        # Reuse the original propagation/clear buttons, but remove the sparse
+        # Designer grid rows that used to separate them from navigation.
+        action_row = self._row_layout(6)
+        action_row.setObjectName("status_annotation_actions")
+        for name in ("clear_current_frame_labels_button", "propagate_labels_button",
+                     "propagation_overwrite_checkbox", "propagate_range_button"):
+            widget = getattr(self, name, None)
+            if widget is not None:
+                self._take_layout_widget(layout, widget)
+                action_row.addWidget(widget)
+        action_row.addStretch(1)
+        panel_layout.addLayout(action_row)
+        while layout.count():
+            layout.takeAt(0)
+        if isinstance(layout, QtWidgets.QGridLayout):
+            for row in range(layout.rowCount()):
+                layout.setRowStretch(row, 0)
+                layout.setRowMinimumHeight(row, 0)
 
         if isinstance(layout, QtWidgets.QGridLayout):
             layout.addWidget(panel, 0, 0, 1, 12)
@@ -25545,9 +26797,15 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
     def _simplify_review_filter_toolbar(self):
         """Arrange the active review toolbar controls."""
+        review_tabs = getattr(self, "tabWidget_2", None)
+        if review_tabs is not None and review_tabs.count() == 1:
+            # Keep the page and its native widgets/settings, not a redundant
+            # second Review heading under the main Review workflow tab.
+            review_tabs.tabBar().hide()
         frame = getattr(self, "frame_10", None)
         if frame is None:
             return
+        frame.setProperty("collapsibleSectionTitle", "Review Filters")
 
         layout = frame.layout()
         if layout is not None:
@@ -25569,30 +26827,39 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         annotation_button = getattr(self, "annotation_actions_button", None)
         if annotation_button is None:
-            annotation_button = QtWidgets.QPushButton("Annotation...", frame)
+            annotation_button = QtWidgets.QToolButton(frame)
+            annotation_button.setText("Annotation Actions")
             annotation_button.setObjectName("annotation_actions_button")
             annotation_button.setToolTip(
-                "Actions for the annotation last selected with left-click. "
-                "Right-click on a preview still deletes it immediately."
+                "Choose an annotation action with the arrow. "
+                "The main button repeats your last choice."
             )
-            annotation_button.clicked.connect(self.show_selected_preview_annotation_actions)
+            annotation_button.setToolButtonStyle(Qt.ToolButtonTextOnly)
+            annotation_button.setPopupMode(QtWidgets.QToolButton.MenuButtonPopup)
+            annotation_button.clicked.connect(self.run_selected_preview_annotation_action)
+            menu = QMenu(annotation_button)
+            menu.aboutToShow.connect(self._populate_selected_preview_annotation_menu)
+            annotation_button.setMenu(menu)
             self.annotation_actions_button = annotation_button
+            self._sync_preview_annotation_actions()
 
-        filter_box.setMinimumWidth(180)
+        filter_box.setMinimumWidth(0)
+        filter_box.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         filter_box.setToolTip("Show all images, blanks, or images containing a selected class.")
 
         review_button.setText("Pause Preview")
         review_button.setToolTip("Pause or resume the annotation preview table.")
 
-        search_box.setMinimumWidth(220)
+        search_box.setMinimumWidth(0)
         search_box.setPlaceholderText("Find image...")
 
         file_button.setText("Reveal File")
-        file_button.setToolTip("Open File Explorer and select the highlighted review file.")
+        file_button.setToolTip("Open File Explorer and select the image currently shown in the graphics view.")
 
         for button in (review_button, move_button, clear_button, annotation_button, file_button):
             button.setMinimumHeight(28)
-            button.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+            button.setMinimumWidth(0)
+            button.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
 
         if getattr(self, "_review_filter_toolbar_built", False):
             return
@@ -25603,19 +26870,75 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 if index >= 0:
                     layout.takeAt(index)
 
-            toolbar = QtWidgets.QHBoxLayout()
+            toolbar = QtWidgets.QVBoxLayout()
             toolbar.setObjectName("review_filter_toolbar")
             toolbar.setContentsMargins(0, 0, 0, 0)
             toolbar.setSpacing(8)
-            toolbar.addWidget(filter_box)
-            toolbar.addWidget(review_button)
-            toolbar.addWidget(move_button)
-            toolbar.addWidget(clear_button)
-            toolbar.addWidget(annotation_button)
-            toolbar.addWidget(search_box, 1)
-            toolbar.addWidget(file_button)
+            filter_row = self._row_layout()
+            filter_row.addWidget(filter_box, 2)
+            filter_row.addWidget(review_button, 1)
+            search_row = self._row_layout()
+            search_row.addWidget(search_box, 2)
+            search_row.addWidget(file_button, 1)
+            actions = self._row_layout()
+            for button in (move_button, clear_button, annotation_button):
+                actions.addWidget(button, 1)
+            toolbar.addLayout(filter_row)
+            toolbar.addLayout(search_row)
+            toolbar.addLayout(actions)
+            scope = QtWidgets.QLabel(frame)
+            scope.setObjectName("review_action_scope")
+            scope.setProperty("preserveWordWrap", True)
+            scope.setProperty("workflowChrome", True)
+            scope.setStyleSheet("QLabel#review_action_scope { border: none; background: transparent; padding: 0; }")
+            scope.setWordWrap(True)
+            scope.setTextFormat(Qt.PlainText)
+            scope.setMinimumWidth(0)
+            self.review_action_scope = scope
+            toolbar.addWidget(scope)
             layout.addLayout(toolbar, 0, 0, 1, 7)
             self._review_filter_toolbar_built = True
+            filter_box.currentIndexChanged.connect(self._update_review_action_scope)
+            filter_box.installEventFilter(self)
+            self._update_review_action_scope()
+
+    def _update_review_action_scope(self, *_args):
+        """Explain bulk targets from existing UI state; never rescan the dataset."""
+        scope = getattr(self, "review_action_scope", None)
+        if scope is None:
+            return
+        combo = self.filter_class_spinbox
+        if not combo.isEnabled():
+            scope.setText("Updating review filter...")
+            return
+        text = combo.currentText()
+        count = len(getattr(self, "filtered_image_files", ()) or ())
+        model = getattr(self, "grid_thumbnail_model", None)
+        checked = model.checked_count() if model is not None and self.grid_review_is_active() else 0
+        move_count = checked or count
+        move_set = "checked" if checked else "filtered"
+        if text.startswith("Similar to Selected"):
+            if getattr(self, "_review_similarity_results_ready", False):
+                clear_scope = f"{len(getattr(self, '_review_similarity_matches', ()))} similar matches in {count} images"
+            else:
+                clear_scope = "waiting for similarity results"
+            move_scope = "choose a class or Blanks first"
+        elif text.startswith("Blanks"):
+            clear_scope = "no labels to remove (Blanks)"
+            move_scope = f"{move_count} {move_set} images + labels to Blanks"
+        elif text.startswith("All"):
+            clear_scope = f"all labels in {count} filtered images"
+            move_scope = "choose a class or Blanks first"
+        elif text.startswith("Size:"):
+            clear_scope = "choose a class or All first"
+            move_scope = f"copies of {move_count} {move_set} images + labels"
+        else:
+            class_name = text.partition(":")[2].strip() or text
+            clear_scope = f"{class_name} labels in {count} filtered images"
+            move_scope = f"copies of {move_count} {move_set} images; {class_name} labels only"
+        scope.setText(f"Clear: {clear_scope}\nMove: {move_scope}")
+        self.clear_all_button.setToolTip(f"Clear: {clear_scope}. Images are kept. Grid checkmarks do not limit Clear Labels.")
+        self.move_all_button.setToolTip(f"Move: {move_scope}.")
 
     def _modernize_legacy_detection_panel(self):
         """Keep old auto-label widgets alive while moving visible settings to Auto Label."""
@@ -25743,19 +27066,17 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         checkbox.setCursor(Qt.PointingHandCursor)
 
         if isinstance(action, QtWidgets.QAction):
-            with blocked_signals(checkbox):
-                checkbox.setChecked(bool(action.isChecked()))
+            checkbox.setChecked(bool(action.isChecked()))
 
             if not getattr(self, "_enhance_image_checkbox_connected", False):
                 def sync_action_from_checkbox(state):
                     checked = state == Qt.Checked
                     if action.isChecked() != checked:
                         action.setChecked(checked)
-                    self.checkbox_clicked()
+                        self.checkbox_clicked()
 
                 def sync_checkbox_from_action(checked):
-                    with blocked_signals(checkbox):
-                        checkbox.setChecked(bool(checked))
+                    checkbox.setChecked(bool(checked))
 
                 checkbox.stateChanged.connect(sync_action_from_checkbox)
                 action.toggled.connect(sync_checkbox_from_action)
@@ -25773,9 +27094,26 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             self.visibility_preprocessing_button = button
         button.setToolTip(
             "Open all scene-visibility tools: enhance, grayscale, edges, heatmap, brightness, "
-            "gamma, contrast, local detail, sharpness, and color."
+            "gamma, contrast, local detail, sharpness, color, and object crop clarity."
         )
         return button
+
+    def _object_clarity(self):
+        controller = getattr(self, "_object_clarity_controller", None)
+        if controller is None:
+            from darkfusion_object_clarity import ObjectClarityController
+            self._object_clarity_annotation_types = (BoundingBoxDrawer, SegmentationDrawer, OBBDrawer)
+            controller = ObjectClarityController(self, os.path.join(APP_DIR, "models", "object_clarity"))
+            controller.status_changed.connect(lambda message: self.statusBar().showMessage(message, 6000))
+            self._object_clarity_controller = controller
+            current_file = getattr(self, "current_file", None)
+            scene = self.screen_view.scene()
+            if (current_file and not self.is_placeholder_file(current_file) and scene is not None
+                    and getattr(scene, "_darkfusion_annotation_image", None) == os.path.normcase(os.path.abspath(current_file))
+                    and any(item.data(0) == "annotation_image" for item in scene.items())
+                    and not getattr(self, "train_view_active", False)):
+                controller.activate(current_file, scene, self._editor_original_source().review_pixmap(current_file))
+        return controller
 
     @staticmethod
     def _visibility_control_specs():
@@ -25789,7 +27127,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         )
 
     def _set_visibility_setting(self, key, value, refresh=True):
-        if key == "visibilityPreprocessEnabled":
+        if key in {"visibilityPreprocessEnabled", "visibilityAnnotationViewOnly", "visibilityProtectHighlights"}:
             self.settings[key] = bool(value)
         else:
             self.settings[key] = int(value)
@@ -25815,17 +27153,99 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         dialog.setAttribute(Qt.WA_DeleteOnClose, True)
         dialog.setWindowTitle("Visibility Options")
         dialog.setMinimumWidth(520)
-        layout = QtWidgets.QVBoxLayout(dialog)
+        outer_layout = QtWidgets.QVBoxLayout(dialog)
+        scroll = QtWidgets.QScrollArea(dialog)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        content = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(content)
+        scroll.setWidget(content)
+        outer_layout.addWidget(scroll)
+        screen = dialog.screen()
+        available_height = screen.availableGeometry().height() if screen is not None else 900
+        dialog.resize(620, min(900, max(400, available_height - 100)))
 
         explanation = QtWidgets.QLabel(
-            "These controls improve scene visibility. Active preprocessing is shared with "
-            "Ultralytics auto-labeling, snapping, SAM3, and label propagation where supported. "
-            "Original image files are not overwritten."
+            "Use Gameplay Clarity for game footage or Object Clarity for general images to bring out "
+            "edges, texture, and contrast in the annotation view. "
+            "The annotation-view-only option keeps the brightness, gamma, contrast, local detail, "
+            "sharpness, and saturation adjustments out of model inputs. Other display modes "
+            "retain their existing preprocessing behavior. Original image files are not overwritten."
         )
         explanation.setWordWrap(True)
         layout.addWidget(explanation)
 
-        enabled = QtWidgets.QCheckBox("Enable visibility preprocessing")
+        crop_group = QtWidgets.QGroupBox("Object crop clarity — Real-ESRGAN 4×")
+        crop_layout = QtWidgets.QVBoxLayout(crop_group)
+        crop_enabled = QtWidgets.QCheckBox("Enhance labeled objects and drawn regions")
+        crop_enabled.setObjectName("object_clarity_enabled")
+        crop_enabled.setChecked(bool(self.settings.get("objectClarityEnabled", False)))
+        crop_layout.addWidget(crop_enabled)
+        crop_scope = QtWidgets.QComboBox()
+        crop_scope.setObjectName("object_clarity_scope")
+        for text, value in (("Review previews and annotation regions", "both"),
+                            ("Review previews only", "previews"), ("Annotation regions only", "regions")):
+            crop_scope.addItem(text, value)
+        crop_scope.setCurrentIndex(max(0, crop_scope.findData(self.settings.get("objectClarityScope", "both"))))
+        crop_layout.addWidget(crop_scope)
+        crop_note = QtWidgets.QLabel(
+            "Restores small blurry objects in the background, using only their crops. "
+            "For an adjustable clarity area, use Clarity in ROI beside the Status dock's ROI dropdown. "
+            "Restored details are estimates; hold for Original to check them. "
+            "SAM3 Snap uses the clarity shown in annotation regions. "
+            "Image files and labels are unchanged. "
+            "The first use downloads a 4.9 MB enhancement model if needed."
+        )
+        crop_note.setWordWrap(True)
+        crop_layout.addWidget(crop_note)
+        crop_actions = QtWidgets.QHBoxLayout()
+        draw_crop = QtWidgets.QPushButton("Draw clarity region")
+        draw_crop.setObjectName("draw_object_clarity_region")
+        draw_crop.setToolTip(
+            "Drag over an area to enhance it on every frame. Regions stay until you delete them "
+            "with × or use Clear drawn regions. No label is created. Escape or right-click cancels."
+        )
+        clear_crops = QtWidgets.QPushButton("Clear drawn regions")
+        crop_actions.addWidget(draw_crop)
+        crop_actions.addWidget(clear_crops)
+        crop_layout.addLayout(crop_actions)
+        crop_status = QtWidgets.QLabel("Ready. Enable object crop clarity to use it.")
+        crop_status.setWordWrap(True)
+        crop_layout.addWidget(crop_status)
+        crop_controller = self._object_clarity()
+        crop_controller.status_changed.connect(crop_status.setText)
+
+        def update_crop_clarity():
+            self.settings["objectClarityEnabled"] = crop_enabled.isChecked()
+            self.settings["objectClarityScope"] = crop_scope.currentData()
+            crop_scope.setEnabled(crop_enabled.isChecked())
+            crop_controller.cancel_draw()
+            crop_controller.schedule()
+            crop_status.setText("Preparing object crops…" if crop_enabled.isChecked() else "Object crop clarity is off.")
+            self.queue_settings_save(delay_ms=180)
+
+        crop_scope.setEnabled(crop_enabled.isChecked())
+        crop_enabled.toggled.connect(update_crop_clarity)
+        crop_scope.currentIndexChanged.connect(update_crop_clarity)
+
+        def draw_clarity_region():
+            crop_enabled.setChecked(True)
+            if crop_scope.currentData() == "previews":
+                crop_scope.setCurrentIndex(crop_scope.findData("both"))
+            # A pending slider/preset refresh rebuilds the scene and cancels
+            # region drawing. Finish that refresh before arming the tool.
+            timer = getattr(self, "_visibility_refresh_timer", None)
+            if timer is not None and timer.isActive():
+                timer.stop()
+                self.checkbox_clicked()
+            if crop_controller.arm_draw():
+                dialog.close()
+
+        draw_crop.clicked.connect(draw_clarity_region)
+        clear_crops.clicked.connect(crop_controller.clear_regions)
+        layout.addWidget(crop_group)
+
+        enabled = QtWidgets.QCheckBox("Enable visibility adjustments")
         enabled.setChecked(bool(self.settings.get("visibilityPreprocessEnabled", False)))
         enabled.toggled.connect(
             lambda checked: self._set_visibility_setting(
@@ -25833,6 +27253,30 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             )
         )
         layout.addWidget(enabled)
+
+        view_only = QtWidgets.QCheckBox("Apply adjustments to annotation view only")
+        view_only.setObjectName("visibility_annotation_view_only")
+        view_only.setChecked(bool(self.settings.get("visibilityAnnotationViewOnly", False)))
+        view_only.setToolTip(
+            "Use the six adjustment sliders for viewing the annotation image. "
+            "Model inputs, snapping, extraction, propagation, and review thumbnails keep their usual pixels."
+        )
+        view_only.toggled.connect(lambda checked: self._set_visibility_setting(
+            "visibilityAnnotationViewOnly", bool(checked), refresh=True))
+        layout.addWidget(view_only)
+
+        protect_highlights = QtWidgets.QCheckBox("Protect bright effects and saturated colors")
+        protect_highlights.setObjectName("visibility_protect_highlights")
+        protect_highlights.setChecked(bool(self.settings.get("visibilityProtectHighlights", False)))
+        protect_highlights.setEnabled(view_only.isChecked())
+        protect_highlights.setToolTip(
+            "In annotation-view-only mode, taper the enhancement on bright or saturated source pixels. "
+            "This helps keep flashes, neon colors, and bright UI elements from being amplified."
+        )
+        protect_highlights.toggled.connect(lambda checked: self._set_visibility_setting(
+            "visibilityProtectHighlights", bool(checked), refresh=True))
+        view_only.toggled.connect(protect_highlights.setEnabled)
+        layout.addWidget(protect_highlights)
 
         display_group = QtWidgets.QGroupBox("Display Modes")
         display_layout = QtWidgets.QGridLayout(display_group)
@@ -25849,6 +27293,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                     source.setChecked(bool(checked))
 
             checkbox.toggled.connect(apply_checked)
+            if source is not None and hasattr(source, "toggled"):
+                source.toggled.connect(checkbox.setChecked)
             display_layout.addWidget(checkbox, row, column)
             return checkbox
 
@@ -25900,8 +27346,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         preset_row = QtWidgets.QHBoxLayout()
         preset_row.addWidget(QtWidgets.QLabel("Preset:"))
         preset_combo = QtWidgets.QComboBox()
+        preset_combo.setObjectName("visibility_preset")
         presets = {
             "Custom": None,
+            "Gameplay Clarity": (0, 88, 100, 40, 24, 100),
+            "Object Clarity": (0, 95, 112, 45, 28, 105),
             "Dark Scene": (12, 65, 115, 35, 18, 110),
             "Deep Shadows": (6, 52, 112, 48, 15, 108),
             "Low Contrast": (0, 100, 138, 58, 20, 112),
@@ -25916,6 +27365,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         value_labels = {}
         for key, label_text, minimum, maximum, default, tooltip in self._visibility_control_specs():
             slider = QtWidgets.QSlider(Qt.Horizontal)
+            slider.setObjectName(key)
             slider.setRange(minimum, maximum)
             slider.setValue(int(self.settings.get(key, default)))
             slider.setToolTip(tooltip)
@@ -25950,7 +27400,22 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             if values is None:
                 return
             for (key, *_rest), value in zip(self._visibility_control_specs(), values):
-                sliders[key].setValue(int(value))
+                with blocked_signals(sliders[key]):
+                    sliders[key].setValue(int(value))
+                value_labels[key].setText(str(int(value)))
+                self.settings[key] = int(value)
+            if name in {"Object Clarity", "Gameplay Clarity"}:
+                self.settings["visibilityAnnotationViewOnly"] = True
+                with blocked_signals(view_only):
+                    view_only.setChecked(True)
+                protect_highlights.setEnabled(True)
+            if name == "Gameplay Clarity":
+                self.settings["visibilityProtectHighlights"] = True
+                with blocked_signals(protect_highlights):
+                    protect_highlights.setChecked(True)
+            with blocked_signals(enabled):
+                enabled.setChecked(True)
+            self._set_visibility_setting("visibilityPreprocessEnabled", True)
 
         preset_combo.currentTextChanged.connect(apply_preset)
 
@@ -25962,23 +27427,33 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         compare_button.setToolTip(
             "Press and hold to temporarily show the untouched source image."
         )
-
         def show_original():
             self._visibility_compare_original = True
             self.checkbox_clicked()
+            crop_controller.compare_original(True)
 
         def restore_processed_preview():
             self._visibility_compare_original = False
             self.checkbox_clicked()
+            crop_controller.compare_original(False)
 
         compare_button.pressed.connect(show_original)
         compare_button.released.connect(restore_processed_preview)
 
         def reset_controls():
+            crop_enabled.setChecked(False)
+            crop_controller.clear_regions()
             for key, _label, _minimum, _maximum, default, _tooltip in self._visibility_control_specs():
                 sliders[key].setValue(default)
                 self.settings[key] = default
             self.settings["visibilityPreprocessEnabled"] = False
+            self.settings["visibilityAnnotationViewOnly"] = False
+            self.settings["visibilityProtectHighlights"] = False
+            with blocked_signals(view_only):
+                view_only.setChecked(False)
+            with blocked_signals(protect_highlights):
+                protect_highlights.setChecked(False)
+            protect_highlights.setEnabled(False)
             enabled.blockSignals(True)
             enabled.setChecked(False)
             enabled.blockSignals(False)
@@ -25987,7 +27462,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         reset_button.clicked.connect(reset_controls)
         buttons.rejected.connect(dialog.close)
-        layout.addWidget(buttons)
+        dialog.finished.connect(lambda _result: restore_processed_preview()
+                                if getattr(self, "_visibility_compare_original", False) else None)
+        outer_layout.addWidget(buttons)
         dialog.destroyed.connect(lambda: setattr(self, "_visibility_preprocessing_dialog", None))
         self._visibility_preprocessing_dialog = dialog
         dialog.show()
@@ -26234,6 +27711,166 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         layout.setRowStretch(1, 1)
 
         self._display_panel_compacted = True
+
+    def _consolidate_label_workflow(self):
+        """Move shared live controls, then remove only the empty workflow page.
+
+        Keep the hidden Designer backing widgets alive: settings, keypoint
+        dialogs and existing inference paths still share those native values.
+        """
+        if getattr(self, "_label_workflow_consolidated", False):
+            return
+        shell = self.findChild(QtWidgets.QFrame, "status_shell_panel")
+        old_panel = self.findChild(QtWidgets.QFrame, "display_compact_panel")
+        prepare = getattr(self, "tab_20", None)
+        cleanup = getattr(self, "groupBox_7", None)
+        page = getattr(self, "tab_3", None)
+        tabs = getattr(self, "tabWidget", None)
+        if (shell is None or old_panel is None or prepare is None or cleanup is None
+                or page is None or tabs is None or not getattr(self, "_extra_label_dialog_ready", False)):
+            return
+        labels = getattr(self, "_slider_value_labels", {})
+        if not all(name in labels for name in ("shade_slider", "timmer_speed")):
+            return
+
+        panel = QtWidgets.QFrame(shell)
+        panel.setObjectName("status_label_tools")
+        panel.setFrameShape(QtWidgets.QFrame.NoFrame)
+        panel.setProperty("workflowChrome", True)
+        panel.setStyleSheet('QFrame[workflowChrome="true"] { border: none; background: transparent; }')
+        panel.setMinimumWidth(0)
+        panel.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        grid = QtWidgets.QGridLayout(panel)
+        grid.setContentsMargins(4, 4, 4, 4)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(6)
+        title = QtWidgets.QLabel("Label Tools", panel)
+        title.setObjectName("label_tools_title")
+        font = title.font()
+        font.setBold(True)
+        title.setFont(font)
+
+        def move(widget):
+            self._take_layout_widget(old_panel.layout(), widget)
+            widget.setParent(panel)
+            widget.show()
+            return widget
+
+        def slider_pair(label_name, slider_name, caption):
+            pair = QtWidgets.QWidget(panel)
+            pair.setObjectName("status_" + slider_name + "_controls")
+            row = self._row_layout(6)
+            pair.setLayout(row)
+            label = move(getattr(self, label_name))
+            label.setText(caption)
+            label.setMinimumWidth(0)
+            label.setMaximumWidth(QtWidgets.QWIDGETSIZE_MAX)
+            label.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+            slider = move(getattr(self, slider_name))
+            slider.setMinimumWidth(60)
+            slider.setMaximumWidth(QtWidgets.QWIDGETSIZE_MAX)
+            value = move(labels[slider_name])
+            row.addWidget(label)
+            row.addWidget(slider, 1)
+            row.addWidget(value)
+            return pair
+
+        opacity = slider_pair("shade", "shade_slider", "Opacity")
+        delay = slider_pair("label_49", "timmer_speed", "Scan delay")
+        toggles = [move(getattr(self, name)) for name in ("rapid_del_checkbox", "zoom_lock", "outline_Checkbox")]
+        for widget in toggles:
+            widget.setMinimumWidth(0)
+            widget.setSizePolicy(QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Fixed)
+        visibility = move(self.visibility_preprocessing_button)
+        visibility.setSizePolicy(QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Fixed)
+        self.status_label_tools = panel
+        self._status_label_tool_widgets = (title, opacity, *toggles, visibility, delay)
+        shell.layout().addWidget(panel)
+        panel.installEventFilter(self)
+        self._reflow_status_label_tools()
+        old_panel.hide()
+
+        parent = cleanup.parentWidget()
+        self._take_layout_widget(parent.layout() if parent is not None else None, cleanup)
+        cleanup.setParent(prepare)
+        cleanup.setTitle("Label Cleanup")
+        prepare.layout().addWidget(cleanup, prepare.layout().rowCount(), 0)
+        cleanup.show()
+        self._prepare_split_panels_reordered = False
+        self._reorder_prepare_split_panels()
+
+        # removeTab does not delete the backing widgets or change either viewer.
+        index = tabs.indexOf(page)
+        if index >= 0:
+            tabs.removeTab(index)
+        page.hide()
+        self._label_workflow_consolidated = True
+        # Do not let the global document/layout spacing pass inflate each nested
+        # toolbar row again on startup, theme changes or UI-scale changes.
+        for layout in shell.findChildren(QtWidgets.QLayout):
+            layout.setProperty("preserveCompactSpacing", True)
+
+    def _reflow_status_label_tools(self):
+        panel = getattr(self, "status_label_tools", None)
+        widgets = getattr(self, "_status_label_tool_widgets", ())
+        if panel is None or len(widgets) != 7:
+            return
+        grid = panel.layout()
+        # Leave room for native captions after theme/font changes; the former
+        # right-side ROI column and stretch no longer need reserved space.
+        button_widths = {"previous_button": 58, "next_button": 58, "delete_button": 58,
+                         "grid_view_button": 58, "cuda_monitor_button": 0,
+                         "clear_current_frame_labels_button": 96, "propagate_labels_button": 118,
+                         "propagate_range_button": 122, "enable_roi_button": 126}
+        for name, minimum in button_widths.items():
+            button = getattr(self, name, None)
+            if button is not None:
+                button.setMinimumWidth(max(minimum, button.sizeHint().width()))
+        scan = getattr(self, "auto_scan_checkbox", None)
+        if scan is not None:
+            scan.setFixedWidth(max(86, scan.sizeHint().width()))
+        required = sum(max(widget.minimumWidth(), widget.minimumSizeHint().width()) for widget in widgets)
+        required += grid.horizontalSpacing() * 6 + grid.contentsMargins().left() + grid.contentsMargins().right()
+        narrow = panel.width() < required
+        if getattr(self, "_status_label_tools_narrow", None) == narrow:
+            return
+        self._status_label_tools_narrow = narrow
+        while grid.count():
+            grid.takeAt(0)
+        for column in range(7):
+            grid.setColumnStretch(column, 0)
+        title, opacity, rapid, zoom, snap, visibility, delay = widgets
+        if narrow:
+            for column, widget in enumerate((title, rapid, zoom, snap, visibility)):
+                grid.addWidget(widget, 0, column)
+            grid.addWidget(opacity, 1, 0, 1, 2)
+            grid.addWidget(delay, 1, 2, 1, 3)
+            grid.setColumnStretch(1, 1)
+            grid.setColumnStretch(4, 1)
+        else:
+            for column, widget in enumerate(widgets):
+                grid.addWidget(widget, 0, column)
+            grid.setColumnStretch(1, 1)
+            grid.setColumnStretch(6, 1)
+        panel.updateGeometry()
+
+    def _saved_main_workflow_index(self):
+        """Restore page identity; migrate indices saved before Label was removed."""
+        tabs = self.tabWidget
+        saved_name = str(self.settings.get("mainWorkflowPage", "") or "")
+        if not saved_name:
+            try:
+                legacy = max(0, min(5, int(self.settings.get("mainTabIndex", 0))))
+            except (TypeError, ValueError):
+                legacy = 0
+            if getattr(self, "_label_workflow_consolidated", False):
+                saved_name = ("Extract", "Trainer", "Trainer", "tab", "tab_6", "tab_2")[legacy]
+            else:
+                return min(legacy, max(0, tabs.count() - 1))
+        for index in range(tabs.count()):
+            if tabs.widget(index).objectName() == saved_name:
+                return index
+        return 0
 
     def _compact_keypoint_panel(self):
         frame = getattr(self, "frame_2", None)
@@ -26731,10 +28368,21 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         layout = frame.layout()
         if not isinstance(layout, QtWidgets.QGridLayout):
             return
+        # Populate any missing dynamic effects before arranging the panel.
+        self.ensure_yolo_augmentation_controls()
+        frame.setProperty("collapsibleSectionTitle", "OpenCV Augmentation")
 
         frame.setMinimumWidth(0)
         frame.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
 
+        clarity = getattr(self, "object_clarity_augmentation_checkbox", None)
+        if not isinstance(clarity, QtWidgets.QCheckBox):
+            clarity = QtWidgets.QCheckBox("Object Clarity", frame)
+            clarity.setObjectName("object_clarity_augmentation_checkbox")
+            clarity.setChecked(bool(getattr(self, "settings", {}).get("augmentationObjectClarity", False)))
+            clarity.setToolTip("Create Real-ESRGAN variants inside existing annotation areas. Restored detail is estimated; image size and labels are preserved.")
+            clarity.toggled.connect(lambda checked: self._object_clarity_augmentation_changed(checked, sam=False))
+            self.object_clarity_augmentation_checkbox = clarity
         names = (
             "crop_button",
             "sight_picture",
@@ -26749,6 +28397,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             "flip_checkbox",
             "make_copy",
             "extra_label_dialog_button",
+            "object_clarity_augmentation_checkbox",
         )
         widgets = {name: getattr(self, name, None) for name in names}
         if any(widget is None for widget in widgets.values()):
@@ -26761,7 +28410,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         layout.setContentsMargins(10, 8, 10, 8)
         layout.setHorizontalSpacing(8)
         layout.setVerticalSpacing(6)
-        for col in range(4):
+        for col in range(3):
             layout.setColumnStretch(col, 1)
 
         widgets["crop_button"].setText("Run Augmentation")
@@ -26777,8 +28426,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             self.augmentation_preview_label = preview
 
         preview.setAlignment(Qt.AlignCenter)
-        preview.setMinimumSize(142, 96)
-        preview.setMaximumSize(180, 118)
+        preview.setMinimumSize(180, 112)
+        preview.setMaximumSize(QtWidgets.QWIDGETSIZE_MAX, 160)
+        preview.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
         preview.setScaledContents(False)
         preview.setText("Preview")
         preview.setCursor(Qt.PointingHandCursor)
@@ -26794,20 +28444,15 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         )
         self._take_layout_widget(layout, preview)
 
-        layout.addWidget(widgets["crop_button"], 0, 0, 1, 3)
-        layout.addWidget(preview, 0, 3, 5, 1)
-        layout.addWidget(widgets["brightness_contrast_checkbox"], 1, 0)
-        layout.addWidget(widgets["hsv_jitter_checkbox"], 1, 1)
-        layout.addWidget(widgets["gaussian_noise_checkbox"], 1, 2)
-        layout.addWidget(widgets["jpeg_compression_checkbox"], 2, 0)
-        layout.addWidget(widgets["flip_checkbox"], 2, 1)
-        layout.addWidget(widgets["motion_blur"], 2, 2)
-        layout.addWidget(widgets["smoke_checkbox"], 3, 0)
-        layout.addWidget(widgets["flash_checkbox"], 3, 1)
-        layout.addWidget(widgets["glass_checkbox"], 3, 2)
-        layout.addWidget(widgets["sight_picture"], 4, 0)
-        layout.addWidget(widgets["make_copy"], 4, 1)
-        layout.addWidget(widgets["extra_label_dialog_button"], 4, 2)
+        effects = ("brightness_contrast_checkbox", "hsv_jitter_checkbox", "gaussian_noise_checkbox",
+                   "jpeg_compression_checkbox", "flip_checkbox", "motion_blur", "smoke_checkbox",
+                   "flash_checkbox", "glass_checkbox", "sight_picture", "make_copy")
+        for index, name in enumerate(effects):
+            layout.addWidget(widgets[name], index // 3, index % 3)
+        layout.addWidget(widgets["extra_label_dialog_button"], 3, 2)
+        layout.addWidget(clarity, 4, 0, 1, 3)
+        layout.addWidget(preview, 5, 0, 1, 3)
+        layout.addWidget(widgets["crop_button"], 6, 0, 1, 3)
 
         self._effects_panel_compacted = True
         self.setup_augmentation_preview_timer()
@@ -26839,10 +28484,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             frame.setFrameShadow(QtWidgets.QFrame.Raised)
             frame.setStyleSheet("QFrame#augmentation_percent_scope_frame { background-color: rgb(127, 127, 127); }")
             setattr(self, "augmentation_percent_scope_frame", frame)
+        frame.setProperty("collapsibleSectionTitle", "Augmentation Settings")
 
         row = frame.layout()
-        if not isinstance(row, QtWidgets.QHBoxLayout):
-            row = QtWidgets.QHBoxLayout(frame)
+        if not isinstance(row, QtWidgets.QGridLayout):
+            row = QtWidgets.QGridLayout(frame)
             row.setObjectName("augmentation_percent_scope_layout")
         while row.count():
             row.takeAt(0)
@@ -26865,34 +28511,33 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             self._take_layout_widget(parent_layout, widget)
             self._compact_control(widget)
 
-        label.setText("Augment % (Normal + SAM)")
+        label.setText("Augment % (OpenCV + SAM3)")
         label.setToolTip(
-            "Percent used for normal augmentation, SAM3 Copy/Paste, Clean BG, Shadow, Object Detail, and Negatives. SAM3 Auto-Fit, Seg, and OBB run on all images."
+            "Percent used for normal augmentation, SAM3 Copy/Paste, Clean BG, Shadow / Highlight, Object Detail, Object Clarity, and Negatives. SAM3 Auto-Fit, Seg, and OBB run on all images."
         )
-        label.setMinimumWidth(150)
-        label.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+        label.setMinimumWidth(0)
+        label.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
 
         spin.setRange(1, 100)
         spin.setSuffix("%")
         spin.setMaximumWidth(120)
         spin.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
         spin.setToolTip(
-            "Percent used for normal augmentation, SAM3 Copy/Paste, Clean BG, Shadow, Object Detail, and Negatives. SAM3 Auto-Fit, Seg, and OBB run on all images."
+            "Percent used for normal augmentation, SAM3 Copy/Paste, Clean BG, Shadow / Highlight, Object Detail, Object Clarity, and Negatives. SAM3 Auto-Fit, Seg, and OBB run on all images."
         )
         output_label.setToolTip("Output image format for generated augmentation images.")
         output_combo.setMaximumWidth(110)
         output_combo.setToolTip(
-            "Output format for normal augmentation, SAM3 Copy/Paste, Clean BG, Shadow, Object Detail, and Negatives. Source keeps each image extension."
+            "Output format for normal augmentation, SAM3 Copy/Paste, Clean BG, Shadow / Highlight, Object Detail, Object Clarity, and Negatives. Source keeps each image extension."
         )
 
         row.setContentsMargins(10, 6, 10, 6)
         row.setSpacing(8)
-        row.addWidget(label)
-        row.addWidget(spin)
-        row.addSpacing(12)
-        row.addWidget(output_label)
-        row.addWidget(output_combo)
-        row.addStretch(1)
+        row.addWidget(label, 0, 0)
+        row.addWidget(spin, 0, 1)
+        row.addWidget(output_label, 1, 0)
+        row.addWidget(output_combo, 1, 1)
+        row.setColumnStretch(0, 1)
 
         self._shared_augmentation_percent_compacted = True
 
@@ -27001,6 +28646,15 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             object_detail_checkbox.setObjectName("object_detail_checkbox")
             setattr(self, "object_detail_checkbox", object_detail_checkbox)
 
+        clarity = getattr(self, "sam_object_clarity_checkbox", None)
+        if not isinstance(clarity, QtWidgets.QCheckBox):
+            clarity = QtWidgets.QCheckBox("Object Clarity", frame)
+            clarity.setObjectName("sam_object_clarity_checkbox")
+            clarity.setChecked(bool(getattr(self, "settings", {}).get("samObjectClarity", False)))
+            clarity.setToolTip("Create Real-ESRGAN variants inside labeled SAM3 masks, preserving mask holes, background, image size and label geometry.")
+            clarity.toggled.connect(lambda checked: self._object_clarity_augmentation_changed(checked, sam=True))
+            self.sam_object_clarity_checkbox = clarity
+
         names = (
             "screen_update",
             "overwrite_var",
@@ -27010,6 +28664,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             "shadow_var",
             "copy_paste_checkbox",
             "object_detail_checkbox",
+            "sam_object_clarity_checkbox",
             "create_negatives_checkbox",
             "process_folder_btn",
         )
@@ -27032,7 +28687,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         widgets["obb_checkbox"].setText("OBB")
         widgets["segmentation_checkbox"].setText("Seg")
         widgets["noise_remove_checkbox"].setText("Clean BG")
-        widgets["shadow_var"].setText("Shadow")
+        widgets["shadow_var"].setText("Shadow / Highlight")
+        widgets["shadow_var"].setSizePolicy(QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Fixed)
+        widgets["shadow_var"].setToolTip(
+            "Create one shadow, filled highlight, textured highlight, or outline variant per selected image, using existing SAM3 masks."
+        )
         widgets["copy_paste_checkbox"].setText("Copy/Paste")
         widgets["object_detail_checkbox"].setText("Object Detail")
         widgets["object_detail_checkbox"].setToolTip(
@@ -27052,16 +28711,112 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             "obb_checkbox",
             "segmentation_checkbox",
             "noise_remove_checkbox",
-            "shadow_var",
             "copy_paste_checkbox",
             "object_detail_checkbox",
             "create_negatives_checkbox",
+            "sam_object_clarity_checkbox",
         )
         for index, name in enumerate(compact_order):
             layout.addWidget(widgets[name], index // 2, index % 2)
-        layout.addWidget(widgets["process_folder_btn"], 5, 0, 1, 2)
 
+        appearance_row = self._row_layout()
+        appearance_row.setObjectName("sam_appearance_controls")
+        appearance_row.addWidget(widgets["shadow_var"])
+        self.appearance_style_combo = QtWidgets.QComboBox(frame)
+        self.appearance_style_combo.setObjectName("appearance_style_combo")
+        for title, value in (
+            ("Shadows", "shadow"),
+            ("Solid Highlight", "solid"),
+            ("Textured Highlight", "textured"),
+            ("Outline", "outline"),
+            ("Mixed", "mixed"),
+        ):
+            self.appearance_style_combo.addItem(title, value)
+        self.appearance_style_combo.setMinimumWidth(0)
+        self.appearance_style_combo.setMinimumContentsLength(4)
+        self.appearance_style_combo.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.appearance_style_combo.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        self.appearance_style_combo.setToolTip(
+            "Mixed chooses one appearance per image, not an extra copy for every style. Shadows do not use the highlight color."
+        )
+        appearance_row.addWidget(self.appearance_style_combo, 1)
+        self.appearance_color_button = QtWidgets.QPushButton(frame)
+        self.appearance_color_button.setObjectName("appearance_color_button")
+        self.appearance_color_button.setFixedSize(40, 28)
+        self.appearance_color_button.setAccessibleName("Highlight color")
+        appearance_row.addWidget(self.appearance_color_button)
+        layout.addLayout(appearance_row, 5, 0, 1, 2)
+        layout.addWidget(widgets["process_folder_btn"], 6, 0, 1, 2)
+
+        self._restore_appearance_augmentation_controls()
+        self.appearance_style_combo.currentIndexChanged.connect(self._on_appearance_style_changed)
+        self.appearance_color_button.clicked.connect(self.pick_appearance_augmentation_color)
+        widgets["shadow_var"].toggled.connect(self._sync_appearance_augmentation_controls)
         self._sam3_panel_compacted = True
+
+    def _appearance_augmentation_config(self):
+        settings = getattr(self, "settings", {}) or {}
+        combo = getattr(self, "appearance_style_combo", None)
+        style = combo.currentData() if isinstance(combo, QtWidgets.QComboBox) else settings.get("augmentationAppearanceStyle", "shadow")
+        if style not in ("shadow", "solid", "textured", "outline", "mixed"):
+            style = "shadow"
+        button = getattr(self, "appearance_color_button", None)
+        value = button.property("appearanceColor") if isinstance(button, QtWidgets.QPushButton) else None
+        color = QColor(str(value or settings.get("augmentationAppearanceColor", "#ff3030")))
+        if not color.isValid():
+            color = QColor("#ff3030")
+        return style, color.name()
+
+    def _restore_appearance_augmentation_controls(self):
+        combo = getattr(self, "appearance_style_combo", None)
+        if not isinstance(combo, QtWidgets.QComboBox):
+            return
+        settings = getattr(self, "settings", {}) or {}
+        index = combo.findData(settings.get("augmentationAppearanceStyle", "shadow"))
+        with blocked_signals(combo):
+            combo.setCurrentIndex(index if index >= 0 else 0)
+        color = QColor(str(settings.get("augmentationAppearanceColor", "#ff3030")))
+        if not color.isValid():
+            color = QColor("#ff3030")
+        self.appearance_color_button.setProperty("appearanceColor", color.name())
+        self._sync_appearance_augmentation_controls()
+
+    def _sync_appearance_augmentation_controls(self, *_args):
+        combo = getattr(self, "appearance_style_combo", None)
+        if not isinstance(combo, QtWidgets.QComboBox):
+            return
+        enabled = self.shadow_var.isChecked()
+        style, color = self._appearance_augmentation_config()
+        self.shadow_var.ensurePolished()
+        self.shadow_var.setMinimumWidth(self.shadow_var.sizeHint().width())
+        popup_width = max(combo.fontMetrics().horizontalAdvance(combo.itemText(index)) for index in range(combo.count())) + 40
+        combo.view().setMinimumWidth(popup_width)
+        combo.setEnabled(enabled)
+        button = self.appearance_color_button
+        button.setEnabled(enabled and style != "shadow")
+        button.setStyleSheet(
+            f"QPushButton {{ background:{color}; border:1px solid #888888; border-radius:3px; padding:0px; }}"
+            "QPushButton:disabled { background:#494949; border-color:#666666; }"
+        )
+        button.setToolTip(
+            f"Pick highlight / outline color ({color}). Red is the default. This does not change annotation class colors."
+        )
+
+    def _on_appearance_style_changed(self, *_args):
+        self._sync_appearance_augmentation_controls()
+        if not getattr(self, "_restoring_settings", False):
+            self.settings["augmentationAppearanceStyle"] = self._appearance_augmentation_config()[0]
+            self.queue_settings_save()
+
+    def pick_appearance_augmentation_color(self):
+        current = QColor(self._appearance_augmentation_config()[1])
+        color = QColorDialog.getColor(current, self, "Pick Highlight / Outline Color")
+        if not color.isValid() or color.name() == current.name():
+            return
+        self.appearance_color_button.setProperty("appearanceColor", color.name())
+        self.settings["augmentationAppearanceColor"] = color.name()
+        self._sync_appearance_augmentation_controls()
+        self.queue_settings_save()
 
     def setup_unified_auto_label_menu(self):
         """Make Annotate a single Auto Label entry point."""
@@ -27086,11 +28841,20 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             "crosshair_color_btn",
             "preview_flash_color_btn",
             "preview_alt_flash_color_btn",
+            "appearance_color_button",
+            "enable_roi_button",
+            "extract_button",
+            "stop_extract",
         }
 
         for widget in self.findChildren(QtWidgets.QWidget):
             object_name = widget.objectName()
             if object_name in keep_styles:
+                continue
+            # These rules control category spacing/transparency, not colors.
+            # Retain them when a theme is changed with Settings still open.
+            if (isinstance(widget, CollapsibleSettingsGroup) or widget.property("settingsSectionContent")
+                    or widget.property("collapsibleSectionBody") or widget.property("workflowChrome")):
                 continue
 
             if isinstance(widget, (QtWidgets.QFrame, QtWidgets.QGroupBox, QtWidgets.QTabWidget,
@@ -27123,6 +28887,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                     pass
         except Exception:
             pass
+
+        if isinstance(getattr(self, "appearance_style_combo", None), QtWidgets.QComboBox):
+            self._sync_appearance_augmentation_controls()
 
     def _take_layout_widget(self, layout, widget):
         if layout is None or widget is None:
@@ -27169,7 +28936,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         button_specs = (
             (previous_button, "Prev", "Open the previous image, or the previous source video frame when labeling a video."),
             (next_button, "Next", "Open the next image, or the next source video frame when labeling a video."),
-            (delete_button, "Delete", "Delete the current image and its matching label file."),
+            (delete_button, "Delete Image", "Delete the current image and its matching label file."),
         )
 
         for button, text, tooltip in button_specs:
@@ -27203,15 +28970,16 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             self.grid_view_button.setCheckable(True)
             self.grid_view_button.setToolTip(
                 "Browse the current filtered images as a scrollable annotated thumbnail grid. "
-                "Use each corner checkbox for batch Delete or Move Filtered, hover to preview "
-                "its labels, or click a thumbnail to open the large labeling view."
+                "Click a corner checkbox, then Shift-click another checkbox to check the range "
+                "for batch Delete or Move Filtered. Hover to preview labels, or click a thumbnail "
+                "to open the large labeling view."
             )
             self.grid_view_button.setMinimumSize(88, 28)
             self.grid_view_button.toggled.connect(self.toggle_grid_view)
         nav_layout.addWidget(self.grid_view_button)
         if not hasattr(self, "clear_current_frame_labels_button"):
             self.clear_current_frame_labels_button = QtWidgets.QPushButton(
-                "Clear Frame", layout.parentWidget()
+                "Clear Frame Labels", layout.parentWidget()
             )
             self.clear_current_frame_labels_button.setObjectName(
                 "clear_current_frame_labels_button"
@@ -27231,7 +28999,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             self.propagate_labels_button.setCheckable(True)
             self.propagate_labels_button.setToolTip(
                 "Turn on frame-by-frame propagation. Each Prev or Next move copies all "
-                "current annotations to that one adjacent image and corrects them with SAM3."
+                "current annotations to that one adjacent image and corrects them with SAM3. "
+                "Auto Scan repeats the same action and waits for each frame to finish."
             )
             self.propagate_labels_button.setMinimumSize(118, 28)
             self.propagate_labels_button.toggled.connect(
@@ -27271,6 +29040,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
     def __init__(self):
         super().__init__()
+        self.status_message_requested.connect(self._show_status_message, Qt.QueuedConnection)
+        # Startup theme/GIF signals must not collect designer defaults over
+        # saved controls before restore_persistent_ui_state has applied them.
+        self._restoring_settings = True
         self.setupUi(self)
         self._apply_global_line_spacing()
         self._clean_restored_ui()
@@ -27330,7 +29103,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         )
 
 
-        self.setWindowTitle("UltraDarkFusion")
+        self.setWindowTitle(f"UltraDarkFusion {APP_VERSION}")
 
         # --- App timers, logger bridge, and top-level menu actions ---
         self.icon_timer = QTimer(self)
@@ -27347,6 +29120,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self._review_similarity_matches_by_image = {}
         self._review_similarity_origin_file = ""
         self._review_similarity_origin_index = -1
+        self._review_similarity_results_ready = False
         self._review_filter_restore_file = ""
         self._review_filter_restore_index = -1
         self._review_filter_origin = None
@@ -27493,6 +29267,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         # --- Settings and persistent dataset state ---
         self.settingsButton.triggered.connect(self.openSettingsDialog)
         self.settings = self.loadSettings()
+        self._sync_preview_annotation_actions()
         # Training controls may open while the UI is restoring. Initialize
         # this setting immediately after loading so those controls never read
         # an attribute that has not been created yet.
@@ -27504,6 +29279,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         )
         self._sam_model_load_lock = threading.RLock()
         self._sam_video_inference_lock = threading.RLock()
+        attach_gpu_memory(self)
         self._sam3_startup_warmup_active = False
         self._sam3_startup_warmup_thread = None
         self._sam3_propagation_warmup_worker = None
@@ -27513,6 +29289,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self._sam3_propagation_shutting_down = False
         self._sam3_propagation_release_pending = False
         self._sam3_propagation_last_message = ""
+        self.sam3_startup_warmup_finished.connect(
+            self._start_sam3_propagation_preload, QtCore.Qt.QueuedConnection
+        )
         if hasattr(self.screen_view, "pan_overlay"):
             self.screen_view.pan_overlay.apply_saved_settings()
         self.initialize_floating_point_mode_from_settings()
@@ -27527,8 +29306,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.training_evaluator_batch_timer = None
         self.training_evaluator_active_run = None
         self.training_evaluator_last_run = None
+        self.training_evaluator_active_training_run = None
+        self.training_evaluator_last_training_run = None
         self.training_artifact_viewers = []
-        self._restoring_settings = False
         self._settings_save_timer = QTimer(self)
         self._settings_save_timer.setSingleShot(True)
         self._settings_save_timer.timeout.connect(self.saveSettings)
@@ -27932,7 +29712,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         self.augmentation_percent_spinbox.setRange(1, 100)
         self.augmentation_percent_spinbox.setSuffix("%")
-        self.augmentation_percent_spinbox.setToolTip("Percent used for normal augmentation, SAM3 Copy/Paste, Clean BG, Shadow, Object Detail, and Negatives. SAM3 Auto-Fit, Seg, and OBB run on all images.")
+        self.augmentation_percent_spinbox.setToolTip("Percent used for normal augmentation, SAM3 Copy/Paste, Clean BG, Shadow / Highlight, Object Detail, Object Clarity, and Negatives. SAM3 Auto-Fit, Seg, and OBB run on all images.")
         saved_augmentation_percent = int(self.settings.get("augmentationPercent", 100))
         self.augmentation_percent_spinbox.setValue(max(1, min(100, saved_augmentation_percent)))
         self.augmentation_percent_spinbox.valueChanged.connect(self.on_augmentation_percent_changed)
@@ -28177,6 +29957,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             self.graphics_scene.clear()
         self.setup_persistent_settings_bindings()
         QTimer.singleShot(0, self._connect_ui_scale_screen_tracking)
+        self.collapsible_sections = CollapsibleSectionsController(self)
         self.show()
         # Let the main window finish drawing before model I/O and CUDA setup.
         # Offscreen runs are smoke tests and should not allocate production models.
@@ -28235,6 +30016,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             video_tabs.setCurrentIndex(0)
         self.rename_tab(dataset_tabs, "Prepare Dataset", "Prepare")
         self.rename_tab(dataset_tabs, "Augmentation", "Augment / Convert")
+        self.rename_tab(dataset_tabs, "Augment / Convert", "Augment")
         if training_tabs is not None and not getattr(self, "_ultralytics_tab_click_connected", False):
             training_tabs.tabBarClicked.connect(self.on_training_workflow_tab_clicked)
             self._ultralytics_tab_click_connected = True
@@ -28253,10 +30035,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             return
 
         current_text = self._ui_tab_source_text(main_tabs, index).strip()
-        if current_text != "Label" and hasattr(self, "_finalize_sparse_video_working_frame"):
-            self._finalize_sparse_video_working_frame()
-        if current_text != "Collect":
-            self.stop_live_collect_runtime(reset_input=True)
+        if getattr(self, "collect_action_footer", None) is not None:
+            self._update_collect_action_footer()
+        # Workflow tabs are controls, not ownership of a running capture job.
+        # Stop/source changes/shutdown still perform the full runtime cleanup.
+        if current_text == "Collect":
+            self.restore_collect_video_surface()
+            if getattr(self, "_extraction_progress_state", None):
+                self.update_extraction_progress()
 
     def rename_tab(self, tab_widget, old_text, new_text):
         if tab_widget is None:
@@ -28377,9 +30163,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             "segmentation_checkbox": ("Seg Labels", "Create YOLO segmentation labels in a Segmented subfolder."),
             "obb_checkbox": ("OBB Labels", "Create oriented bounding box labels in an OBB subfolder."),
             "noise_remove_checkbox": ("Clean BG", "Save label-focused variants with background noise softened."),
-            "shadow_var": ("Shadow Variant", "Save a shadow-adjusted variant for labeled objects."),
+            "shadow_var": ("Shadow / Highlight", "Save one shadow or highlight variant per selected image, using existing SAM3 object masks and unchanged annotations."),
             "copy_paste_checkbox": ("Copy/Paste", "Create copy-paste augmentation samples from existing labels."),
             "object_detail_checkbox": ("Object Detail", "Create subtle natural-edge and local-contrast variants only inside labeled SAM3 masks."),
+            "sam_object_clarity_checkbox": ("Object Clarity", "Create Real-ESRGAN variants inside labeled SAM3 masks. Restored detail is estimated; image size and label geometry are preserved."),
+            "object_clarity_augmentation_checkbox": ("Object Clarity", "Create Real-ESRGAN variants inside existing boxes, polygons or OBBs. Restored detail is estimated; image size and label geometry are preserved."),
             "extra_label_dialog_button": ("Extra Label...", "Open nested-label geometry and SAM3 nested-label settings."),
             "enhance_image_checkbox": ("Enhance", "Enhance the current image display with super-resolution when available, otherwise clarity sharpening."),
             "tile_keep_empty_checkbox": ("Keep Empty", "Keep background-only tiles. Turn off to avoid flooding training with empty crops."),
@@ -28400,7 +30188,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             "hsv_jitter_checkbox": ("HSV", "Randomly shift hue, saturation, and value without changing labels."),
             "gaussian_noise_checkbox": ("Noise", "Add light sensor/compression noise without changing labels."),
             "jpeg_compression_checkbox": ("JPEG", "Simulate stream/upload JPEG compression artifacts without changing labels."),
-            "augmentation_percent_spinbox": (None, "Percent used for normal augmentation, SAM3 Copy/Paste, Clean BG, Shadow, Object Detail, and Negatives. SAM3 Auto-Fit, Seg, and OBB run on all images."),
+            "augmentation_percent_spinbox": (None, "Percent used for normal augmentation, SAM3 Copy/Paste, Clean BG, Shadow / Highlight, Object Detail, Object Clarity, and Negatives. SAM3 Auto-Fit, Seg, and OBB run on all images."),
         }
 
         titles = {
@@ -28443,7 +30231,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             ),
             "auto_scan_checkbox": (
                 "Auto Scan",
-                "Use Next or Previous to continue stepping through the current image list.",
+                "Repeat Next or Previous automatically, using your enabled tools and settings. "
+                "Waits for each frame to finish before advancing again.",
             ),
             "voice_mode_checkbox": (
                 "Voice",
@@ -28470,6 +30259,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
     def set_main_progress(self, value=0, maximum=100):
         """Update the main progress bar with safe bounds and a consistent 0-based range."""
+        if getattr(self, "_review_label_clear_active", False):
+            return  # Review-position timers must not overwrite Clear Labels progress.
         if not hasattr(self, "label_progress") or self.label_progress is None:
             return
 
@@ -28484,6 +30275,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
     def update_dataset_progress(self):
         """Use the main progress bar as a quiet position indicator while reviewing images."""
+        worker = self.__dict__.get("_review_filter_worker")
+        if worker is not None:
+            try:
+                if worker.isRunning():
+                    return  # Navigation must not erase an active filter/search's progress.
+            except RuntimeError:
+                pass
         image_files = getattr(self, "filtered_image_files", None) or getattr(self, "image_files", [])
         total_images = len(image_files)
         if total_images <= 0:
@@ -28875,6 +30673,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         return 0
 
     def _run_navigation_offset(self, setting_key, amount):
+        if getattr(self, "_image_deletion_in_progress", False):
+            return False
         direction_sign = self._navigation_direction_sign(setting_key)
         if not direction_sign:
             return False
@@ -28930,13 +30730,21 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if event.modifiers() != Qt.NoModifier:
             return False
 
-        self._run_navigation_offset(setting_key, 1)
+        moved = self._run_navigation_offset(setting_key, 1)
+        scan = getattr(self, "auto_scan_checkbox", None)
+        if (moved or self._navigation_step_pending()) and scan is not None and scan.isChecked():
+            if setting_key == "nextButton":
+                self.start_next_timer()
+            else:
+                self.start_prev_timer()
         return True
 
     def handle_navigation_key_release(self, setting_key, event):
         return setting_key in ("nextButton", "previousButton")
 
     def run_navigation_keybind(self, setting_key, modifiers=Qt.NoModifier, auto_scan=False, stop_timers=True):
+        if getattr(self, "_image_deletion_in_progress", False):
+            return True
         if setting_key == "nextButton":
             if modifiers == Qt.NoModifier:
                 if stop_timers:
@@ -29228,6 +31036,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             'grayscaleBrightness': 0,
             'enhanceImageEnabled': False,
             'visibilityPreprocessEnabled': False,
+            'visibilityAnnotationViewOnly': False,
+            'visibilityProtectHighlights': False,
+            'objectClarityEnabled': False,
+            'objectClarityScope': 'both',
+            'objectClarityRegions': [],
+            'objectClarityUseROI': False,
+            'augmentationObjectClarity': False,
+            'samObjectClarity': False,
             'visibilityBrightness': 0,
             'visibilityGamma': 100,
             'visibilityContrast': 100,
@@ -29253,6 +31069,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             'previewThumbnailSize': 128,
             'reviewSimilarityThreshold': 82,
             'reviewSimilarityMethod': 'dinov3_base',
+            'reviewAnnotationPrimaryAction': '',
             'propagationOverwriteExisting': False,
             'previewFlashTimeMs': 1000,
             'previewFlashColor': [255, 0, 0],
@@ -29260,6 +31077,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             'muteAudio': True,
             # Local playback follows source FPS; videoOutputFps is generation-only.
             'videoPlaybackQuality': 'smooth',
+            'videoStreamQuality': '1080',
             'videoResizePolicy': 'smart',
             'videoTrackerPreset': 'bytetrack_fast',
             'videoInputSource': 'null',
@@ -29291,6 +31109,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             'crosshairColor': [255, 255, 0],
             'augmentationPercent': 100,
             'mainTabIndex': 0,
+            'mainWorkflowPage': '',
             'videoTabIndex': 0,
             'trainingTabIndex': 0,
             'ultralyticsTask': 'detect',
@@ -29385,6 +31204,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             'augmentationFlip': False,
             'augmentationOverwrite': False,
             'augmentationShadow': False,
+            'augmentationAppearanceStyle': 'shadow',
+            'augmentationAppearanceColor': '#ff3030',
             'augmentationNoiseRemove': False,
             'augmentationCopyPaste': False,
             'samObjectDetail': False,
@@ -29475,6 +31296,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
             with blocked_signals(widget):
                 widget.setValue(value)
+            # Restoring without signals also skips the percentage/readout
+            # connection. Keep the displayed value in sync without a save.
+            if widget_name in getattr(self, "_slider_value_labels", {}):
+                self.update_slider_value_label(widget_name, value)
         except Exception as e:
             logger.debug(f"Could not restore {setting_key}: {e}")
 
@@ -29511,6 +31336,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         try:
             with blocked_signals(widget):
                 widget.setChecked(checked)
+            if widget_name == "super_resolution_Checkbox":
+                # Restoring QAction state suppresses its toggled signal. The
+                # visible Enhance control must still show the processing state.
+                enhance = getattr(self, "enhance_image_checkbox", None)
+                if enhance is not None:
+                    enhance.setChecked(checked)
         except Exception as e:
             logger.debug(f"Could not restore {setting_key}: {e}")
 
@@ -29708,6 +31539,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             widget = getattr(self, widget_name, None)
             if widget is not None and hasattr(widget, "currentIndex"):
                 self.settings[setting_key] = int(widget.currentIndex())
+                if widget_name == "tabWidget" and isinstance(widget, QtWidgets.QTabWidget) and widget.currentWidget() is not None:
+                    self.settings["mainWorkflowPage"] = widget.currentWidget().objectName()
 
         for widget_name, setting_key in (
             ("batch_input_spinbox", "exportBatchSize"),
@@ -29761,6 +31594,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 self.settings[setting_key] = value.strip()
 
         self.settings["augmentationOutputFormat"] = self.selected_augmentation_output_format_value()
+        appearance_combo = getattr(self, "appearance_style_combo", None)
+        if isinstance(appearance_combo, QtWidgets.QComboBox):
+            self.settings["augmentationAppearanceStyle"] = appearance_combo.currentData() or "shadow"
+        appearance_button = getattr(self, "appearance_color_button", None)
+        if isinstance(appearance_button, QtWidgets.QPushButton):
+            self.settings["augmentationAppearanceColor"] = appearance_button.property("appearanceColor") or "#ff3030"
         self.settings["extraLabelClassId"] = str(self._widget_text_value("class_id") or "").strip()
         source_combo = getattr(self, "auto_head_source_class_combo", None)
         if isinstance(source_combo, QtWidgets.QComboBox) and source_combo.currentIndex() >= 0:
@@ -29815,6 +31654,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             ("noise_remove_checkbox", "augmentationNoiseRemove"),
             ("copy_paste_checkbox", "augmentationCopyPaste"),
             ("object_detail_checkbox", "samObjectDetail"),
+            ("object_clarity_augmentation_checkbox", "augmentationObjectClarity"),
+            ("sam_object_clarity_checkbox", "samObjectClarity"),
             ("create_negatives_checkbox", "samCreateNegatives"),
             ("heads_area", "extraLabelEnabled"),
             ("auto_head_geometry_fallback", "autoHeadGeometryFallback"),
@@ -30289,6 +32130,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 ("noise_remove_checkbox", "augmentationNoiseRemove"),
                 ("copy_paste_checkbox", "augmentationCopyPaste"),
                 ("object_detail_checkbox", "samObjectDetail"),
+                ("object_clarity_augmentation_checkbox", "augmentationObjectClarity"),
+                ("sam_object_clarity_checkbox", "samObjectClarity"),
                 ("create_negatives_checkbox", "samCreateNegatives"),
                 ("heads_area", "extraLabelEnabled"),
                 ("auto_head_geometry_fallback", "autoHeadGeometryFallback"),
@@ -30403,6 +32246,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 self.overwrite = bool(self.overwrite_var.isChecked())
             if hasattr(self, "shadow_var"):
                 self.shadow = bool(self.shadow_var.isChecked())
+            self._restore_appearance_augmentation_controls()
             if hasattr(self, "noise_remove_checkbox"):
                 self.is_noise_remove_enabled = bool(self.noise_remove_checkbox.isChecked())
             if hasattr(self, "copy_paste_checkbox"):
@@ -30420,7 +32264,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 if widget is None or value is None or not hasattr(widget, "setCurrentIndex"):
                     continue
                 try:
-                    index = max(0, min(int(value), widget.count() - 1))
+                    if widget_name == "tabWidget":
+                        index = self._saved_main_workflow_index()
+                    else:
+                        index = max(0, min(int(value), widget.count() - 1))
                     with blocked_signals(widget):
                         widget.setCurrentIndex(index)
                 except Exception as e:
@@ -30499,6 +32346,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             if checkbox is not None:
                 with blocked_signals(checkbox):
                     checkbox.setChecked(bool(data.get("enabled", False)))
+
+        selector = getattr(self, "roi_selector", None)
+        if selector is not None:
+            with blocked_signals(selector):
+                selector.setCurrentIndex(1 if self.settings.get("activeRoiId") == 2 else 0)
+        self._sync_roi_controls()
+        self._update_roi_edge_overlay()
 
         # Restore the ROI values themselves at startup, but never redraw them
         # onto a saved/leftover GraphicsView image. display_image() applies
@@ -30738,6 +32592,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             (getattr(self, "noise_remove_checkbox", None), "stateChanged"),
             (getattr(self, "copy_paste_checkbox", None), "stateChanged"),
             (getattr(self, "object_detail_checkbox", None), "stateChanged"),
+            (getattr(self, "object_clarity_augmentation_checkbox", None), "stateChanged"),
+            (getattr(self, "sam_object_clarity_checkbox", None), "stateChanged"),
             (getattr(self, "create_negatives_checkbox", None), "stateChanged"),
             (getattr(self, "screen_update", None), "stateChanged"),
             (getattr(self, "obb_checkbox", None), "stateChanged"),
@@ -30794,6 +32650,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self._persistent_settings_bindings_ready = True
 
     def saveSettings(self):
+        if getattr(self, "_restoring_settings", False):
+            return
         self.collect_persistent_ui_state()
         self.settings.pop("language", None)
 
@@ -31042,6 +32900,27 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         """
         Ensure annotations are saved safely before application closes.
         """
+        bulk_move = getattr(self, "_bulk_move_worker", None)
+        if bulk_move is not None and self.qthread_is_running(bulk_move):
+            bulk_move.cancel()
+            self.statusBar().showMessage("Finishing current file moves before closing...")
+            event.ignore()
+            QTimer.singleShot(100, self.close)
+            return
+        if getattr(self, "_review_label_clear_active", False):
+            worker = getattr(self, "_review_label_clear_worker", None)
+            if worker is not None:
+                worker.requestInterruption()
+            self.statusBar().showMessage("Finishing the current label file before closing...")
+            event.ignore()
+            QTimer.singleShot(100, self.close)
+            return
+        class_worker = getattr(getattr(self, "class_picker_dialog", None), "_label_remap_worker", None)
+        if self.qthread_is_running(class_worker):
+            self.statusBar().showMessage("Finishing dataset class changes before closing...")
+            event.ignore()
+            QTimer.singleShot(100, self.close)
+            return
 
         review_threads = [worker for worker in getattr(self, "_review_similarity_threads", [])
                           if self.qthread_is_running(worker)]
@@ -31058,6 +32937,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         propagation_workers = (
             getattr(self, "_sam3_propagation_warmup_worker", None),
             getattr(self, "_adjacent_propagation_worker", None),
+            getattr(self, "_propagation_range_worker", None),
         )
         if any(self.qthread_is_running(worker) for worker in propagation_workers) or getattr(
             self, "_sam3_propagation_batch_active", False
@@ -31141,6 +33021,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
     def stop_live_collect_runtime(self, reset_input=False):
         """Stop video, stream, desktop, camera, and extraction runtime without clearing loaded models."""
+        self._collect_video_surface_available = False
         self._adjacent_propagation_generation = int(
             getattr(self, "_adjacent_propagation_generation", 0) or 0
         ) + 1
@@ -31253,6 +33134,19 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             pass
 
     def cleanup_runtime_resources(self):
+        self._clarity_augmentation_shutting_down = True
+        cancel = getattr(self, "_clarity_augmentation_cancel", None)
+        if cancel is not None:
+            cancel.set()
+        executor = getattr(self, "_clarity_augmentation_executor", None)
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
+        clarity = getattr(self, "_object_clarity_controller", None)
+        if clarity is not None:
+            clarity.close()
+        source = getattr(self, "_editor_image_source", None)
+        if source is not None:
+            source.close()
         self.metrics_thread_active = False
         self.voice_thread_active = False
         self._propagation_stop_requested = True
@@ -31264,6 +33158,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             logger.info("Canceled the active augmentation job during application shutdown.")
 
         self.stop_live_collect_runtime(reset_input=True)
+
+        completion = getattr(self, "_extraction_completion_dialog", None)
+        if completion is not None:
+            completion.close()
+            self._extraction_completion_dialog = None
 
         dialog = getattr(self, "cuda_monitor_dialog", None)
         if dialog is not None:
@@ -31299,7 +33198,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         self._release_capture()
         self._close_mss_resources()
-        self.stop_existing_workers()
+        self.stop_existing_workers(include_standalone_moves=True)
 
         self._sam3_propagation_shutting_down = True
         self._sam3_propagation_release_pending = True
@@ -32711,6 +34610,19 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
     def update_shading_opacity(self, value):
         self.update_slider_value_labels()
+        view = getattr(self, 'screen_view', None)
+        scene = view.scene() if view is not None else None
+        if scene is not None:
+            for item in scene.items():
+                if isinstance(item, (BoundingBoxDrawer, SegmentationDrawer, OBBDrawer)):
+                    refresh = getattr(item, 'update_opacity', None)
+                    if callable(refresh):
+                        refresh(value)
+                    else:
+                        item.update()
+            scene.update()
+            view.viewport().update()
+        self.redraw_current_video_overlay()
 
     def update_font_size_display(self, value):
         self.update_slider_value_labels()
@@ -33746,6 +35658,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
     def create_inference_model(self, model_path):
         """Create the selected backend while keeping one Ultralytics-style result contract."""
+        if not gpu_model_allowed(self, "detector"):
+            raise GpuWorkBusy("Detector loading is paused while another GPU workflow is running.")
         model_path = self.normalize_path(model_path)
         backend = self.inference_backend_for_model(model_path)
         identity = self.inference_model_identity(model_path)
@@ -33777,6 +35691,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             )
             for diagnostic in model.setup_diagnostics:
                 logger.warning(diagnostic)
+            self._gpu_released_detector = False
             return model
 
         model = load_inference_model(model_path, backend=backend, native_factory=self.create_ultralytics_model)
@@ -33789,6 +35704,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             "fpMode": int(getattr(self, "fp_mode", 0) or 0),
         }
         self.active_inference_backend = "ultralytics"
+        self._gpu_released_detector = False
         return model
 
     def active_inference_backend_label(self):
@@ -34080,40 +35996,120 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             button.setEnabled(True)
         self._cleanup_worker_reference("_tile_worker", worker)
 
-    def show_roi_window(self):
-        """Show the floating ROI window, creating it on first use."""
-        window = getattr(self, "_roi_window", None)
-        if window is None:
-            window = self._roi_window = ROIControlWindow(self)
-            # Edge sliders follow whichever ROI the dropdown selects.
-            window.roi_selector.currentIndexChanged.connect(
-                lambda idx: self.roi_edge_sliders.set_active_roi(idx + 1)
-            )
+    def _selected_roi_id(self):
+        selector = getattr(self, "roi_selector", None)
+        return 2 if selector is not None and selector.currentIndex() == 1 else 1
 
-        window.show()
-        window.raise_()
-        window.activateWindow()
-
-        if not self.roi_checkbox.isChecked() and not self.roi_checkbox_2.isChecked():
-            self.roi_checkbox.setChecked(True)
+    def _toggle_roi_master(self, enabled):
+        """One master switch; a fresh activation never adds ROI 2 implicitly."""
+        # Cancel coalesced slider updates before changing both backing values.
+        getattr(self, "_roi_pending_ids", set()).clear()
+        timer = getattr(self, "_roi_apply_timer", None)
+        if timer is not None:
+            timer.stop()
+        for roi_id in (1, 2):
+            checkbox = self.roi_checkbox if roi_id == 1 else self.roi_checkbox_2
+            with blocked_signals(checkbox):
+                checkbox.setChecked(bool(enabled) and roi_id == 1)
+        selector = getattr(self, "roi_selector", None)
+        if selector is not None:
+            with blocked_signals(selector):
+                selector.setCurrentIndex(0)
+        if hasattr(self, "settings"):
+            self.settings["videoUseROIForInference"] = bool(enabled)
+            self.settings["activeRoiId"] = 1
+        for roi_id in (1, 2):
+            if enabled and roi_id == 1:
+                self._init_roi_default_size(roi_id)
+                self.update_roi(roi_id)
+            else:
+                self.remove_roi(roi_id)
+        self._sync_roi_controls()
         self._update_roi_edge_overlay()
+        self._redraw_video_frame_for_roi()
+        if hasattr(self, "queue_settings_save"):
+            self.queue_settings_save(delay_ms=150)
+
+    def _on_roi_selected(self, _index):
+        """ROI 2 is created only when explicitly selected while the master is on."""
+        enabled = self.roi_checkbox.isChecked() or self.roi_checkbox_2.isChecked()
+        if enabled:
+            checkbox = self.roi_checkbox if self._selected_roi_id() == 1 else self.roi_checkbox_2
+            checkbox.setChecked(True)
+        self._sync_roi_controls()
+        self._update_roi_edge_overlay()
+        if hasattr(self, "settings"):
+            self.settings["activeRoiId"] = self._selected_roi_id()
+            if hasattr(self, "queue_settings_save"):
+                self.queue_settings_save(delay_ms=150)
+
+    def _sync_roi_controls(self):
+        button = getattr(self, "enable_roi_button", None)
+        selector = getattr(self, "roi_selector", None)
+        enabled = any(control is not None and control.isChecked() for control in (
+            getattr(self, "roi_checkbox", None), getattr(self, "roi_checkbox_2", None)))
+        if button is not None:
+            with blocked_signals(button):
+                button.setChecked(enabled)
+            button.setText("ROI Enabled" if enabled else "Enable ROI")
+            button.setAccessibleName(f"ROI master {'enabled' if enabled else 'disabled'}")
+        if selector is not None:
+            selector.setVisible(enabled)
+            with blocked_signals(selector):
+                selector.setItemText(0, "ROI 1")
+                selector.setItemText(1, "ROI 2")
+        clarity = getattr(self, "roi_clarity_checkbox", None)
+        if clarity is not None:
+            with blocked_signals(clarity):
+                clarity.setChecked(bool(getattr(self, "settings", {}).get("objectClarityUseROI", False)))
+
+    def _roi_clarity_changed(self, checked):
+        self.settings["objectClarityUseROI"] = bool(checked)
+        controller = self._object_clarity() if checked else getattr(self, "_object_clarity_controller", None)
+        if controller is not None:
+            controller.roi_changed()
+        if checked and not any(getattr(self, name, None) is not None and getattr(self, name).isChecked()
+                               for name in ("roi_checkbox", "roi_checkbox_2")):
+            self.statusBar().showMessage("Enable ROI, then adjust its edges to place clarity on the image.", 6000)
+        self.queue_settings_save(delay_ms=180)
+
+    def _update_roi_clarity_badge(self, roi_id):
+        item = getattr(self, f"roi_item_{roi_id}", None)
+        if item is None or sip.isdeleted(item) or item.scene() is not self.screen_view.scene():
+            return
+        rect = item.rect()
+        badge = item.dimensions_badge
+        controller = getattr(self, "_object_clarity_controller", None)
+        status = controller.roi_status(roi_id) if controller is not None else ""
+        normal = Qt.yellow if roi_id == 1 else Qt.green
+        color = QtGui.QColor({"Clarity active": "#41d9cf", "Enhancing…": "#efbf59",
+                             "Clarity unavailable": "#ff8080", "Clarity paused": "#9da5b4",
+                             "Original": "#9da5b4", "Clarity on": "#efbf59"}.get(status, normal))
+        pen = QPen(color, 3)
+        pen.setCosmetic(True)
+        if status == "Enhancing…":
+            pen.setStyle(Qt.DashLine)
+        item.setPen(pen)
+        text = f"ROI {roi_id} · {int(rect.width())} × {int(rect.height())} px"
+        badge.text_item.setText(text + (f" · {status}" if status else ""))
+        badge.text_item.setBrush(QtGui.QBrush(color))
+        text_rect = badge.text_item.boundingRect()
+        badge_w, badge_h = text_rect.width() + 12, text_rect.height() + 6
+        scale = max(.001, abs(self.screen_view.transform().m22()))
+        above = rect.y() >= (badge_h + 4) / scale
+        badge.setPos(rect.x(), rect.y() if above else rect.bottom())
+        badge.setRect(0, -badge_h - 4 if above else 4, badge_w, badge_h)
+        badge.text_item.setPos(6, badge.rect().top() + 3)
 
     def _update_roi_edge_overlay(self):
-        """Show the edge sliders only while a ROI is enabled; follow the active one."""
+        """The sliders always follow the selected ROI, never a different active ROI."""
         overlay = getattr(self, "roi_edge_sliders", None)
         if overlay is None:
             return
-        roi1 = self.roi_checkbox.isChecked()
-        roi2 = self.roi_checkbox_2.isChecked()
-        window = getattr(self, "_roi_window", None)
-        if window is not None:
-            active = window.roi_selector.currentIndex() + 1
-        else:
-            active = 1 if roi1 else (2 if roi2 else 1)
-        if (active == 1 and not roi1) or (active == 2 and not roi2):
-            active = 1 if roi1 else (2 if roi2 else active)
+        active = self._selected_roi_id()
+        checkbox = self.roi_checkbox if active == 1 else self.roi_checkbox_2
         overlay.set_active_roi(active)
-        overlay.set_visible(roi1 or roi2)
+        overlay.set_visible(checkbox.isChecked())
 
     def _init_roi_default_size(self, roi_id):
         """Give a never-adjusted ROI a usable centered size instead of the 32px slider minimum."""
@@ -34153,9 +36149,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self._roi_pending_ids.clear()
         for roi_id in pending:
             checkbox = self.roi_checkbox if roi_id == 1 else self.roi_checkbox_2
-            if not checkbox.isChecked():
-                checkbox.setChecked(True)  # toggle_roi() builds the ROI
-            else:
+            # A queued slider tick must not turn a region back on after Off.
+            if checkbox.isChecked():
                 self.update_roi(roi_id)
         self._redraw_video_frame_for_roi()
 
@@ -34181,9 +36176,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             self._init_roi_default_size(roi_id)
             self.update_roi(roi_id)
         else:
+            getattr(self, "_roi_pending_ids", set()).discard(roi_id)
             if other is None or not other.isChecked():
                 self.settings['videoUseROIForInference'] = False
             self.remove_roi(roi_id)
+        self._sync_roi_controls()
         self._update_roi_edge_overlay()
         if getattr(self, "_live_display_active", False):
             QTimer.singleShot(0, self._redraw_video_frame_for_roi)
@@ -34241,6 +36238,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.label_progress.setMaximum(total_images)
         self.label_progress.setValue(0)
 
+        failed_files = 0
         for idx, image_file in enumerate(self.image_files):
             if self.is_placeholder_file(image_file):
                 continue
@@ -34248,6 +36246,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             pixmap = QPixmap(image_file)
             if pixmap.isNull():
                 logger.error(f"Failed to load image: {image_file}")
+                failed_files += 1
                 continue
 
             image_width, image_height = pixmap.width(), pixmap.height()
@@ -34260,6 +36259,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
             if not roi_polygons:
                 logger.warning(f"No valid ROI polygons for image: {image_file}")
+                failed_files += 1
                 continue
 
             txt_file_path, exists = self.get_label_file(image_file, return_existence=True)
@@ -34267,22 +36267,27 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 logger.warning(f"No annotation file found for {image_file}, skipping.")
                 continue
 
-            self.filter_bboxes_in_file(
+            if not self.filter_bboxes_in_file(
                 txt_file_path=txt_file_path,
                 roi_polygons=roi_polygons,
                 image_width=image_width,
                 image_height=image_height
-            )
+            ):
+                failed_files += 1
 
             self.label_progress.setValue(idx + 1)
             if idx % 5 == 0:
                 QtWidgets.QApplication.processEvents()
 
-        QMessageBox.information(self, "Filter Complete", "Annotations outside the ROIs have been processed.")
+        if failed_files:
+            QMessageBox.warning(self, "ROI Filter", f"Filtering finished with {failed_files} failed image(s). Their labels were kept unchanged. Check the log for details.")
+        else:
+            QMessageBox.information(self, "Filter Complete", "Annotations outside the ROIs have been processed.")
         self.label_progress.setValue(total_images)
 
         if getattr(self, "current_file", None) and not self.is_placeholder_file(self.current_file):
             self.refresh_bounding_box_display()
+            self.refresh_annotation_preview_after_save(self.current_file)
 
     def get_dynamic_roi_polygons(self, roi_ids, image_width, image_height):
         """Return shapely ROI rectangles in the target image space."""
@@ -34321,147 +36326,53 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         return roi_polygons
 
     def filter_bboxes_in_file(self, txt_file_path, roi_polygons, image_width, image_height):
-        """
-        Filter a single YOLO label file against one or more ROI polygons.
-        Supports regular bboxes, keypoints, segmentations, and OBBs.
-        """
+        """Filter all annotation types without reformatting retained YOLO rows."""
         try:
+            if not roi_polygons or image_width <= 0 or image_height <= 0:
+                raise ValueError("No valid ROI/image dimensions were supplied.")
+            source_version = label_file_version(txt_file_path)
+            try:
+                with open(txt_file_path, "r", encoding="utf-8") as stream:
+                    lines = [line.strip() for line in stream if line.strip()]
+            except UnicodeDecodeError:
+                with open(txt_file_path, "r", encoding="latin-1") as stream:
+                    lines = [line.strip() for line in stream if line.strip()]
             rects, segmentations, obbs = self.load_labels(txt_file_path, image_width, image_height)
+            polygons = {}
+            for rect_tuple in rects:
+                rect = rect_tuple[0]
+                polygons[rect_tuple.true_line_index] = shapely_box(
+                    rect.x(), rect.y(), rect.x() + rect.width(), rect.y() + rect.height())
+            # The loader includes the persisted row index before class/points.
+            # These are internal records; the on-disk Ultralytics format is unchanged.
+            for line_index, _class_id, points in segmentations:
+                polygons[line_index] = Polygon([(x * image_width, y * image_height) for x, y in points])
+            for line_index, _class_id, points, _angle in obbs:
+                polygons[line_index] = Polygon([(x * image_width, y * image_height) for x, y in points])
 
             kept_labels = []
-
-            # -------------------------------
-            # Regular bboxes + keypoint bboxes
-            # -------------------------------
-            for rect_tuple in rects:
-                try:
-                    rect = rect_tuple[0]
-                    class_id = rect_tuple[1]
-                    confidence = rect_tuple[2] if len(rect_tuple) >= 3 else None
-                    keypoints = rect_tuple[3] if len(rect_tuple) >= 4 else None
-
-                    poly = shapely_box(
-                        rect.x(),
-                        rect.y(),
-                        rect.x() + rect.width(),
-                        rect.y() + rect.height()
-                    )
-
-                    if not poly.is_valid:
-                        continue
-
-                    if any(poly.intersects(roi_poly) for roi_poly in roi_polygons):
-                        bbox = BoundingBox.from_rect(
-                            QRectF(rect.x(), rect.y(), rect.width(), rect.height()),
-                            image_width,
-                            image_height,
-                            class_id,
-                            confidence
-                        )
-
-                        if keypoints:
-                            bbox.keypoints = keypoints
-
-                        kept_labels.append(bbox.to_str())
-
-                except Exception as bbox_err:
-                    logger.warning(f"Skipping invalid bbox entry in {txt_file_path}: {bbox_err}")
-
-            # -------------------------------
-            # Segmentations
-            # -------------------------------
-            for class_id, points in segmentations:
-                try:
-                    if not points or len(points) < 3:
-                        continue
-
-                    # Convert normalized points -> pixel coordinates for ROI intersection
-                    pixel_points = []
-                    for x, y in points:
-                        px = x * image_width if 0.0 <= x <= 1.0 else x
-                        py = y * image_height if 0.0 <= y <= 1.0 else y
-                        pixel_points.append((px, py))
-
-                    seg_poly = Polygon(pixel_points)
-                    if not seg_poly.is_valid:
-                        seg_poly = seg_poly.buffer(0)
-
-                    if seg_poly.is_empty or not seg_poly.is_valid:
-                        continue
-
-                    if any(seg_poly.intersects(roi_poly) for roi_poly in roi_polygons):
-                        # Save back in normalized coordinates
-                        segmentation_flat = []
-                        for px, py in pixel_points:
-                            segmentation_flat.extend([
-                                px / image_width,
-                                py / image_height
-                            ])
-
-                        bbox = BoundingBox(
-                            class_id=class_id,
-                            x_center=0,
-                            y_center=0,
-                            width=0,
-                            height=0,
-                            segmentation=segmentation_flat
-                        )
-                        kept_labels.append(bbox.to_str())
-
-                except Exception as seg_err:
-                    logger.warning(f"Skipping invalid segmentation in {txt_file_path}: {seg_err}")
-
-            # -------------------------------
-            # OBBs
-            # -------------------------------
-            for class_id, obb_points, angle in obbs:
-                try:
-                    if not obb_points or len(obb_points) != 4:
-                        continue
-
-                    # Convert normalized points -> pixel coordinates for ROI intersection
-                    pixel_obb_points = []
-                    for x, y in obb_points:
-                        px = x * image_width if 0.0 <= x <= 1.0 else x
-                        py = y * image_height if 0.0 <= y <= 1.0 else y
-                        pixel_obb_points.append((px, py))
-
-                    obb_poly = Polygon(pixel_obb_points)
-                    if not obb_poly.is_valid:
-                        obb_poly = obb_poly.buffer(0)
-
-                    if obb_poly.is_empty or not obb_poly.is_valid:
-                        continue
-
-                    if any(obb_poly.intersects(roi_poly) for roi_poly in roi_polygons):
-                        # Save back in normalized coordinates
-                        obb_flat = []
-                        for px, py in pixel_obb_points:
-                            obb_flat.extend([
-                                px / image_width,
-                                py / image_height
-                            ])
-
-                        bbox = BoundingBox(
-                            class_id=class_id,
-                            x_center=0,
-                            y_center=0,
-                            width=0,
-                            height=0,
-                            obb=obb_flat
-                        )
-                        kept_labels.append(bbox.to_str())
-
-                except Exception as obb_err:
-                    logger.warning(f"Skipping invalid OBB in {txt_file_path}: {obb_err}")
-
-            if kept_labels:
-                self.save_labels_to_file(txt_file_path, kept_labels, mode="w")
-            else:
-                open(txt_file_path, "w").close()
-
-        except Exception as e:
-            logger.error(f"Error processing {txt_file_path}: {e}")
+            for line_index, line in enumerate(lines):
+                poly = polygons.get(line_index)
+                if poly is None or not np.isfinite([float(value) for value in line.split()]).all():
+                    raise ValueError(f"Could not safely filter annotation row {line_index + 1}.")
+                if not poly.is_valid:
+                    poly = poly.buffer(0)
+                if poly.is_empty or not poly.is_valid:
+                    raise ValueError(f"Invalid geometry on annotation row {line_index + 1}.")
+                if any(poly.intersects(roi_poly) for roi_poly in roi_polygons):
+                    # Keep full geometry, point order, confidence and pose
+                    # visibility exactly as saved; only remove outside rows.
+                    kept_labels.append(line)
+            if kept_labels == lines:
+                return True
+            if label_file_version(txt_file_path) != source_version:
+                raise OSError("Labels changed while ROI filtering ran; newer corrections were kept.")
+            if not self.save_labels_to_file(txt_file_path, kept_labels, mode="w", allow_empty=True):
+                raise OSError("The filtered annotation file could not be replaced.")
+            return True
+        except Exception as error:
+            logger.error("ROI filtering failed; kept %s unchanged: %s", txt_file_path, error)
+            return False
 
     def _roi_bounds_size(self):
         """Size of whatever is currently displayed (live video frame wins over a stale image)."""
@@ -34534,8 +36445,19 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 roi_item = QGraphicsRectItem()
                 pen = QPen(Qt.yellow if roi_id == 1 else Qt.green)
                 pen.setWidth(3)
+                pen.setCosmetic(True)
                 roi_item.setPen(pen)
+                roi_item.setAcceptedMouseButtons(Qt.NoButton)
                 roi_item.setZValue(70)
+                badge = QtWidgets.QGraphicsRectItem(roi_item)
+                badge.setFlag(QtWidgets.QGraphicsItem.ItemIgnoresTransformations, True)
+                badge.setAcceptedMouseButtons(Qt.NoButton)
+                badge.setPen(QPen(Qt.NoPen))
+                badge.setBrush(QtGui.QBrush(QtGui.QColor(12, 16, 20, 225)))
+                badge.text_item = QtWidgets.QGraphicsSimpleTextItem(badge)
+                badge.text_item.setAcceptedMouseButtons(Qt.NoButton)
+                badge.text_item.setBrush(QtGui.QBrush(Qt.yellow if roi_id == 1 else Qt.green))
+                roi_item.dimensions_badge = badge
                 scene.addItem(roi_item)
                 setattr(self, roi_attr, roi_item)
         except Exception as e:
@@ -34547,6 +36469,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             roi_item.show()
             # Cache plain-int bounds so worker threads never touch the Qt item.
             self._roi_bounds_cache[roi_id] = (int(x), int(y), int(width), int(height))
+            controller = getattr(self, "_object_clarity_controller", None)
+            if controller is not None:
+                controller.roi_changed()
+            self._update_roi_clarity_badge(roi_id)
             # Force a full repaint so a shrunk rect doesn't leave a ghost outline.
             view = getattr(self, "screen_view", None)
             if view is not None and view.isVisible():
@@ -34574,19 +36500,23 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             elif roi_id == 2:
                 self.roi_item_2 = None
 
+        controller = getattr(self, "_object_clarity_controller", None)
+        if controller is not None:
+            controller.roi_changed()
+
     def update_roi(self, roi_id):
         """Update the ROI rectangle based on the current slider values."""
         if roi_id in (1, 2):
             self._sync_roi_slider_limits(roi_id)
         # Read ROI dimensions and offsets from the matching control set.
         if roi_id == 1:
-            width_offset = self.width_spin_slider.value() // 2
-            height_offset = self.height_spin_slider.value() // 2
+            width = self.width_spin_slider.value()
+            height = self.height_spin_slider.value()
             x_offset = self.x_spin_slider.value()
             y_offset = self.y_spin_slider.value()
         elif roi_id == 2:
-            width_offset = self.width_spin_slider_2.value() // 2
-            height_offset = self.height_spin_slider_2.value() // 2
+            width = self.width_spin_slider_2.value()
+            height = self.height_spin_slider_2.value()
             x_offset = self.x_spin_slider_2.value()
             y_offset = self.y_spin_slider_2.value()
         else:
@@ -34603,11 +36533,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             center_y = self.screen_view.height() // 2
 
         # Anchor ROI offsets around the center.
-        x = center_x - width_offset + x_offset
-        y = center_y - height_offset + y_offset
+        x = center_x - width // 2 + x_offset
+        y = center_y - height // 2 + y_offset
 
         # Draw or update the selected ROI
-        self.draw_roi(width_offset * 2, height_offset * 2, x, y, roi_id)
+        self.draw_roi(width, height, x, y, roi_id)
+        overlay = getattr(self, "roi_edge_sliders", None)
+        if overlay is not None and overlay.active_roi_id == roi_id:
+            overlay._pull_from_real()
 
     def on_frame_change(self):
         if hasattr(self, 'current_image_path') and os.path.exists(self.current_image_path):
@@ -34832,6 +36765,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         Load the SAM3 model once and reuse it.
         Expected model path: Sam/sam3.pt
         """
+        if not gpu_model_allowed(self, "sam_prompt"):
+            return False
         lock = getattr(self, "_sam_model_load_lock", None)
         if lock is None:
             lock = threading.RLock()
@@ -34872,6 +36807,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
     def ensure_sam_semantic_predictor_loaded(self, imgsz=None):
         """Lazily create the SAM3 text-prompt predictor used by polygon Snap only."""
+        if not gpu_model_allowed(self, "sam_semantic"):
+            return None
         lock = getattr(self, "_sam_model_load_lock", None)
         if lock is None:
             lock = threading.RLock()
@@ -34939,6 +36876,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
     def ensure_sam_video_predictor_loaded(self, imgsz=None):
         """Lazily create an eager-mode SAM3 video tracker for label propagation."""
+        if not gpu_model_allowed(self, "sam_video"):
+            return None
         lock = getattr(self, "_sam_model_load_lock", None)
         if lock is None:
             lock = threading.RLock()
@@ -35026,8 +36965,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         with self._sam_video_inference_lock:
             if getattr(self, "_sam3_propagation_shutting_down", False):
                 return {"ready": False, "canceled": True, "message": "Propagation warm-up canceled during shutdown."}
-            if not getattr(self, "_image_navigation_propagation_enabled", False):
-                return {"ready": False, "canceled": True, "message": "Propagation warm-up canceled because propagation is off."}
+            if not gpu_model_allowed(self, "sam_video"):
+                return {"ready": False, "canceled": True, "message": "Propagation warm-up paused for another GPU job."}
             try:
                 # Use normalized bounding box coordinates for the larger frame
                 masks = self._sam3_video_pair_masks(
@@ -35059,11 +36998,22 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if button is None:
             return
         state = str(state or "off").lower()
-        if state == "loading":
+        if not gpu_model_allowed(self, "sam_video") and getattr(self, "_image_navigation_propagation_enabled", False):
+            state = "paused"
+        if state == "paused":
+            button.setText("Propagate: Paused")
+            button.setToolTip("Propagation is paused while another GPU workflow is running. Turn it off to browse without propagating.")
+            button.setStyleSheet("")
+        elif state == "standby":
+            button.setText("Propagate: On")
+            button.setToolTip("Propagation is enabled. Its tracker will reload when you use Prev or Next.")
+            button.setStyleSheet("")
+        elif state == "loading":
             button.setText("Propagate: Loading...")
             button.setToolTip(
                 "Propagation is enabled and its SAM3 video tracker is warming in the background. "
-                "Prev or Next can be used now; processing will wait for the tracker if necessary."
+                "Prev or Next can be used now; processing will wait for the tracker if necessary. "
+                "Auto Scan repeats these same steps."
             )
             button.setStyleSheet(
                 "QPushButton { border: 1px solid #d6a84b; color: #ffe0a3; }"
@@ -35072,7 +37022,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             button.setText("Propagate: On")
             button.setToolTip(
                 "Propagation is ON and its SAM3 tracker is ready. Prev or Next propagates all "
-                "current annotations to exactly one adjacent image."
+                "current annotations to exactly one adjacent image. Auto Scan repeats these same steps."
             )
             button.setStyleSheet(
                 "QPushButton { border: 1px solid #39b86b; color: #b8f5cc; }"
@@ -35081,7 +37031,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             button.setText("Propagate: On")
             button.setToolTip(
                 "Propagation is ON. The temporal tracker was unavailable, so DarkFusion will "
-                "use its normal SAM3 Snap fallback."
+                "use its normal SAM3 Snap fallback, including during Auto Scan."
             )
             button.setStyleSheet(
                 "QPushButton { border: 1px solid #d6a84b; color: #ffe0a3; }"
@@ -35089,29 +37039,45 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         else:
             button.setText("Propagate: Off")
             button.setToolTip(
-                "Turn on frame-by-frame propagation. The propagation-only SAM3 tracker loads "
-                "in the background only while this feature is enabled."
+                "Turn on frame-by-frame propagation. Its SAM3 tracker warms after Snap at startup "
+                "when memory permits, and stays ready while Off for quick reuse. Heavy GPU jobs "
+                "can release it to make room."
             )
             button.setStyleSheet("")
 
-    def start_sam3_propagation_warmup(self):
-        """Start the propagation tracker warm-up when propagation is enabled."""
-        if not getattr(self, "_image_navigation_propagation_enabled", False) or getattr(
-            self, "_sam3_propagation_shutting_down", False
-        ):
+    def _start_sam3_propagation_preload(self):
+        """Continue startup warm-up on the GUI thread without enabling propagation."""
+        if not bool(getattr(self, "settings", {}).get("sam3StartupWarmup", True)):
+            return False
+        if getattr(self, "_sam3_propagation_shutting_down", False) or not gpu_model_allowed(self, "sam_video"):
+            return False
+        capacity, _semantic, note = self._sam3_startup_warmup_capacity()
+        if not capacity:
+            logger.info("Propagation tracker will load on demand (%s).", note)
+            return False
+        return self.start_sam3_propagation_warmup(preload=True)
+
+    def start_sam3_propagation_warmup(self, preload=False):
+        """Prime one reusable tracker for startup or enabled propagation."""
+        if not gpu_model_allowed(self, "sam_video"):
+            return False
+        enabled = bool(getattr(self, "_image_navigation_propagation_enabled", False))
+        if (not enabled and not preload) or getattr(self, "_sam3_propagation_shutting_down", False):
             return False
         self._sam3_propagation_release_pending = False
         worker = getattr(self, "_sam3_propagation_warmup_worker", None)
         # Even a finished thread can have a queued completion signal. Let that
         # signal settle this generation rather than starting a second warm-up.
         if worker is not None:
-            self._set_navigation_propagation_button_state("loading")
+            if enabled:
+                self._set_navigation_propagation_button_state("loading")
             return True
         predictor = getattr(self, "sam_video_propagation_predictor", None)
         if predictor is not None and bool(
             getattr(self, "_sam3_video_propagation_ready", False)
         ):
-            self._set_navigation_propagation_button_state("ready")
+            if enabled:
+                self._set_navigation_propagation_button_state("ready")
             return True
 
         self._sam3_video_propagation_unavailable = False
@@ -35123,9 +37089,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             lambda worker=worker: self._on_sam3_propagation_warmup_finished(worker)
         )
         self._sam3_propagation_warmup_worker = worker
-        self._set_navigation_propagation_button_state("loading")
+        if enabled:
+            self._set_navigation_propagation_button_state("loading")
         worker.start()
-        logger.info("SAM3 propagation warm-up started after propagation was enabled.")
+        logger.info("SAM3 propagation warm-up started (%s).", "startup preload" if preload else "propagation enabled")
         return True
 
     def _on_sam3_propagation_warmup_completed(self, result, worker=None):
@@ -35148,7 +37115,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             )
             if hasattr(self, "statusBar"):
                 self.statusBar().showMessage(message, 5000)
-        else:
+        elif getattr(self, "_sam3_propagation_shutting_down", False) or not gpu_model_allowed(self, "sam_video"):
             self._sam3_propagation_release_pending = True
 
         if not ready and not canceled:
@@ -35167,32 +37134,36 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             and not getattr(self, "_sam3_video_propagation_unavailable", False)
             and not getattr(self, "_sam3_propagation_shutting_down", False)
         ):
-            # Off may cancel a queued warm-up just before On is clicked again.
+            # Retry a canceled warm-up only while propagation remains enabled.
             self.start_sam3_propagation_warmup()
         if getattr(self, "_sam3_propagation_release_pending", False):
             QTimer.singleShot(0, self._release_sam_video_propagation_runtime)
 
     def _release_sam_video_propagation_runtime(self, force=False):
-        """Release only the temporal propagation predictor, preserving normal Snap."""
+        """Keep a healthy idle tracker warm; release it for GPU jobs or shutdown."""
         if (
-            getattr(self, "_image_navigation_propagation_enabled", False)
-            and not getattr(self, "_sam3_video_propagation_unavailable", False)
+            not getattr(self, "_sam3_video_propagation_unavailable", False)
             and not getattr(self, "_sam3_propagation_shutting_down", False)
+            and gpu_model_allowed(self, "sam_video")
             and not force
         ):
-            # A queued release from Off must not unload an On-again predictor.
+            # Off stops propagation, while model lifetime belongs to the GPU
+            # coordinator. Also ignore queued cleanup from an earlier toggle.
+            self._sam3_propagation_release_pending = False
             return False
         warmup = getattr(self, "_sam3_propagation_warmup_worker", None)
         adjacent = getattr(self, "_adjacent_propagation_worker", None)
         if (
-            self.qthread_is_running(warmup) or self.qthread_is_running(adjacent)
+            warmup is not None or self.qthread_is_running(adjacent)
             or getattr(self, "_sam3_propagation_batch_active", False)
         ):
+            # A finished warm-up can still have queued completion signals. Let
+            # those settle before reclaiming its model and ready state.
             self._sam3_propagation_release_pending = True
             return False
         if not self._sam_video_inference_lock.acquire(blocking=False):
             self._sam3_propagation_release_pending = True
-            QTimer.singleShot(100, self._release_sam_video_propagation_runtime)
+            QTimer.singleShot(100, lambda: self._release_sam_video_propagation_runtime(force=force))
             return False
         try:
             predictor = getattr(self, "sam_video_propagation_predictor", None)
@@ -35216,6 +37187,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
     def start_sam3_startup_warmup(self):
         """Preload and prime the reusable SAM3 runtimes without blocking the UI."""
+        if getattr(self, "_gpu_memory", None) is not None:
+            adopt_saved_training(self)
+        if not gpu_model_allowed(self, "sam_prompt"):
+            return False
         if not bool(getattr(self, "settings", {}).get("sam3StartupWarmup", True)):
             logger.info("SAM3 startup warm-up is disabled.")
             return False
@@ -35309,8 +37284,15 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             self._safe_empty_cache()
         finally:
             self._sam3_startup_warmup_active = False
+            if not getattr(self, "_sam3_propagation_shutting_down", False):
+                finished = getattr(self, "sam3_startup_warmup_finished", None)
+                if finished is not None:
+                    finished.emit()
 
     def get_current_class_name_safe(self, class_id=None):
+        if self.__dict__.get("_propagation_range_worker") is not None and class_id is not None:
+            names = getattr(self, "_active_propagation_class_names", ())
+            return str(names[class_id]).strip().lower() if 0 <= class_id < len(names) else ""
         try:
             if class_id is None:
                 class_id = self.get_current_class_id()
@@ -35622,6 +37604,19 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             logger.warning("Failed selecting polygon-guided SAM mask: %s", e)
             return None
 
+    def _annotation_snap_image(self, image, bbox_xyxy):
+        """Let interactive SAM3 Snap see active clarity without changing inputs elsewhere."""
+        clarity = getattr(self, "_object_clarity_controller", None)
+        if (clarity is None or image is not getattr(self, "processed_image", None)
+                or not getattr(self, "annotation_scene_active", False)
+                or getattr(self, "train_view_active", False)):
+            return image
+        try:
+            return clarity.image_for_snap(image, bbox_xyxy)
+        except Exception as error:
+            logger.warning("Clarity pixels unavailable for Snap; using normal input: %s", error)
+            return image
+
     def sam_snap_class_polygon_to_mask(
         self,
         image_np,
@@ -35658,6 +37653,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 return None
 
             image_for_sam = image_np
+            if getattr(self, "_object_clarity_controller", None) is not None:
+                image_for_sam = self._annotation_snap_image(image_np, bbox_xyxy)
             if image_for_sam.ndim == 2:
                 image_for_sam = cv2.cvtColor(image_for_sam, cv2.COLOR_GRAY2BGR)
             elif image_for_sam.ndim == 3 and image_for_sam.shape[2] == 4:
@@ -35769,6 +37766,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 return None
 
             image_for_sam = image_np
+
+            if getattr(self, "_object_clarity_controller", None) is not None:
+                image_for_sam = self._annotation_snap_image(image_np, bbox_xyxy)
 
             # Ultralytics expects OpenCV BGR arrays and converts to RGB itself.
             # Preserve that contract, including the polygon snap fallback.
@@ -36221,6 +38221,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         return "bbox"
 
     def _polygon_label_parse_preference(self):
+        if self.__dict__.get("_propagation_range_worker") is not None:
+            return getattr(self, "_active_propagation_polygon_preference", None)
         try:
             if self.is_segmentation_mode():
                 return "segmentation"
@@ -36819,13 +38821,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         return image_with_boxes, (x_min, y_min, x_max, y_max)
 
-    def show_image(self, img):
+    def show_image(self, img, source_path=None):
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         height, width, channel = img_rgb.shape
         bytesPerLine = 3 * width
         qImg = QtGui.QImage(img_rgb.data, width, height, bytesPerLine, QtGui.QImage.Format_RGB888)
         pixmap = QtGui.QPixmap.fromImage(qImg)
         scene = QtWidgets.QGraphicsScene(self)
+        scene.setProperty("darkfusion_source_image", os.path.abspath(source_path) if source_path else "")
         scene.addPixmap(pixmap)
         old_scene = self.screen_view.scene()
         if old_scene is not None and old_scene is not scene:
@@ -36843,6 +38846,45 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
     # -----------------------------
     # SAM3 OBJECT EFFECTS / POST PROCESS
     # -----------------------------
+
+    def _note_sam3_output_failure(self, path, error):
+        failures = getattr(self, "_sam3_output_failures", None)
+        if failures is None:
+            failures = self._sam3_output_failures = []
+        failures.append(f"{path}: {error}")
+        logger.error("SAM3 output was not saved: %s: %s", path, error)
+
+    def _save_sam3_output_pair(self, image_path, image, label_path, labels, source_image_path=None):
+        """Share checked pair saving across SAM3 conversions and augmentations."""
+        try:
+            if source_image_path is not None:
+                image = source_image_path
+                image_writer = lambda target, source: bool(shutil.copy2(source, target))
+            else:
+                image_writer = save_cv_image
+            return save_extraction_outputs(
+                image_path, image, image_writer, label_path=label_path, labels=labels,
+                label_writer=lambda path, values, mode="w": self._write_label_lines(path, values),
+                preserve_existing_labels=False,
+            )
+        except Exception as error:
+            self._note_sam3_output_failure(image_path, error)
+            return False
+
+    def _save_sam3_label_updates(self, label_path, labels):
+        if self._write_label_lines(label_path, labels):
+            return True
+        self._note_sam3_output_failure(label_path, "The annotation file could not be replaced.")
+        return False
+
+    def _show_sam3_batch_result(self, message):
+        failures = getattr(self, "_sam3_output_failures", [])
+        if failures:
+            QMessageBox.warning(self, "SAM3 Output Errors",
+                f"{message}\n{len(failures)} output operation(s) failed. "
+                "Check the log and any recovery paths below.\n" + "\n".join(failures[:5]))
+        else:
+            QMessageBox.information(self, "Information", message)
 
     def apply_noise_reduction(self, image, masks_for_bboxes, image_file_path):
         if image is None or not isinstance(image, np.ndarray):
@@ -36887,63 +38929,255 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             os.makedirs(nr_folder, exist_ok=True)
             nr_image_name = f"nr_{self.generate_unique_name()}{ext}"
             nr_image_path = os.path.join(nr_folder, nr_image_name)
-            if not save_cv_image(nr_image_path, image):
-                return image
-
             nr_txt_path = os.path.join(nr_folder, os.path.splitext(nr_image_name)[0] + ".txt")
-            self._write_label_lines(nr_txt_path, label_lines)
-            logging.info("Saved noise-reduced image and labels: %s", nr_image_path)
+            if self._save_sam3_output_pair(nr_image_path, image, nr_txt_path, label_lines):
+                logging.info("Saved noise-reduced image and labels: %s", nr_image_path)
 
         return image
 
-    def create_shadow_image(self, image, masks_for_bboxes, image_file_path):
-        original_image = image.copy()
-        shadow_image = image.copy()
-        modified = False
+    def _render_object_appearance(self, image, masks_for_bboxes, style, color, rng=None):
+        """Change appearance only; preserve visible mask support and all geometry."""
+        if (not isinstance(image, np.ndarray) or image.dtype != np.uint8
+                or image.ndim != 3 or image.shape[2] != 3 or image.size == 0):
+            return image
+        rng = rng or random
+        if style == "mixed":
+            # One coherent appearance for the image, not one new file per mode.
+            style = rng.choices(("shadow", "solid", "textured", "outline"), weights=(4, 2, 2, 2), k=1)[0]
+        if style not in ("shadow", "solid", "textured", "outline"):
+            style = "shadow"
 
-        for mask, (x_min, y_min, x_max, y_max) in masks_for_bboxes:
+        height, width = image.shape[:2]
+        union_mask = np.zeros((height, width), np.uint8)
+        object_widths = []
+        for entry in masks_for_bboxes or ():
             try:
-                x_min = max(0, x_min)
-                y_min = max(0, y_min)
-                x_max = min(shadow_image.shape[1], x_max)
-                y_max = min(shadow_image.shape[0], y_max)
-                if x_max <= x_min or y_max <= y_min:
+                mask, _bounds = entry
+                raw_mask = np.asarray(mask)
+                if not np.isfinite(raw_mask).all():
                     continue
-
-                object_region = shadow_image[y_min:y_max, x_min:x_max]
-                mask_crop = (mask[y_min:y_max, x_min:x_max] > 0)
-                if mask_crop.shape[:2] != object_region.shape[:2]:
+                mask = self._normalize_sam_mask_to_image(raw_mask, width, height)
+                if mask is None:
                     continue
+                mask_u8 = (mask > 0).astype(np.uint8)
+                _x, _y, mask_width, mask_height = cv2.boundingRect(mask_u8)
+                object_widths.append(min(mask_width, mask_height))
+                union_mask |= mask_u8
+            except (TypeError, ValueError, cv2.error):
+                logging.warning("Skipping an invalid SAM3 appearance mask.")
+        if not object_widths:
+            return image
 
-                gray = cv2.cvtColor(object_region, cv2.COLOR_BGR2GRAY)
-                gray3 = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-                shadowed_region = (gray3.astype(np.float32) * 0.85).astype(np.uint8)
-                object_region = np.where(mask_crop[:, :, None], shadowed_region, object_region)
-                shadow_image[y_min:y_max, x_min:x_max] = object_region
-                modified = True
-            except Exception as e:
-                logging.error("Shadow processing failed on region %s: %s", (x_min, y_min, x_max, y_max), e)
+        # Crop pixel work to mask bounds. Combining masks avoids double-darkening
+        # overlaps and includes the final row/column (legacy mask bboxes are inclusive).
+        x, y, crop_width, crop_height = cv2.boundingRect(union_mask)
+        support = union_mask[y:y + crop_height, x:x + crop_width]
+        region = image[y:y + crop_height, x:x + crop_width]
+        source = region.astype(np.float32)
+        mask_alpha = support.astype(np.float32)
+        padded = np.pad(mask_alpha, 1)
+        alpha = cv2.GaussianBlur(padded, (3, 3), 0.6)[1:-1, 1:-1] * mask_alpha
 
+        qcolor = QColor(str(color))
+        if not qcolor.isValid():
+            qcolor = QColor("#ff3030")
+        tint = np.array((qcolor.blue(), qcolor.green(), qcolor.red()), np.float32)
+
+        if style == "shadow":
+            gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY).astype(np.float32)[:, :, None]
+            retained_color = rng.uniform(0.35, 0.95)
+            target = gray + (source - gray) * retained_color
+            darkness = rng.uniform(0.35, 0.75)
+            if rng.random() < 0.5:
+                # A soft directional shadow, not an opaque shape over the box.
+                angle = rng.uniform(0.0, np.pi * 2.0)
+                yy, xx = np.ogrid[-1.0:1.0:complex(0, crop_height), -1.0:1.0:complex(0, crop_width)]
+                field = xx * np.cos(angle) + yy * np.sin(angle)
+                shade = np.clip((field - rng.uniform(-0.3, 0.3)) * 1.8 + 0.5, 0.0, 1.0)
+                target *= (1.0 - (1.0 - darkness) * shade[:, :, None])
+            else:
+                target *= darkness
+        elif style == "solid":
+            # A filled scan/threat silhouette: no armor texture in the interior.
+            target = tint * rng.uniform(0.85, 1.0)
+        elif style == "textured":
+            lightness = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+            shaded_tint = tint * (0.35 + 0.65 * lightness[:, :, None])
+            strength = rng.uniform(0.70, 0.92)
+            target = source * (1.0 - strength) + shaded_tint * strength
+        else:
+            # Inward-only, scale-aware outline: no halo outside the visible
+            # object, no larger labels, and no inferred hidden body parts.
+            thickness = max(1, min(3, int(round(float(np.percentile(object_widths, 25)) * 0.012))))
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (thickness * 2 + 1, thickness * 2 + 1))
+            inner = cv2.erode(support, kernel, borderType=cv2.BORDER_CONSTANT, borderValue=0)
+            boundary = (support - inner).astype(np.float32)
+            alpha = cv2.GaussianBlur(np.pad(boundary, 1), (3, 3), 0.5)[1:-1, 1:-1]
+            alpha *= mask_alpha * rng.uniform(0.75, 1.0)
+            target = tint
+
+        result = image.copy()
+        blended = np.clip(source + (target - source) * alpha[:, :, None], 0, 255).astype(np.uint8)
+        result[y:y + crop_height, x:x + crop_width] = np.where(support[:, :, None] > 0, blended, region)
+        return result
+
+    def create_shadow_image(self, image, masks_for_bboxes, image_file_path):
+        """Keep both legacy callers and checked image/label saving in one path."""
+        style, color = self._appearance_augmentation_config()
+        appearance_image = self._render_object_appearance(image, masks_for_bboxes, style, color)
+        if image is None or np.array_equal(appearance_image, image):
+            return image
+        label_lines = self._valid_annotation_lines_from_file(self.get_label_file_safe(image_file_path))
+        if not label_lines:
+            logging.warning("Skipping appearance image with no valid annotations: %s", image_file_path)
+            return image
+
+        # Retain the existing output location and extension/percentage workflow.
+        folder = os.path.join(os.path.dirname(image_file_path), "shadow")
+        os.makedirs(folder, exist_ok=True)
         ext = self.augmentation_output_extension_for_image(image_file_path)
-        if modified and not np.array_equal(shadow_image, original_image):
-            yolo_file_path = self.get_label_file_safe(image_file_path)
-            label_lines = self._valid_annotation_lines_from_file(yolo_file_path)
-            if not label_lines:
-                logging.warning("Skipping shadow image with no valid annotations: %s", image_file_path)
-                return shadow_image
+        name = f"shadow_{self.generate_unique_name()}"
+        target_image = os.path.join(folder, name + ext)
+        target_label = os.path.join(folder, name + ".txt")
+        if self._save_sam3_output_pair(target_image, appearance_image, target_label, label_lines):
+            logging.info("Saved %s appearance image and unchanged labels: %s", style, target_image)
+            return appearance_image
+        return image
 
-            shadow_folder = os.path.join(os.path.dirname(image_file_path), "shadow")
-            os.makedirs(shadow_folder, exist_ok=True)
-            shadow_image_name = f"shadow_{self.generate_unique_name()}{ext}"
-            shadow_image_path = os.path.join(shadow_folder, shadow_image_name)
-            if not save_cv_image(shadow_image_path, shadow_image):
-                return shadow_image
+    def _object_clarity_augmentation_changed(self, checked, sam=False):
+        key = "samObjectClarity" if sam else "augmentationObjectClarity"
+        self.settings[key] = bool(checked)
+        self.queue_settings_save(delay_ms=180)
+        if not sam:
+            self.queue_augmentation_preview_update()
 
-            shadow_txt_path = os.path.join(shadow_folder, os.path.splitext(shadow_image_name)[0] + ".txt")
-            self._write_label_lines(shadow_txt_path, label_lines)
-            logging.info("Saved shadow image and labels: %s", shadow_image_path)
+    def _object_clarity_augmentation_selected(self, sam=False):
+        name = "sam_object_clarity_checkbox" if sam else "object_clarity_augmentation_checkbox"
+        widget = getattr(self, name, None)
+        if isinstance(widget, QtWidgets.QCheckBox):
+            return widget.isChecked()
+        key = "samObjectClarity" if sam else "augmentationObjectClarity"
+        return bool(getattr(self, "settings", {}).get(key, False))
 
-        return shadow_image
+    def _object_clarity_annotation_regions(self, image, labels, polygon_parse_preference=None):
+        height, width = image.shape[:2]
+        preference = polygon_parse_preference or self._polygon_label_parse_preference()
+        records = []
+        for line in labels:
+            annotation = BoundingBox.from_str(line, preferred_polygon_type=preference)
+            if annotation is None:
+                continue
+            polygon = annotation.to_polygon(width, height)
+            if polygon.is_empty or not polygon.is_valid:
+                continue
+            left, top, right, bottom = polygon.bounds
+            x1, y1 = max(0, math.floor(left)), max(0, math.floor(top))
+            x2, y2 = min(width, math.ceil(right)), min(height, math.ceil(bottom))
+            if x1 >= x2 or y1 >= y2:
+                continue
+            mask = None
+            if annotation.segmentation or annotation.obb:
+                mask = np.zeros((y2-y1, x2-x1), np.uint8)
+                vertices = np.rint(np.asarray(polygon.exterior.coords) - (x1, y1)).astype(np.int32)
+                cv2.fillPoly(mask, [vertices], 1)
+                for hole in polygon.interiors:
+                    vertices = np.rint(np.asarray(hole.coords) - (x1, y1)).astype(np.int32)
+                    cv2.fillPoly(mask, [vertices], 0)
+            records.append(((x1, y1, x2, y2), mask))
+        return records
+
+    def _render_object_clarity_augmentation(self, image, records):
+        """Run only the new neural effect on a worker; keep cancellation/UI live."""
+        if not gpu_model_allowed(self, "clarity_augmentation"):
+            return None
+        if getattr(self, "_clarity_augmentation_shutting_down", False):
+            return None
+        if not records:
+            return image.copy()
+        if getattr(self, "_clarity_augmentation_busy", False):
+            return None
+        from darkfusion_clarity_augmentation import ObjectClarityAugmenter
+        executor = getattr(self, "_clarity_augmentation_executor", None)
+        if executor is None:
+            executor = self._clarity_augmentation_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="clarity-augmentation")
+            self._clarity_augmentation_renderer = ObjectClarityAugmenter(os.path.join(APP_DIR, "models", "object_clarity"))
+        cancel = self._clarity_augmentation_cancel = threading.Event()
+        self._clarity_augmentation_busy = True
+        job = getattr(self, "_augmentation_job", None)
+        sam_active = bool(getattr(self, "_sam3_batch_active", False))
+        controls = []
+        for name, active in (("crop_button", job is not None), ("process_folder_btn", sam_active)):
+            widget = getattr(self, name, None)
+            if isinstance(widget, QtWidgets.QWidget) and not active:
+                controls.append((widget, widget.isEnabled()))
+                widget.setEnabled(False)
+        future = executor.submit(self._clarity_augmentation_renderer, image.copy(),
+                                 [(bounds, mask.copy() if mask is not None else None) for bounds, mask in records], cancel)
+        loop, timer = QtCore.QEventLoop(), QTimer()
+
+        def poll():
+            if ((job is not None and job.get("cancel_requested"))
+                    or (sam_active and self._sam3_should_stop())
+                    or getattr(self, "_clarity_augmentation_shutting_down", False)):
+                cancel.set()
+            if future.done() or getattr(self, "_clarity_augmentation_shutting_down", False):
+                loop.quit()
+
+        timer.timeout.connect(poll)
+        timer.start(15)
+        try:
+            if not future.done():
+                loop.exec_()
+            if not future.done():
+                cancel.set()
+                return None
+            try:
+                return future.result()
+            except concurrent.futures.CancelledError:
+                return None
+        finally:
+            timer.stop()
+            self._clarity_augmentation_busy = False
+            for widget, enabled in controls:
+                if not sip.isdeleted(widget):
+                    widget.setEnabled(enabled)
+            if getattr(self, "_clarity_augmentation_preview_pending", False):
+                self._clarity_augmentation_preview_pending = False
+                if not getattr(self, "_clarity_augmentation_shutting_down", False):
+                    self.queue_augmentation_preview_update()
+
+    def create_object_clarity_image(self, image, masks_for_bboxes, image_file_path):
+        """Save one original-sized, mask-only neural clarity variant with labels."""
+        if image is None or image.size == 0:
+            return image
+        label_file = self.get_label_file_safe(image_file_path)
+        labels = self._valid_annotation_lines_from_file(label_file)
+        if not labels:
+            return image
+        height, width = image.shape[:2]
+        records = []
+        for mask, _bounds in masks_for_bboxes:
+            normalized = self._normalize_sam_mask_to_image(mask, width, height)
+            if normalized is None or not normalized.any():
+                continue
+            x, y, w, h = cv2.boundingRect((normalized > 0).astype(np.uint8))
+            records.append(((x, y, x+w, y+h), normalized[y:y+h, x:x+w]))
+        if not records:
+            return image
+        try:
+            result = self._render_object_clarity_augmentation(image, records)
+        except Exception as error:
+            self._note_sam3_output_failure(image_file_path, error)
+            return image
+        if result is None or np.array_equal(result, image):
+            return image
+        folder = os.path.join(os.path.dirname(image_file_path), "object_clarity")
+        os.makedirs(folder, exist_ok=True)
+        stem = "clarity_" + self.generate_unique_name()
+        target = os.path.join(folder, stem + self.augmentation_output_extension_for_image(image_file_path))
+        if self._save_sam3_output_pair(target, result, os.path.join(folder, stem + ".txt"), labels):
+            return result
+        return image
 
     def create_object_detail_image(self, image, masks_for_bboxes, image_file_path):
         """Enhance existing object detail without drawing a synthetic outline."""
@@ -37033,13 +39267,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         ext = self.augmentation_output_extension_for_image(image_file_path)
         detail_image_name = f"detail_{self.generate_unique_name()}{ext}"
         detail_image_path = os.path.join(detail_folder, detail_image_name)
-        if not save_cv_image(detail_image_path, detail_image):
-            return image
-
         detail_txt_path = os.path.join(detail_folder, os.path.splitext(detail_image_name)[0] + ".txt")
-        self._write_label_lines(detail_txt_path, label_lines)
-        logging.info("Saved %s object-detail image and unchanged labels: %s", mode, detail_image_path)
-        return detail_image
+        if self._save_sam3_output_pair(detail_image_path, detail_image, detail_txt_path, label_lines):
+            logging.info("Saved %s object-detail image and unchanged labels: %s", mode, detail_image_path)
+            return detail_image
+        return image
 
     # -----------------------------
     # COPY / PASTE AUGMENTATION
@@ -37212,7 +39444,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             kept_bboxes.append(bbox)
         return kept_bboxes
 
-    def scale_roi_bounds_to_frame(self, roi_bounds, frame_w, frame_h):
+    def scale_roi_bounds_to_frame(self, roi_bounds, frame_w, frame_h, reference_size=None):
         """Scale ROI bounds from the frame they were drawn on to the target frame size.
 
         Returns clamped (x, y, w, h) in the target frame's pixel space. If the
@@ -37222,14 +39454,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if roi_bounds is None:
             return None
         x, y, w, h = roi_bounds
-        ref = getattr(self, "_roi_reference_size", None)
+        ref = reference_size if reference_size is not None else getattr(self, "_roi_reference_size", None)
         if ref and ref[0] > 0 and ref[1] > 0 and (ref[0] != frame_w or ref[1] != frame_h):
             sx = frame_w / float(ref[0])
             sy = frame_h / float(ref[1])
             x, y, w, h = x * sx, y * sy, w * sx, h * sy
         return self._clamp_roi_rect(x, y, w, h, frame_w, frame_h)
 
-    def extract_roi_region_for_inference(self, frame, roi_bounds):
+    def extract_roi_region_for_inference(self, frame, roi_bounds, reference_size=None):
         """Keep full-frame inference and attach ROI filtering metadata.
         
         Args:
@@ -37251,7 +39483,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             else:
                 raw_bounds = list(roi_bounds or [])
             selected_list = [
-                self.scale_roi_bounds_to_frame(bounds, img_w, img_h)
+                self.scale_roi_bounds_to_frame(bounds, img_w, img_h, **(
+                    {"reference_size": reference_size} if reference_size is not None else {}
+                ))
                 for bounds in raw_bounds
             ]
             selected_list = [bounds for bounds in selected_list if bounds is not None]
@@ -37783,13 +40017,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                     output_ext = self.augmentation_output_extension_for_image(image_file)
                     img_name = f"copy_and_paste_{os.path.splitext(os.path.basename(image_file))[0]}{output_ext}"
                     out_img_path = os.path.join(copy_paste_dir, img_name)
-                    if save_cv_image(out_img_path, image):
-                        out_txt_path = os.path.join(copy_paste_dir, os.path.splitext(img_name)[0] + ".txt")
-                        self._write_label_lines(out_txt_path, annotations)
+                    out_txt_path = os.path.join(copy_paste_dir, os.path.splitext(img_name)[0] + ".txt")
+                    if self._save_sam3_output_pair(out_img_path, image, out_txt_path, annotations):
                         logging.info("Saved augmented image and annotations: %s, %s", out_img_path, out_txt_path)
 
             except Exception as e:
                 logging.error("Copy-paste augmentation failed for %s: %s", image_file, e, exc_info=True)
+                self._note_sam3_output_failure(image_file, e)
             finally:
                 if idx % 3 == 0:
                     self._safe_empty_cache()
@@ -37887,7 +40121,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                         adjusted_boxes.append(output_line)
 
             if self.overwrite and adjusted_boxes:
-                self._write_label_lines(yolo_file_path, adjusted_boxes)
+                self._save_sam3_label_updates(yolo_file_path, adjusted_boxes)
 
             if self.is_noise_remove_enabled:
                 self.apply_noise_reduction(image_copy.copy(), masks_for_bboxes, image_file_path)
@@ -37910,6 +40144,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         return {
             "copy_paste": bool(getattr(self, "copy_paste_enabled", False)),
             "object_detail": bool(getattr(self, "object_detail_enabled", False)),
+            "object_clarity": self._object_clarity_augmentation_selected(sam=True),
             "negatives": bool(getattr(self, "create_negatives_enabled", False)),
             "segmentation": self.segmentation_checkbox.isChecked(),
             "noise": bool(getattr(self, "is_noise_remove_enabled", False)),
@@ -37967,6 +40202,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if stopped is None:
             stopped = self._sam3_should_stop()
         self._sam3_batch_active = False
+        if getattr(self, "_clarity_augmentation_preview_pending", False):
+            self._clarity_augmentation_preview_pending = False
+            self.queue_augmentation_preview_update()
         self._sam3_cancel_requested = False
         self.stop_batch = False
         self.stop_labeling = False
@@ -37974,6 +40212,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         if stopped and hasattr(self, "label_progress"):
             self.label_progress.setFormat("SAM3 batch stopped")
+        elif getattr(self, "_sam3_output_failures", []) and hasattr(self, "label_progress"):
+            self.label_progress.setFormat("SAM3 batch finished with output errors")
 
     def _on_sam3_negative_generation_finished(self, thread):
         if thread is not getattr(self, "processing_thread", None):
@@ -37984,12 +40224,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self._finish_sam3_batch_control(stopped=stopped)
         logger.info("SAM3 negative-image generation %s.", "stopped" if stopped else "completed")
 
+    @gpu_work("SAM3 augmentation", keep=sam_batch_resources, until="_sam3_batch_active")
     def process_batch(self):
         if getattr(self, "_sam3_batch_active", False):
             self.request_stop_sam3_batch()
             return
 
         self._sam3_batch_active = True
+        self._sam3_output_failures = []
         self._sam3_cancel_requested = False
         self.stop_labeling = False
         self.stop_batch = False
@@ -38026,8 +40268,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         actions = self._selected_sam_batch_actions()
         conversion_actions = any(actions[name] for name in ("segmentation", "obb", "auto_fit"))
-        sam_augmentation_actions = any(actions[name] for name in ("copy_paste", "noise", "shadow", "object_detail", "negatives"))
-        main_loop_actions = conversion_actions or actions["noise"] or actions["shadow"] or actions["object_detail"]
+        sam_augmentation_actions = any(actions[name] for name in ("copy_paste", "noise", "shadow", "object_detail", "negatives")) or actions.get("object_clarity", False)
+        main_loop_actions = conversion_actions or actions["noise"] or actions["shadow"] or actions["object_detail"] or actions.get("object_clarity", False)
         main_loop_uses_sam = main_loop_actions
         sam_required = actions["copy_paste"] or main_loop_uses_sam
 
@@ -38080,7 +40322,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 message = "Negative generation is running." if negative_started else "No valid negative images were queued."
             else:
                 message = "Process was stopped!" if stopped else "Finished!"
-            QMessageBox.information(self, "Information", message)
+            self._show_sam3_batch_result(message)
             if not stopped and not negative_started:
                 self.set_label_progress(
                     0,
@@ -38105,12 +40347,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             dirs["shadow"] = self._prepare_dir("shadow")
         if actions["object_detail"]:
             dirs["object_detail"] = self._prepare_dir("object_detail")
+        if actions.get("object_clarity", False):
+            dirs["object_clarity"] = self._prepare_dir("object_clarity")
         if actions["obb"]:
             dirs["obb"] = self._prepare_dir("OBB")
 
         if sam_augmentation_actions:
             logger.info(
-                "SAM3 augmentation percent: %s%% (%s of %s images selected for Copy/Paste, Clean BG, Shadow, Object Detail, and Negatives).",
+                "SAM3 augmentation percent: %s%% (%s of %s images selected for Copy/Paste, Clean BG, Shadow / Highlight, Object Detail, Object Clarity, and Negatives).",
                 self.selected_augmentation_percent(),
                 len(sam_augmentation_images),
                 total_images,
@@ -38224,18 +40468,20 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             base_name = os.path.basename(label_file)
 
             if "obb" in dirs and obb_lines:
-                self._write_label_lines(os.path.join(dirs["obb"], base_name), obb_lines)
-                shutil.copy2(image_file, os.path.join(dirs["obb"], os.path.basename(image_file)))
+                self._save_sam3_output_pair(
+                    os.path.join(dirs["obb"], os.path.basename(image_file)), image,
+                    os.path.join(dirs["obb"], base_name), obb_lines, source_image_path=image_file)
 
             if "seg" in dirs and seg_lines:
-                self._write_label_lines(os.path.join(dirs["seg"], base_name), seg_lines)
-                shutil.copy2(image_file, os.path.join(dirs["seg"], os.path.basename(image_file)))
+                self._save_sam3_output_pair(
+                    os.path.join(dirs["seg"], os.path.basename(image_file)), image,
+                    os.path.join(dirs["seg"], base_name), seg_lines, source_image_path=image_file)
 
             if self.overwrite and adjusted_yolo_lines:
-                self._write_label_lines(label_file, adjusted_yolo_lines)
+                self._save_sam3_label_updates(label_file, adjusted_yolo_lines)
 
             if self.screen_update.isChecked():
-                self.show_image(visualized_image)
+                self.show_image(visualized_image, source_path=image_file)
 
             image_selected_for_sam_augmentation = image_file in sam_augmentation_set
 
@@ -38247,6 +40493,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
             if "object_detail" in dirs and masks_for_bboxes and image_selected_for_sam_augmentation:
                 self.create_object_detail_image(image.copy(), masks_for_bboxes, image_file)
+            if "object_clarity" in dirs and masks_for_bboxes and image_selected_for_sam_augmentation:
+                self.create_object_clarity_image(image.copy(), masks_for_bboxes, image_file)
 
             value = progress_offset + idx + 1
             self.set_label_progress(
@@ -38267,7 +40515,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             message = "SAM3 tools finished; negative generation is running." if negative_started else "SAM3 tools finished; no valid negative images were queued."
         else:
             message = "Process was stopped!" if stopped else "Finished!"
-        QMessageBox.information(self, "Information", message)
+        self._show_sam3_batch_result(message)
         if not negative_started:
             self.set_label_progress(
                 0,
@@ -38364,6 +40612,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
     def on_dino_label_clicked(self):
         self.show_auto_label_dialog("dino")
 
+    @gpu_work("DINO auto labeling", keep=("analysis",), until="dino_worker")
     def start_dino_auto_label(self, overwrite=False, config=None):
         self.dino_label.setEnabled(False)
 
@@ -39268,6 +41517,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             return None
 
         formats = info.get("formats") or []
+        quality = video_stream_quality_key(getattr(self, "settings", {}).get("videoStreamQuality"))
+
+        def height_of(fmt):
+            try:
+                return max(0, int(fmt.get("height") or 0))
+            except (TypeError, ValueError):
+                return 0
 
         def format_score(fmt):
             if not fmt.get("url"):
@@ -39296,27 +41552,33 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             is_hls = "m3u8" in protocol
             has_audio = bool(acodec and acodec != "none")
 
-            # OpenCV's bundled FFmpeg reliably opens YouTube's H.264 HLS
-            # manifests. Bare DASH/AV1 URLs are frequently video-only, return
-            # HTTP 403, or require a decoder unavailable in OpenCV. Prefer a
-            # smooth 720p stream; only move above that when no compatible
-            # lower-resolution stream exists.
-            preferred_height = 1 if 0 < height <= 720 else 0
-            sane_height = 1 if 0 < height <= 1080 else 0
+            # Resolve source detail independently of display scaling. Among
+            # compatible streams, prefer the requested resolution before HLS
+            # versus progressive delivery; a 360p HLS stream must not silently
+            # beat a compatible 1080p progressive stream.
             return (
-                1 if is_h264 and is_hls and preferred_height else 0,
-                1 if is_h264 and is_hls and sane_height else 0,
-                1 if is_h264 and preferred_height else 0,
                 1 if is_h264 else 0,
+                height,
                 1 if is_hls else 0,
                 1 if ext == "mp4" else 0,
+                fps,
                 1 if has_audio else 0,
-                min(height, 1080),
-                min(fps, 120),
             )
 
         playable_formats = [fmt for fmt in formats if format_score(fmt) is not None]
         if playable_formats:
+            if quality != "best":
+                limit = int(quality)
+                within_limit = [fmt for fmt in playable_formats if 0 < height_of(fmt) <= limit]
+                if within_limit:
+                    playable_formats = within_limit
+                else:
+                    # Some sources only offer a higher resolution. Prefer the
+                    # smallest known fallback instead of unexpectedly taking 4K.
+                    heights = [height_of(fmt) for fmt in playable_formats if height_of(fmt)]
+                    if heights:
+                        smallest = min(heights)
+                        playable_formats = [fmt for fmt in playable_formats if height_of(fmt) == smallest]
             selected = max(playable_formats, key=format_score)
             logger.info(
                 "Selected yt-dlp stream format %s (%sp, %s, %s).",
@@ -39353,7 +41615,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         """Download a compatible fallback when direct OpenCV streaming fails."""
         cache_dir = os.path.join(tempfile.gettempdir(), "DarkFusion", "video_url_cache")
         os.makedirs(cache_dir, exist_ok=True)
-        cache_key = hashlib.sha256(source.encode("utf-8", errors="ignore")).hexdigest()[:20]
+        quality = video_stream_quality_key(getattr(self, "settings", {}).get("videoStreamQuality"))
+        cache_key = hashlib.sha256(f"{source}\n{quality}".encode("utf-8", errors="ignore")).hexdigest()[:20]
 
         for candidate in glob.glob(os.path.join(cache_dir, f"{cache_key}.*")):
             if os.path.isfile(candidate) and os.path.getsize(candidate) > 0:
@@ -39361,12 +41624,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         output_template = os.path.join(cache_dir, f"{cache_key}.%(ext)s")
         ydl_opts = {
-            "format": (
-                "bestvideo[protocol^=m3u8][vcodec^=avc1][height<=2160]/"
-                "bestvideo[protocol^=m3u8][vcodec^=avc1][height<=1080]/"
-                "bestvideo[vcodec^=avc1][height<=2160]/"
-                "bestvideo[height<=2160]/bestvideo"
-            ),
+            "format": video_stream_format_selector(quality),
             "outtmpl": output_template,
             "noplaylist": True,
             "quiet": True,
@@ -39410,25 +41668,24 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if not hasattr(self, "video_source_cache"):
             self.video_source_cache = {}
 
+        quality = video_stream_quality_key(getattr(self, "settings", {}).get("videoStreamQuality"))
         cache = self.video_source_cache.get(source)
-        if cache and time.time() - cache.get("timestamp", 0) < 20 * 60:
+        if (cache and cache.get("stream_quality") == quality
+                and time.time() - cache.get("timestamp", 0) < 20 * 60):
             return cache.get("capture_url", source)
 
         parsed = urlparse(source)
         if parsed.scheme.lower() in {"rtsp", "rtmp", "mms"}:
             self.video_source_cache[source] = {
                 "capture_url": source,
+                "stream_quality": quality,
                 "name": self._safe_video_name_from_source(source),
                 "timestamp": time.time(),
             }
             return source
 
         ydl_opts = {
-            "format": (
-                "bestvideo[protocol^=m3u8][vcodec^=avc1][height<=720]/"
-                "bestvideo[protocol^=m3u8][vcodec^=avc1][height<=1080]/"
-                "bestvideo[vcodec^=avc1][height<=720]/bestvideo[height<=720]/bestvideo"
-            ),
+            "format": video_stream_format_selector(quality),
             "noplaylist": True,
             "quiet": True,
             "no_warnings": False,
@@ -39459,6 +41716,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             title = info.get("title") if info else None
             self.video_source_cache[source] = {
                 "capture_url": capture_url,
+                "stream_quality": quality,
+                "is_live": bool(info and (info.get('is_live') or info.get('live_status') == 'is_live')
+                                and self.is_video_url(capture_url)),
                 "name": self._clean_video_source_name(title or self._safe_video_name_from_source(source)),
                 "timestamp": time.time(),
             }
@@ -39475,6 +41735,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 logger.warning("yt-dlp could not resolve the URL; trying direct video URL with OpenCV.")
                 self.video_source_cache[source] = {
                     "capture_url": source,
+                    "stream_quality": quality,
                     "name": self._safe_video_name_from_source(source),
                     "timestamp": time.time(),
                 }
@@ -39535,15 +41796,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             self.stop_video_inference_thread()
             self.latest_video_overlay = None
             self.last_overlay_frame_number = -1
-            current_frame = getattr(self, "_last_video_frame_bgr", None)
-            if current_frame is not None and isinstance(current_frame, np.ndarray) and current_frame.size:
-                try:
-                    self.update_display(cv2.cvtColor(current_frame, cv2.COLOR_BGR2RGB))
-                except Exception as e:
-                    logger.debug(f"Could not clear live detection overlay: {e}")
+            self.redraw_current_video_overlay()
             self.update_video_status_label(force=True)
             return
 
+        # Remove the saved-label layer immediately, even on paused playback.
+        # The worker supplies predictions for this exact frame when ready.
+        self.redraw_current_video_overlay()
         reader = getattr(self, "video_reader_thread", None)
         if reader is not None and reader.isRunning():
             self.start_video_inference_worker()
@@ -39701,6 +41960,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             return
 
         # Stop existing timer safely
+        self._collect_video_surface_available = False
         self._stop_and_delete_timer("timer2")
         self.stop_extraction(wait=False)
         self.stop_video_reader_thread()
@@ -39752,6 +42012,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             return
 
         # Initialize selected input
+        self._collect_video_surface_available = True
+        self.show_frame_viewer()
         if current_text == "Desktop":
             self.initialize_classes(input_type="desktop")
             self.start_video_inference_worker()
@@ -39793,17 +42055,25 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             if hasattr(self, "play_video_button") and self.play_video_button is not None:
                 self.play_video_button.setText("Pause")
 
-            timer = self.configure_frame_timer(self.display_camera_input)
-            fps = max(1.0, float(self.get_live_input_emit_fps_limit() or 60.0))
-            timer.setInterval(max(1, int(round(1000.0 / fps))))
-            self.display_camera_input()
-            timer.start()
-
-            logger.info(
-                "Started main-thread webcam/capture input for %s at %.1f FPS.",
-                current_text,
-                fps,
+            buffer_size = 5 if self.settings.get('videoBufferMode', 'auto') == 'reliability' else 1
+            reader = VideoFrameReaderThread(
+                device_index, live_stream=True, backend=cv2.CAP_DSHOW,
+                fallback_fps=60.0, max_emit_fps=self.get_live_input_emit_fps_limit(),
+                capture_properties={
+                    cv2.CAP_PROP_FRAME_WIDTH: 1920,
+                    cv2.CAP_PROP_FRAME_HEIGHT: 1080,
+                    cv2.CAP_PROP_FPS: 200,
+                    cv2.CAP_PROP_FOURCC: cv2.VideoWriter_fourcc(*'MJPG'),
+                    cv2.CAP_PROP_BUFFERSIZE: buffer_size,
+                }, parent=self,
             )
+            reader.preprocess_live_frames = True
+            reader.retry_failed_reads = True
+            generation = self.next_video_reader_generation()
+            self.connect_video_reader_signals(reader, generation)
+            self.video_reader_thread = reader
+            reader.start()
+            logger.info("Started background webcam/capture input for %s.", current_text)
             return
 
         else:
@@ -40091,6 +42361,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 pass
 
     def prepare_runtime_for_frame_extraction(self):
+        self._collect_video_surface_available = False
         self.stop_pending_live_inference_refresh()
         self.is_playing = False
         if hasattr(self, "play_video_button") and self.play_video_button is not None:
@@ -40628,7 +42899,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             "polygon_preference": self._polygon_label_parse_preference(),
         }
 
-    def refresh_grid_review_view(self, preserve_position=True):
+    def refresh_grid_review_view(self, preserve_position=True, preserve_cache=False):
         model = getattr(self, "grid_thumbnail_model", None)
         view = getattr(self, "grid_review_view", None)
         if model is None or view is None:
@@ -40639,8 +42910,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             if path and not self.is_placeholder_file(path)
         ]
         scroll_value = view.verticalScrollBar().value() if preserve_position else 0
-        model.set_files(image_files, self._grid_thumbnail_render_context())
-        self.grid_checked_selection_changed(len(model.checked_files()), show_status=False)
+        model.set_files(image_files, self._grid_thumbnail_render_context(), preserve_cache=preserve_cache)
+        self.grid_checked_selection_changed(model.checked_count(), show_status=False)
 
         current_file = self.normalize_path(getattr(self, "current_file", "") or "")
         try:
@@ -40663,6 +42934,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
     def grid_checked_selection_changed(self, count, show_status=True):
         count = max(0, int(count))
+        self._update_review_action_scope()
         button = getattr(self, "grid_view_button", None)
         if button is not None and self.grid_review_is_active():
             button.setText(f"Grid View: On ({count})" if count else "Grid View: On")
@@ -40750,6 +43022,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         return True
 
     def navigate_grid_selection(self, offset):
+        if getattr(self, "_image_deletion_in_progress", False):
+            return False
         image_files = getattr(self, "filtered_image_files", []) or []
         if not image_files:
             return False
@@ -40805,6 +43079,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         return True
 
     def open_grid_image(self, index):
+        if getattr(self, "_image_deletion_in_progress", False):
+            return False
         if not index.isValid():
             return False
         row = index.row()
@@ -40853,11 +43129,85 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         stack = getattr(self, "viewer_stack", None)
         frame_viewer = getattr(self, "frame_viewer", None)
         if stack is not None and frame_viewer is not None and stack.currentWidget() is not frame_viewer:
+            clarity = getattr(self, "_object_clarity_controller", None)
+            if clarity is not None:
+                clarity.reset()
             stack.setCurrentWidget(frame_viewer)
 
         return frame_viewer
 
+    def video_surface_is_foreground(self):
+        stack = getattr(self, "viewer_stack", None)
+        viewer = getattr(self, "frame_viewer", None)
+        return stack is None or viewer is None or stack.currentWidget() is viewer
+
+    def collect_workflow_is_active(self):
+        tabs = getattr(self, "tabWidget", None)
+        return tabs is None or self._ui_tab_source_text(tabs, tabs.currentIndex()).strip() == "Collect"
+
+    def restore_collect_video_surface(self):
+        """Return to an existing capture without restarting or losing image edits."""
+        if not getattr(self, "_collect_video_surface_available", False):
+            return
+        if not self.video_surface_is_foreground():
+            current_file = getattr(self, "current_file", None)
+            view = getattr(self, "screen_view", None)
+            scene = view.scene() if view is not None else None
+            if (
+                getattr(self, "annotation_scene_active", False)
+                and not self.grid_review_is_active()
+                and current_file and scene is not None
+                and not self.is_placeholder_file(current_file)
+            ):
+                self.save_bounding_boxes(current_file, scene.width(), scene.height(), scene=scene)
+            if getattr(self, "grid_mode_active", False):
+                self.show_annotation_viewer()
+            if hasattr(self, "_finalize_sparse_video_working_frame"):
+                self._finalize_sparse_video_working_frame()
+            self.show_frame_viewer()
+            self.annotation_scene_active = False
+            frame = getattr(self, "_latest_captured_video_frame_bgr", None)
+            if isinstance(frame, np.ndarray) and frame.size:
+                frame_number = int(getattr(self, "_latest_captured_video_frame_number", 0) or 0)
+                self._display_paired_video_frame(frame, frame_number)
+                worker = getattr(self, "video_inference_thread", None)
+                if getattr(self, "inference_enabled", True) and self.qthread_is_running(worker):
+                    worker.submit_frame(frame, frame_number, replace_pending=True)
+
+    def _draw_video_roi_dimensions(self, frame, roi_id, bounds, color):
+        """Display-only badge: never used as model input or saved extraction pixels."""
+        x, y, width, height = bounds
+        cache = getattr(self, "_video_roi_caption_cache", None)
+        if cache is None:
+            cache = self._video_roi_caption_cache = {}
+        cached = cache.get(roi_id)
+        if cached is None or cached[:2] != (width, height):
+            text = f"ROI {roi_id}: {width} x {height} px"
+            (tw, th), baseline = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, .5, 1)
+            cached = cache[roi_id] = (width, height, text, tw + 12, th + baseline + 8, th)
+        _, _, text, badge_w, badge_h, text_h = cached
+        frame_h, frame_w = frame.shape[:2]
+        left = max(0, min(x, frame_w - badge_w))
+        if y >= badge_h + 4:
+            top = y - badge_h - 4
+        elif y + height + badge_h + 4 <= frame_h:
+            top = y + height + 4
+        elif x + width + badge_w + 4 <= frame_w:
+            left, top = x + width + 4, max(0, min(y, frame_h - badge_h))
+        elif x >= badge_w + 4:
+            left, top = x - badge_w - 4, max(0, min(y, frame_h - badge_h))
+        else:
+            # A full-frame ROI has no outside image pixels; keep its size
+            # readable at the boundary without cropping/scaling the video.
+            top = max(0, min(y, frame_h - badge_h))
+        cv2.rectangle(frame, (left, top), (left + badge_w, top + badge_h), (12, 16, 20), -1)
+        cv2.putText(frame, text, (left + 6, top + text_h + 4), cv2.FONT_HERSHEY_SIMPLEX,
+                    .5, color, 1, cv2.LINE_AA)
+        return left, top, badge_w, badge_h
+
     def update_display(self, frame, segmentations=None):
+        if not self.video_surface_is_foreground():
+            return
         self.annotation_scene_active = False
         try:
             if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
@@ -40870,7 +43220,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             
             # Detect frame size change and refresh ROI to keep it centered
             old_frame_size = getattr(self, '_current_video_frame_size', None)
-            if old_frame_size is not None and old_frame_size != new_frame_size:
+            if old_frame_size != new_frame_size:
                 for refresh_id, checkbox_name in ((1, 'roi_checkbox'), (2, 'roi_checkbox_2')):
                     checkbox = getattr(self, checkbox_name, None)
                     if checkbox is not None and checkbox.isChecked():
@@ -40881,7 +43231,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             if self.settings.get('videoUseROIForInference', False):
                 copied = False
                 for roi_id, checkbox_name, color in (
-                    (1, 'roi_checkbox', (255, 255, 0)),
+                    (1, 'roi_checkbox', (0, 255, 255)),
                     (2, 'roi_checkbox_2', (0, 255, 0)),
                 ):
                     checkbox = getattr(self, checkbox_name, None)
@@ -40894,6 +43244,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                             frame = frame.copy()
                             copied = True
                         cv2.rectangle(frame, (x, y), (x + w - 1, y + h - 1), color, 2)
+                        self._draw_video_roi_dimensions(frame, roi_id, (x, y, w, h), color)
                     except Exception as e:
                         logger.debug(f"Failed to draw ROI {roi_id} on frame: {e}")
 
@@ -40965,6 +43316,61 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         return False
 
+    _CAPTURE_ACTION_BUTTON_STYLES = {
+        "idle_extract": "",
+        "idle_stop": (
+            "QPushButton { background-color: #202327; color: #7d858f; "
+            "border: 1px solid #3a4048; border-radius: 5px; }"
+            "QPushButton:disabled { background-color: #202327; color: #626a73; "
+            "border: 1px solid #343941; }"
+        ),
+        "preparing": (
+            "QPushButton { background-color: #493313; color: #f8d99a; "
+            "border: 1px solid #c58a2a; border-radius: 5px; font-weight: 600; }"
+            "QPushButton:disabled { background-color: #493313; color: #f8d99a; "
+            "border: 1px solid #c58a2a; }"
+        ),
+        "running": (
+            "QPushButton { background-color: #6f1d25; color: #fff0f2; "
+            "border: 1px solid #d15361; border-radius: 5px; font-weight: 700; }"
+            "QPushButton:disabled { background-color: #6f1d25; color: #ffd9de; "
+            "border: 1px solid #d15361; }"
+        ),
+        "stopping": (
+            "QPushButton { background-color: #3c2024; color: #e7a4ad; "
+            "border: 1px solid #8d3b46; border-radius: 5px; font-weight: 600; }"
+            "QPushButton:disabled { background-color: #3c2024; color: #b77880; "
+            "border: 1px solid #69313a; }"
+        ),
+    }
+
+    def update_capture_stop_button(self):
+        """Reflect live capture/playback as well as extraction, without starting either."""
+        button = getattr(self, "stop_extract", None)
+        if not isinstance(button, QtWidgets.QPushButton):
+            return
+        state = getattr(self, "_extraction_ui_state", "idle")
+        if state not in {"preparing", "running", "stopping"}:
+            active = bool(getattr(self, "is_playing", False) or getattr(self, "_live_timer_paused", False))
+            active = active or any(self.qthread_is_running(getattr(self, name, None))
+                                   for name in ("video_reader_thread", "_video_url_resolver"))
+            timer = getattr(self, "timer2", None)
+            if not active and timer is not None:
+                try:
+                    active = timer.isActive()
+                except RuntimeError:
+                    pass
+            state = "running" if active else "idle"
+        style_key = "idle_stop" if state == "idle" else "stopping" if state == "stopping" else "running"
+        stylesheet = self._CAPTURE_ACTION_BUTTON_STYLES[style_key]
+        button.setEnabled(True)
+        if button.styleSheet() != stylesheet:
+            button.setStyleSheet(stylesheet)
+        button.setToolTip(
+            "Extraction/live display is stopping. Click again to request stop."
+            if state == "stopping" else "Stop extraction/live display and clear the frame viewer."
+        )
+
     def set_extraction_ui_state(self, state="idle", message=None):
         state = str(state or "idle").strip().lower()
         if state not in {"idle", "preparing", "running", "stopping"}:
@@ -40972,37 +43378,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         self._extraction_ui_state = state
         extract_button = getattr(self, "extract_button", None)
-        stop_button = getattr(self, "stop_extract", None)
         save_button = getattr(self, "location_button", None)
-
-        styles = {
-            "idle_extract": "",
-            "idle_stop": (
-                "QPushButton { background-color: #202327; color: #7d858f; "
-                "border: 1px solid #3a4048; border-radius: 5px; }"
-                "QPushButton:disabled { background-color: #202327; color: #626a73; "
-                "border: 1px solid #343941; }"
-            ),
-            "preparing": (
-                "QPushButton { background-color: #493313; color: #f8d99a; "
-                "border: 1px solid #c58a2a; border-radius: 5px; font-weight: 600; }"
-                "QPushButton:disabled { background-color: #493313; color: #f8d99a; "
-                "border: 1px solid #c58a2a; }"
-            ),
-            "running": (
-                "QPushButton { background-color: #6f1d25; color: #fff0f2; "
-                "border: 1px solid #d15361; border-radius: 5px; font-weight: 700; }"
-                "QPushButton:disabled { background-color: #6f1d25; color: #ffd9de; "
-                "border: 1px solid #d15361; }"
-            ),
-            "stopping": (
-                "QPushButton { background-color: #3c2024; color: #e7a4ad; "
-                "border: 1px solid #8d3b46; border-radius: 5px; font-weight: 600; }"
-                "QPushButton:disabled { background-color: #3c2024; color: #b77880; "
-                "border: 1px solid #69313a; }"
-            ),
-        }
-
+        styles = self._CAPTURE_ACTION_BUTTON_STYLES
         if isinstance(extract_button, QtWidgets.QPushButton):
             text_by_state = {
                 "idle": "Extract",
@@ -41019,18 +43396,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 else "Frame extraction is active."
             )
 
-        if isinstance(stop_button, QtWidgets.QPushButton):
-            stop_button.setText("Stop")
-            stop_button.setEnabled(True)
-            if state == "idle":
-                stop_button.setStyleSheet(styles["idle_stop"])
-                stop_button.setToolTip("Stop extraction/live display and clear the frame viewer.")
-            elif state == "stopping":
-                stop_button.setStyleSheet(styles["stopping"])
-                stop_button.setToolTip("Extraction/live display is stopping. Click again to request stop.")
-            else:
-                stop_button.setStyleSheet(styles["running"])
-                stop_button.setToolTip("Stop extraction/live display and clear the frame viewer.")
+        self.update_capture_stop_button()
 
         if isinstance(save_button, QtWidgets.QPushButton):
             save_button.setEnabled(state == "idle")
@@ -41038,6 +43404,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             if getattr(self, "output_path", None):
                 base_tip = f"{base_tip}\nCurrent: {self.output_path}"
             save_button.setToolTip(base_tip)
+
+        if getattr(self, "collect_action_footer", None) is not None:
+            self._update_collect_action_footer()
 
         if message:
             try:
@@ -41101,7 +43470,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if self.extraction_is_active():
             self.set_extraction_ui_state("stopping", "Stop requested.")
         else:
-            self.reset_label_progress()
+            self.update_extraction_progress(minimum=0, maximum=100, value=0, progress_format="%p%")
             self.set_extraction_ui_state("idle", "Extraction stopped.")
 
     def set_output_directory(self):
@@ -41121,6 +43490,50 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.set_extraction_ui_state("idle")
         return False
 
+    def _snapshot_extraction_inference(self):
+        """Freeze widget values on the GUI thread, never from the frame worker."""
+        self.sync_class_labels_from_dropdown()
+        model_kwargs = self.get_model_kwargs() if getattr(self, "model", None) is not None else {}
+        try:
+            keypoint_count = self.keypoint_list.rowCount()
+        except Exception:
+            keypoint_count = 0
+        preprocessing = self._preprocessing_state_snapshot()
+        preprocessing.update({
+            "compare_original": bool(getattr(self, "_visibility_compare_original", False)),
+            "grayscaleEnabled": self.grayscale_Checkbox.isChecked(),
+            "grayscaleBrightness": self.grey_scale_slider.value(),
+            "super_resolution": self.super_resolution_Checkbox.isChecked(),
+            "outline": self.outline_Checkbox.isChecked(),
+            "debug_edges": bool(getattr(self, "debug_edge_display_checkbox", None)
+                                and self.debug_edge_display_checkbox.isChecked()),
+            "edge_min": self.slider_min_value,
+            "edge_max": self.slider_max_value,
+            "heatmap": self.heatmap_Checkbox.isChecked(),
+            "colormap": self.heatmap_colormap_options.get(
+                self.heatmap_dropdown.currentText().strip().upper(), cv2.COLORMAP_JET
+            ),
+        })
+        teammate_enabled, teammate_threshold = self.auto_label_teammate_filter_config()
+        return {
+            "classes": list(self.class_labels),
+            "active_class_ids": sorted(self.get_active_class_ids_from_ui()),
+            "class_map": self.model_to_local_class_id_map(),
+            "annotation_mode": self.current_mode(),
+            "keypoint_count": keypoint_count,
+            "model_kwargs": model_kwargs,
+            "network_size": self.get_network_size_wh(),
+            "confidence": float(self.confidence_threshold_spinbox.value()),
+            "iou": float(self.nms_threshold_spinbox.value()),
+            "size_limits": self.current_prediction_size_filter_values(),
+            "roi_enabled": bool(self.settings.get("videoUseROIForInference", False)),
+            "roi": self.get_active_rois_for_inference(),
+            "roi_reference_size": tuple(getattr(self, "_roi_reference_size", None) or (0, 0)),
+            "preprocessing": preprocessing,
+            "teammate_enabled": teammate_enabled,
+            "teammate_threshold": teammate_threshold,
+        }
+
     def _snapshot_extraction_settings(
         self,
         kind,
@@ -41134,6 +43547,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         mark_in, mark_out = self.get_video_mark_range() if kind == "video" else (None, None)
         frame_width, frame_height = self.get_frame_transform_size_wh()
         network_width, network_height = self.get_network_size_wh()
+        inference_context = self._snapshot_extraction_inference() if model_loaded else None
 
         return {
             "kind": kind,
@@ -41158,6 +43572,17 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             "inference_enabled": bool(getattr(self, "inference_enabled", True)),
             "start_frame": mark_in,
             "end_frame": mark_out,
+            "capture_fps": self.get_live_input_emit_fps_limit(),
+            "buffer_mode": self.settings.get("videoBufferMode", "auto"),
+            "inference_context": inference_context,
+            "inference_identity": {
+                "model_path": str(getattr(self, "weights_file_path", "") or getattr(self, "loaded_model_path", "") or ""),
+                "classes": list(getattr(self, "class_labels", []) or []),
+                "model_kwargs": inference_context["model_kwargs"] if inference_context else {},
+                "roi_enabled": bool(self.settings.get("videoUseROIForInference", False)),
+                "roi": self.get_active_rois_for_inference() if self.settings.get("videoUseROIForInference", False) else None,
+                "filters": inference_context,
+            },
         }
 
     def start_extraction_thread(self, config):
@@ -41171,6 +43596,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.extract_mode_active = True
         self.playback_extraction_enabled = False
         self._active_extraction_settings = dict(config or {})
+        self._extraction_progress_state = {}
+        self.update_extraction_progress(minimum=0, maximum=100, value=0, progress_format="%p%")
         self._last_extraction_error = ""
         self.reset_prediction_size_filter_stats("frame extraction")
         extraction_output_dir = self._active_extraction_settings.get("output_dir")
@@ -41188,12 +43615,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         worker = FrameExtractionThread(self, self._active_extraction_settings, parent=self)
         worker.progress_range.connect(self.on_extraction_progress_range)
-        worker.progress_value.connect(self.label_progress.setValue)
-        worker.progress_format.connect(self.label_progress.setFormat)
+        worker.progress_value.connect(self.on_extraction_progress_value)
+        worker.progress_format.connect(self.on_extraction_progress_format)
         worker.warning.connect(lambda message: logger.warning(message))
         worker.error.connect(self.on_extraction_error)
         worker.extraction_finished.connect(self.on_extraction_finished)
-        worker.checkpoint_resume_request.connect(self.on_extraction_checkpoint_resume_request)
+        worker.checkpoint_resume_request.connect(
+            lambda checkpoint, worker=worker: self.on_extraction_checkpoint_resume_request(checkpoint, worker)
+        )
         worker.finished.connect(lambda: self.on_extraction_thread_finished(worker))
         self.extraction_thread = worker
 
@@ -41206,167 +43635,16 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         return True
 
     def start_camera_extraction_timer(self, config):
-        existing = getattr(self, "extraction_thread", None)
-        camera_timer = getattr(self, "_camera_extraction_timer", None)
-        if (existing is not None and existing.isRunning()) or (camera_timer is not None and camera_timer.isActive()):
-            QMessageBox.warning(self, "Extraction", "An extraction is already running.")
-            self.set_extraction_ui_state("running")
-            return False
+        """Compatibility entry point: camera jobs now use the common worker.
 
-        source = config.get("capture_source", config.get("source"))
-        cap = cv2.VideoCapture(int(source), cv2.CAP_DSHOW)
-        if not cap.isOpened():
-            try:
-                cap.release()
-            except Exception:
-                pass
-            QMessageBox.warning(self, "Frame Extraction", f"Unable to access camera: {source}")
-            self.set_extraction_ui_state("idle", "Extraction failed.")
-            return False
-
-        try:
-            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
-            cap.set(cv2.CAP_PROP_FPS, self.get_live_input_emit_fps_limit())
-            # Use buffer mode from settings (extraction uses higher buffer for reliability)
-            buffer_mode = self.settings.get('videoBufferMode', 'auto')
-            buffer_size = 5 if buffer_mode == 'reliability' else 1
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, buffer_size)
-        except Exception:
-            pass
-
-        self.extracting_frames = True
-        self.extract_mode_active = True
-        self.playback_extraction_enabled = False
-        self._active_extraction_settings = dict(config or {})
-        self._last_extraction_error = ""
-        self.reset_prediction_size_filter_stats("camera frame extraction")
-        extraction_output_dir = self._active_extraction_settings.get("output_dir")
-        self.ensure_pose_list_for_output_dir(extraction_output_dir)
-        if extraction_output_dir:
-            self._ensure_video_dataset_metadata(extraction_output_dir)
-        self.set_extraction_ui_state("running", "Extraction running.")
-
-        self._camera_extraction_capture = cap
-        self._camera_extraction_helper = FrameExtractionThread(self, self._active_extraction_settings, parent=self)
-        self._camera_extraction_frame_count = 0
-        self._camera_extraction_saved_count = 0
-        self._camera_extraction_read_count = 0
-
-        self.set_label_progress_busy("Reading camera...")
-
-        timer = QTimer(self)
-        timer.setTimerType(Qt.PreciseTimer)
-        timer.timeout.connect(self.process_camera_extraction_frame)
-        self._camera_extraction_timer = timer
-
-        fps = max(1.0, float(self.get_live_input_emit_fps_limit() or 60.0))
-        timer.start(max(1, int(round(1000.0 / fps))))
-
-        logger.info(f"Starting main-thread camera extraction: {source}")
-        logger.info(f"Saving extraction to: {config.get('output_dir')}")
-        return True
-
-    def process_camera_extraction_frame(self):
-        if not getattr(self, "extracting_frames", False):
-            self.stop_camera_extraction_timer()
-            return
-
-        cap = getattr(self, "_camera_extraction_capture", None)
-        helper = getattr(self, "_camera_extraction_helper", None)
-        config = getattr(self, "_active_extraction_settings", None) or {}
-        if cap is None or helper is None:
-            self.stop_camera_extraction_timer(error="Camera extraction runtime is not initialized.")
-            return
-
-        ret, frame = cap.read()
-        if not ret or frame is None:
-            self.stop_camera_extraction_timer(error="Camera read failed during extraction.")
-            return
-
-        frame_count = int(getattr(self, "_camera_extraction_frame_count", 0) or 0)
-        self._camera_extraction_read_count = int(getattr(self, "_camera_extraction_read_count", 0) or 0) + 1
-
-        try:
-            if helper._save_frame(frame, frame_count, config.get("output_dir")):
-                self._camera_extraction_saved_count = int(getattr(self, "_camera_extraction_saved_count", 0) or 0) + 1
-        except Exception as e:
-            logger.error(f"Camera extraction failed on frame {frame_count}: {e}")
-
-        self._camera_extraction_frame_count = frame_count + 1
-        saved_count = int(getattr(self, "_camera_extraction_saved_count", 0) or 0)
-        if saved_count and saved_count % 10 == 0:
-            self.label_progress.setFormat(f"Saved {saved_count} frames...")
-
-    def stop_camera_extraction_timer(self, error=None):
-        timer = getattr(self, "_camera_extraction_timer", None)
-        if timer is not None:
-            try:
-                timer.stop()
-            except RuntimeError:
-                pass
-            try:
-                timer.timeout.disconnect()
-            except (TypeError, RuntimeError):
-                pass
-            try:
-                timer.deleteLater()
-            except RuntimeError:
-                pass
-
-        cap = getattr(self, "_camera_extraction_capture", None)
-        if cap is not None:
-            try:
-                cap.release()
-            except Exception:
-                pass
-
-        helper = getattr(self, "_camera_extraction_helper", None)
-        if helper is not None:
-            try:
-                helper.deleteLater()
-            except RuntimeError:
-                pass
-
-        read_count = int(getattr(self, "_camera_extraction_read_count", 0) or 0)
-        saved_count = int(getattr(self, "_camera_extraction_saved_count", 0) or 0)
-        output_dir = ""
-        settings = getattr(self, "_active_extraction_settings", None)
-        if isinstance(settings, dict):
-            output_dir = settings.get("output_dir", "")
-
-        self._camera_extraction_timer = None
-        self._camera_extraction_capture = None
-        self._camera_extraction_helper = None
-        self._camera_extraction_frame_count = 0
-        self._camera_extraction_saved_count = 0
-        self._camera_extraction_read_count = 0
-        self.extracting_frames = False
-        self.extract_mode_active = False
-        self.playback_extraction_enabled = True
-        self._active_extraction_settings = None
-
-        if error:
-            self._last_extraction_error = str(error)
-            logger.error(f"Frame extraction failed: {error}")
-            QMessageBox.warning(self, "Frame Extraction", str(error))
-        else:
-            logger.info(
-                "Camera extraction stopped. Frames read=%s, saved=%s, output=%s",
-                read_count,
-                saved_count,
-                output_dir,
-            )
-            self.log_prediction_size_filter_summary("camera frame extraction")
-
-        self.reset_label_progress(100 if saved_count else 0)
-        self.set_extraction_ui_state("idle", "Extraction stopped." if error else "Extraction complete.")
+        Open/read/release stay together on that worker. No capture, inference,
+        or image/label writes run in a GUI timer.
+        """
+        return self.start_extraction_thread(config)
 
     def stop_extraction(self, wait=False):
-        if getattr(self, "_camera_extraction_timer", None) is not None:
-            self.stop_camera_extraction_timer()
-
+        # An explicit stop/source change also invalidates pending URL resolves.
+        self.next_extraction_generation()
         self.extracting_frames = False
         self.extract_mode_active = False
         self.playback_extraction_enabled = True
@@ -41386,17 +43664,37 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         logger.info("Extraction stop requested.")
 
     def on_extraction_progress_range(self, minimum, maximum, progress_format):
-        self.set_label_progress(
-            minimum,
-            maximum,
+        self.update_extraction_progress(
+            minimum=minimum,
+            maximum=maximum,
             value=0 if int(maximum) > 0 else None,
             progress_format=progress_format or "%p%",
         )
 
-    def on_extraction_checkpoint_resume_request(self, checkpoint_data):
+    def update_extraction_progress(self, **changes):
+        state = getattr(self, "_extraction_progress_state", None)
+        if state is None:
+            state = self._extraction_progress_state = {}
+        state.update(changes)
+        if getattr(self, "collect_action_footer", None) is not None:
+            self._update_collect_action_footer()
+        # The top progress bar also belongs to labeling/review operations.
+        # Cache extraction updates while those tabs are in use, then restore
+        # the latest value on Collect instead of competing with their progress.
+        if self.collect_workflow_is_active():
+            return self.set_label_progress(**state)
+        return False
+
+    def on_extraction_progress_value(self, value):
+        self.update_extraction_progress(value=int(value))
+
+    def on_extraction_progress_format(self, progress_format):
+        self.update_extraction_progress(progress_format=str(progress_format))
+
+    def on_extraction_checkpoint_resume_request(self, checkpoint_data, worker=None):
         """Handle checkpoint found during extraction - ask user if they want to resume."""
-        worker = getattr(self, "extraction_thread", None)
-        if worker is None:
+        worker = worker or getattr(self, "extraction_thread", None)
+        if worker is None or worker is not getattr(self, "extraction_thread", None) or worker.is_stopping():
             return
 
         last_frame = checkpoint_data.get("last_frame_count", "?")
@@ -41419,9 +43717,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             QMessageBox.Yes
         )
 
+        if worker is not getattr(self, "extraction_thread", None) or worker.is_stopping():
+            return
         if reply == QMessageBox.Yes:
             # User wants to resume from checkpoint
-            worker.set_resume_checkpoint(True, last_frame)
+            worker.set_resume_checkpoint(True, last_frame, saved_before)
             logger.info(f"Resuming extraction from frame {last_frame}")
         else:
             # User wants to restart from beginning
@@ -41442,7 +43742,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         stopped = bool(summary.get("stopped"))
         error = summary.get("error") or getattr(self, "_last_extraction_error", "")
 
-        self.reset_label_progress(0 if stopped or error else 100)
+        self.update_extraction_progress(minimum=0, maximum=100, value=0 if stopped or error else 100, progress_format="%p%")
         self.set_extraction_ui_state(
             "idle",
             "Extraction stopped." if stopped else ("Extraction failed." if error else "Extraction complete."),
@@ -41459,28 +43759,47 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if not stopped and not error:
             output_dir = str(summary.get("output_dir", "") or "")
             extracted_images = sorted(self.get_image_files(output_dir)) if output_dir else []
-            message = QMessageBox(self)
+            message = QtWidgets.QDialog(self)
             message.setWindowTitle("Frame Extraction Complete")
-            message.setIcon(QMessageBox.Information)
-            message.setText(
+            layout = QtWidgets.QVBoxLayout(message)
+            details = QtWidgets.QLabel(
                 "Frame extraction completed.\n"
                 f"Frames read: {summary.get('frames_read', 0)}\n"
-                f"Frames available: {len(extracted_images)}"
+                f"Frames available: {len(extracted_images)}", message
             )
+            details.setWordWrap(True)
+            layout.addWidget(details)
+            buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close, message)
             open_button = None
             if extracted_images:
-                open_button = message.addButton("Open in Label", QMessageBox.AcceptRole)
-            message.addButton(QMessageBox.Close)
-            message.exec_()
+                open_button = buttons.addButton("Open Frames", QtWidgets.QDialogButtonBox.AcceptRole)
+            layout.addWidget(buttons)
+            # The worker's finished signal clears its config before the user
+            # may click Open. Keep this completed job's own immutable details.
+            config = dict(getattr(self, "_active_extraction_settings", None) or {})
 
-            if open_button is not None and message.clickedButton() is open_button:
-                config = getattr(self, "_active_extraction_settings", None) or {}
-                original_source = str(config.get("original_source", "") or "")
-                if original_source and os.path.isfile(original_source):
-                    self._video_annotation_return_source = original_source
-                    self._video_annotation_return_frame = int(config.get("start_frame") or 0)
-                    self._video_annotation_return_output_dir = output_dir
-                self._open_video_frame_in_image_labeler(extracted_images[0])
+            def open_completed_frames(button):
+                if open_button is not None and button is open_button:
+                    original_source = str(config.get("original_source", "") or "")
+                    if original_source and os.path.isfile(original_source):
+                        self._video_annotation_return_source = original_source
+                        self._video_annotation_return_frame = int(config.get("start_frame") or 0)
+                        self._video_annotation_return_output_dir = output_dir
+                    self._open_video_frame_in_image_labeler(extracted_images[0])
+
+            previous = getattr(self, "_extraction_completion_dialog", None)
+            if previous is not None:
+                previous.close()
+            self._extraction_completion_dialog = message
+            message.setModal(False)
+            message.setAttribute(Qt.WA_ShowWithoutActivating, True)
+            message.setAttribute(Qt.WA_DeleteOnClose, True)
+            buttons.clicked.connect(open_completed_frames)
+            buttons.accepted.connect(message.accept)
+            buttons.rejected.connect(message.reject)
+            message.finished.connect(lambda _result: setattr(self, "_extraction_completion_dialog", None)
+                                     if getattr(self, "_extraction_completion_dialog", None) is message else None)
+            message.show()
 
     def on_extraction_thread_finished(self, worker):
         if getattr(self, "extraction_thread", None) is worker:
@@ -41973,11 +44292,26 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 logger.warning("save_frame_on_inference received invalid frame.")
                 return False
 
+            active_settings = getattr(self, "_active_extraction_settings", None)
+            inference_context = (active_settings.get("inference_context")
+                                 if isinstance(active_settings, dict) else None)
+            preprocess_kwargs = {"state": inference_context["preprocessing"]} if inference_context else {}
+            filter_kwargs = ({"size_limits": inference_context["size_limits"]}
+                             if inference_context else {})
+            teammate_kwargs = ({"enabled": inference_context["teammate_enabled"],
+                                "threshold": inference_context["teammate_threshold"]}
+                               if inference_context else {})
+            roi_kwargs = ({"reference_size": inference_context["roi_reference_size"]}
+                          if inference_context else {})
+            class_labels = (list(inference_context["classes"]) if inference_context
+                            else list(getattr(self, "class_labels", []) or []))
+
             # ROI must be taken after extraction transforms/preprocessing so
             # model coordinates and the saved frame use the same pixel space.
             infer_frame = None
             roi_offset = {"x": 0, "y": 0}
-            roi_enabled = self.settings.get('videoUseROIForInference', False)
+            roi_enabled = (inference_context["roi_enabled"] if inference_context
+                           else self.settings.get('videoUseROIForInference', False))
 
             if not getattr(self, "output_path", None) and not output_dir:
                 logger.warning("No output path set for frame extraction.")
@@ -41990,12 +44324,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 output_dir = self.get_video_output_dir()
 
             os.makedirs(output_dir, exist_ok=True)
-            self.ensure_pose_list_for_output_dir(output_dir)
+            if not inference_context:
+                self.ensure_pose_list_for_output_dir(output_dir)
 
             # ---------------------------------------------------------------------
             # Skip frames
             # ---------------------------------------------------------------------
-            active_settings = getattr(self, "_active_extraction_settings", None)
             if (
                 frame_count is not None
                 and not isinstance(active_settings, dict)
@@ -42048,32 +44382,36 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                         frame_filepath, annotation_filepath
                     ))
                     if not has_labeled_image:
-                        if not save_cv_image(frame_filepath, save_frame):
-                            return False
+                        save_extraction_outputs(frame_filepath, save_frame, save_cv_image)
                     logger.info(f"Preserved existing labeled video frame: {frame_filepath}")
                     return True
+            except ExtractionWriteError:
+                raise
             except OSError:
                 pass
 
             # ---------------------------------------------------------------------
             # If inference is disabled or no model, save image only
             # ---------------------------------------------------------------------
-            if not getattr(self, "inference_enabled", True):
-                if not save_cv_image(frame_filepath, save_frame):
-                    logger.warning(f"Failed to save frame image: {frame_filepath}")
-                    return False
+            inference_enabled = (active_settings.get("inference_enabled", True)
+                                 if isinstance(active_settings, dict)
+                                 else getattr(self, "inference_enabled", True))
+            if not inference_enabled:
+                save_extraction_outputs(frame_filepath, save_frame, save_cv_image)
                 return True
 
-            if not self.ensure_live_inference_model():
-                if not save_cv_image(frame_filepath, save_frame):
-                    logger.warning(f"Failed to save frame image: {frame_filepath}")
-                    return False
+            # The model/pose list were prepared before starting this worker.
+            # Re-entering that GUI setup here can rebuild widgets during Settings.
+            model_ready = (bool(getattr(self, "model", None) is not None or getattr(self, "net", None) is not None)
+                           if inference_context else self.ensure_live_inference_model())
+            if not model_ready:
+                save_extraction_outputs(frame_filepath, save_frame, save_cv_image)
                 return True
 
             if (not hasattr(self, "model") or self.model is None) and getattr(self, "net", None) is not None:
                 processed_frame = save_frame
                 try:
-                    processed_frame, _ = self.apply_preprocessing(save_frame)
+                    processed_frame, _ = self.apply_preprocessing(save_frame, **preprocess_kwargs)
                 except Exception as e:
                     logger.warning(f"apply_preprocessing failed for OpenCV DNN save {frame_filepath}: {e}")
                     processed_frame = save_frame
@@ -42089,10 +44427,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 opencv_roi_offset = {"x": 0, "y": 0}
                 if roi_enabled:
                     try:
-                        roi_bounds = self.get_active_rois_for_inference()
+                        roi_bounds = (inference_context["roi"] if inference_context
+                                      else self.get_active_rois_for_inference())
                         if roi_bounds is not None:
                             roi_frame, offset_map = self.extract_roi_region_for_inference(
-                                processed_frame, roi_bounds
+                                processed_frame, roi_bounds, **roi_kwargs
                             )
                             if roi_frame is not None and roi_frame.size > 0:
                                 opencv_infer_frame = roi_frame
@@ -42100,11 +44439,16 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                     except Exception as e:
                         logging.debug(f"Failed to extract ROI for OpenCV DNN: {e}")
                 
-                new_bboxes = self.run_opencv_dnn_inference(opencv_infer_frame)
-                self.sync_class_labels_from_dropdown()
-                active_class_ids = self.get_active_class_ids_from_ui()
+                new_bboxes = self.run_opencv_dnn_inference(
+                    opencv_infer_frame, **({"inference_context": inference_context} if inference_context else {})
+                )
+                if not inference_context:
+                    self.sync_class_labels_from_dropdown()
+                    class_labels = list(self.class_labels)
+                active_class_ids = (set(inference_context["active_class_ids"]) if inference_context
+                                    else self.get_active_class_ids_from_ui())
                 if not active_class_ids:
-                    active_class_ids = set(range(len(self.class_labels)))
+                    active_class_ids = set(range(len(class_labels)))
 
                 infer_height, infer_width = opencv_infer_frame.shape[:2]
                 new_bboxes = self.remap_roi_bboxes_to_full_frame(
@@ -42119,25 +44463,26 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                     new_bboxes,
                     proc_w,
                     proc_h,
-                    source=os.path.basename(frame_filepath)
+                    source=os.path.basename(frame_filepath),
+                    **filter_kwargs,
                 )
                 new_bboxes = self.filter_teammate_auto_labels(
                     processed_frame,
                     new_bboxes,
-                    class_names=self.class_labels,
+                    class_names=class_labels,
                     source="OpenCV video auto label",
+                    **teammate_kwargs,
                 )
 
                 if not new_bboxes:
                     self.remove_stale_extraction_outputs(frame_filepath, annotation_filepath)
                     return False
 
-                if not save_cv_image(frame_filepath, save_frame):
-                    logger.warning(f"Failed to save detected frame image: {frame_filepath}")
-                    return False
-
                 labels = [bbox.to_str(remove_confidence=True) for bbox in new_bboxes]
-                self.save_labels_to_file(annotation_filepath, labels, mode="w")
+                save_extraction_outputs(
+                    frame_filepath, save_frame, save_cv_image,
+                    label_path=annotation_filepath, labels=labels, label_writer=self.save_labels_to_file,
+                )
                 return True
 
             # ---------------------------------------------------------------------
@@ -42148,7 +44493,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
             if results is None:
                 try:
-                    processed_frame, _ = self.apply_preprocessing(save_frame)
+                    processed_frame, _ = self.apply_preprocessing(save_frame, **preprocess_kwargs)
                 except Exception as e:
                     logger.warning(f"apply_preprocessing failed for {frame_filepath}: {e}")
                     processed_frame = save_frame
@@ -42160,16 +44505,20 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 infer_frame = processed_frame
                 if roi_enabled:
                     try:
-                        roi_bounds = self.get_active_rois_for_inference()
+                        roi_bounds = (inference_context["roi"] if inference_context
+                                      else self.get_active_rois_for_inference())
                         if roi_bounds is not None:
-                            roi_frame, roi_offset = self.extract_roi_region_for_inference(processed_frame, roi_bounds)
+                            roi_frame, roi_offset = self.extract_roi_region_for_inference(
+                                processed_frame, roi_bounds, **roi_kwargs
+                            )
                             if roi_frame is not None and roi_frame.size > 0:
                                 infer_frame = roi_frame
                     except Exception as e:
                         logging.debug(f"Failed to extract ROI for {frame_filepath}: {e}")
 
                 try:
-                    model_kwargs = self.get_model_kwargs()
+                    model_kwargs = (dict(inference_context["model_kwargs"]) if inference_context
+                                    else self.get_model_kwargs())
                     if (
                         not self.is_darkfusion_onnx_model(self.model)
                         and ultralytics_kwargs_use_fp16(model_kwargs)
@@ -42191,7 +44540,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 # coordinate space, so do not apply an ROI offset a second time.
                 # used for coordinate normalization. This keeps txt aligned with saved image.
                 try:
-                    processed_frame, _ = self.apply_preprocessing(save_frame)
+                    processed_frame, _ = self.apply_preprocessing(save_frame, **preprocess_kwargs)
                 except Exception as e:
                     logger.warning(f"apply_preprocessing failed while using provided results for {frame_filepath}: {e}")
                     processed_frame = save_frame
@@ -42220,14 +44569,18 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             # ---------------------------------------------------------------------
             # Class setup
             # ---------------------------------------------------------------------
-            self.sync_class_labels_from_dropdown()
+            if not inference_context:
+                self.sync_class_labels_from_dropdown()
+                class_labels = list(self.class_labels)
 
-            active_class_ids = self.get_active_class_ids_from_ui()
+            active_class_ids = (set(inference_context["active_class_ids"]) if inference_context
+                                else self.get_active_class_ids_from_ui())
             if not active_class_ids:
-                active_class_ids = set(range(len(self.class_labels)))
+                active_class_ids = set(range(len(class_labels)))
 
             try:
-                num_expected_keypoints = self.keypoint_list.rowCount()
+                num_expected_keypoints = (inference_context["keypoint_count"] if inference_context
+                                          else self.keypoint_list.rowCount())
             except Exception:
                 num_expected_keypoints = 0
 
@@ -42242,7 +44595,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 img_height=infer_h,
                 image_file=frame_filepath,
                 mp_pose=None,
-                num_expected_keypoints=num_expected_keypoints
+                num_expected_keypoints=num_expected_keypoints,
+                **({"inference_context": inference_context} if inference_context else {}),
             )
 
             new_bboxes = self.remap_roi_bboxes_to_full_frame(
@@ -42258,22 +44612,20 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 new_bboxes,
                 proc_w,
                 proc_h,
-                source=os.path.basename(frame_filepath)
+                source=os.path.basename(frame_filepath),
+                **filter_kwargs,
             )
             new_bboxes = self.filter_teammate_auto_labels(
                 processed_frame,
                 new_bboxes,
-                class_names=self.class_labels,
+                class_names=class_labels,
                 source="video auto label",
+                **teammate_kwargs,
             )
 
             # No detections -> remove stale txt if present
             if not new_bboxes:
                 self.remove_stale_extraction_outputs(frame_filepath, annotation_filepath)
-                return False
-
-            if not save_cv_image(frame_filepath, save_frame):
-                logger.warning(f"Failed to save detected frame image: {frame_filepath}")
                 return False
 
             # ---------------------------------------------------------------------
@@ -42282,9 +44634,18 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             # when those fields exist.
             # ---------------------------------------------------------------------
             labels = [bbox.to_str(remove_confidence=True) for bbox in new_bboxes]
-            self.save_labels_to_file(annotation_filepath, labels, mode="w")
+            save_extraction_outputs(
+                frame_filepath, save_frame, save_cv_image,
+                label_path=annotation_filepath, labels=labels, label_writer=self.save_labels_to_file,
+            )
             return True
 
+        except ExtractionWriteError:
+            # The extraction worker stops and retains a retry checkpoint.
+            # This must not be treated like a frame with no detections.
+            raise
+        except OSError as error:
+            raise ExtractionWriteError(f"Could not save extracted frame: {error}") from error
         except Exception as e:
             logger.error(f"Error during save_frame_on_inference: {e}")
             return False
@@ -42655,7 +45016,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         return 240.0
 
     def get_live_input_emit_fps_limit(self):
-        return 60.0
+        # Device reads already follow the negotiated source rate. Avoid a 60 Hz
+        # software ceiling for high-refresh desktops and high-FPS capture cards.
+        return 240.0
 
     def apply_video_reader_max_emit_fps(self):
         fps_limit = self.get_video_playback_fps_limit()
@@ -42924,6 +45287,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             return
 
         self._last_video_status_update = now
+        self.update_capture_stop_button()
         source_fps = float(getattr(self, "video_fps", 0.0) or 0.0)
         capture_fps = self.measured_rate(getattr(self, "_video_capture_timestamps", []) or [])
         render_fps = self.measured_rate(getattr(self, "_video_frame_timestamps", []) or [])
@@ -43089,6 +45453,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         return self.timer2
 
     def is_live_video_source(self, source):
+        cache = getattr(self, 'video_source_cache', {})
+        cached = cache.get(str(source or '').strip(), {}) if isinstance(cache, dict) else {}
+        if isinstance(cached, dict) and cached.get('is_live'):
+            return True
         try:
             parsed = urlparse(str(source or ""))
             return parsed.scheme.lower() in {"rtsp", "rtmp", "mms"}
@@ -43096,6 +45464,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             return False
 
     def current_video_source_is_live_input(self):
+        if getattr(getattr(self, 'video_reader_thread', None), 'live_stream', False):
+            return True
         source = (
             getattr(self, "current_playback_original_source", None)
             or getattr(self, "current_playback_source", None)
@@ -43159,6 +45529,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         return int(generation) == int(getattr(self, "_video_reader_generation", 0) or 0)
 
     def connect_video_reader_signals(self, reader, generation):
+        reader.started.connect(self.update_capture_stop_button)
+        reader.finished.connect(self.update_capture_stop_button)
+        worker = getattr(self, "video_inference_thread", None)
+        if hasattr(reader, "set_inference_gate"):
+            reader.set_inference_gate(getattr(worker, "frame_submission_ready", None))
         reader.metadata_ready.connect(
             lambda fps, total_frames, generation=generation: self.on_video_metadata_ready(
                 fps,
@@ -43179,7 +45554,28 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
     def handle_video_reader_frame(self, reader, generation, frame, frame_number, timestamp):
         try:
-            self.on_video_frame_ready(frame, frame_number, timestamp, generation)
+            if getattr(reader, "preprocess_live_frames", False):
+                if not self.is_current_video_reader_generation(generation):
+                    return
+                if getattr(reader, '_paused', False):
+                    return
+                if frame.ndim == 3 and frame.shape[2] == 4:
+                    frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2RGB)
+                prepared = self.prepare_playback_frame(frame)
+                if prepared is None:
+                    return
+                worker = getattr(self, "video_inference_thread", None)
+                if getattr(self, "inference_enabled", True) and worker is not None and worker.isRunning():
+                    prepared, _ = self.apply_preprocessing(prepared)
+                elif bool(self.settings.get("visibilityPreprocessEnabled", False)):
+                    prepared = self._apply_visibility_adjustments(prepared)
+                self._accept_prepared_video_frame(prepared, frame_number, frame_number)
+            else:
+                self.on_video_frame_ready(frame, frame_number, timestamp, generation)
+        except Exception as error:
+            if not getattr(reader,'preprocess_live_frames',False):
+                raise
+            logger.error('Failed preparing camera/capture frame: %s',error)
         finally:
             if reader is not None and hasattr(reader, "mark_frame_delivered"):
                 try:
@@ -43241,6 +45637,17 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         model = getattr(self, "model", None)
         if model is None:
             return
+
+        if self.is_darkfusion_onnx_model(model):
+            requested = getattr(model, "requested_providers", "auto")
+            providers = requested.split(",") if isinstance(requested, str) else list(requested)
+            options = getattr(model, "runtime_options", {})
+            if ((not providers or any(str(value).strip().lower() == "auto" for value in providers))
+                    and options.get("compare_providers", False)
+                    and options.get("auto_policy") in {"max_performance", "prefer_gpu"}):
+                # Compare actual video pixels in the worker. A blank synthetic
+                # warm-up can hide a provider that replays stale empty outputs.
+                return
 
         model_path = (
             getattr(self, "loaded_model_path", None)
@@ -43332,6 +45739,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         return model_kwargs
 
     def start_video_inference_worker(self):
+        if not gpu_model_allowed(self, "detector"):
+            return None
+        if getattr(self, "_gpu_released_detector", False) and getattr(self, "inference_enabled", False):
+            ensure_gpu_detector(self)
         for thread in list(getattr(self, "_stopping_qthreads", []) or []):
             if isinstance(thread, VideoInferenceThread) and self.qthread_is_running(thread):
                 logger.warning("Skipped starting a new video inference worker because a previous worker is still stopping.")
@@ -43411,6 +45822,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         )
         worker.finished.connect(lambda: logger.debug("Video inference worker finished."))
         self.video_inference_thread = worker
+        reader = getattr(self, "video_reader_thread", None)
+        if reader is not None and hasattr(reader, "set_inference_gate"):
+            reader.set_inference_gate(worker.frame_submission_ready)
         worker.start()
         self.clear_live_video_overlay()
         if not getattr(self, "is_playing", False):
@@ -43518,7 +45932,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             and worker is not None and worker.isRunning()
         )
         playing = bool(getattr(self, "is_playing", False))
-        if inference_active and (not playing or self.should_submit_video_inference_frame()):
+        foreground = self.video_surface_is_foreground()
+        if not foreground and not getattr(self, "_video_surface_background", False):
+            if worker is not None:
+                worker.invalidate_pending_frames()
+            self.latest_video_overlay = None
+        self._video_surface_background = not foreground
+        if foreground and inference_active and (not playing or self.should_submit_video_inference_frame()):
             if worker.submit_frame(prepared, display_frame_number, replace_pending=True, count_replaced=playing):
                 self.mark_video_inference_frame_submitted()
             else:
@@ -43531,7 +45951,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         # Capture keeps advancing with at most one latest pending inference
         # frame. Replaced pending frames are counted, never accumulated.
         # Paused/seek frames and ordinary playback still display immediately.
-        if not inference_active or not playing or first_frame:
+        if not foreground or not inference_active or not playing or first_frame:
             overlay = getattr(self, "latest_video_overlay", None)
             if not self.video_overlay_is_fresh(overlay, display_frame_number):
                 overlay = None
@@ -43549,6 +45969,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         """Keep the viewport, saved labels, slider and Label Frame snapshot in sync."""
         self.latest_video_frame_number = int(display_frame_number)
         self._last_video_frame_bgr = prepared
+        if not self.video_surface_is_foreground():
+            self.update_video_playback_controls_light(self.latest_video_frame_number)
+            return
         render_start = time.perf_counter()
         overlay_ms = 0.0
         if self.video_overlay_is_fresh(overlay, display_frame_number):
@@ -43562,13 +45985,19 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         else:
             frame_to_show = prepared
 
-        try:
-            frame_to_show = self.draw_saved_video_labels(
-                frame_to_show,
-                self.latest_video_frame_number,
-            )
-        except Exception as e:
-            logger.warning(f"Failed drawing saved video labels: {e}")
+        # Detection playback is a view of model output, not a comparison with
+        # existing dataset annotations. Stacking saved labels here draws the
+        # same object twice and can disguise a missed prediction. Keep saved
+        # annotations visible only in plain playback (Detect off), including
+        # when inference is pending, empty, stale or fails to draw.
+        if not getattr(self, "inference_enabled", True):
+            try:
+                frame_to_show = self.draw_saved_video_labels(
+                    frame_to_show,
+                    self.latest_video_frame_number,
+                )
+            except Exception as e:
+                logger.warning(f"Failed drawing saved video labels: {e}")
 
         if hasattr(self, "fast_bgr_to_rgb"):
             display_frame = self.fast_bgr_to_rgb(frame_to_show)
@@ -43591,6 +46020,23 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             elif self.total_frames <= 0:
                 self.update_time_label(self.latest_video_frame_number)
 
+    def update_video_playback_controls_light(self, frame_number):
+        """Update transport controls without touching the viewers or seeking.
+
+        Keep the slider exact: Label Frame and In/Out marks use its value.
+        User dragging owns the slider until the seek has completed.
+        """
+        if getattr(self, "slider_is_pressed", False):
+            return
+        frame_number = max(0, int(frame_number))
+        total = int(getattr(self, "total_frames", 0) or 0)
+        slider = getattr(self, "video_slider", None)
+        if total > 0:
+            frame_number = min(frame_number, total - 1)
+            if slider is not None and slider.value() != frame_number:
+                slider.setValue(frame_number)
+        self.update_time_label(frame_number)
+
     def on_video_inference_profile_ready(self, profile, frame_number, generation=None):
         if (
             not self.is_current_video_inference_generation(generation)
@@ -43612,6 +46058,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             or not getattr(self, "inference_enabled", True)
             or getattr(self, "video_inference_thread", None) is None
         ):
+            return
+
+        if not self.video_surface_is_foreground():
             return
 
         if not isinstance(overlay, dict):
@@ -43695,8 +46144,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if not boxes and not polygons and not keypoints:
             return frame  # No overlay data; return original frame without copy
 
-        annotated = frame.copy()  # Only copy if we're actually drawing
-        frame_h, frame_w = annotated.shape[:2]
+        frame_h, frame_w = frame.shape[:2]
         overlay_h, overlay_w = overlay.get("frame_shape") or (frame_h, frame_w)
         overlay = self.filter_video_overlay_to_size_limits(
             overlay,
@@ -43709,6 +46157,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if not boxes and not polygons and not keypoints:
             return frame  # After filtering, no annotations; return original frame
 
+        annotated = frame.copy()  # Only copy after accepting drawable objects
         class_names = self.class_display_names()
         num_classes = max(1, len(class_names))
         hide_labels = annotation_labels_hidden(self)
@@ -43748,9 +46197,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 return class_names[class_id]
             return str(class_id)
 
+        min_size_px, max_percent = self.current_prediction_size_filter_values()
+
         def size_allowed(x1, y1, x2, y2):
             try:
-                min_size_px, max_percent = self.current_prediction_size_filter_values()
                 return prediction_size_allowed_xyxy(
                     (x1, y1, x2, y2),
                     frame_w,
@@ -43814,9 +46264,19 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 continue
 
             if shade_alpha > 0:
-                fill_layer = annotated.copy()
-                cv2.fillPoly(fill_layer, [pts], color=color, lineType=cv2.LINE_AA)
-                cv2.addWeighted(fill_layer, shade_alpha, annotated, 1.0 - shade_alpha, 0, annotated)
+                # Blend only this object's footprint, preserving sequential
+                # overlap compositing and antialiased edge pixels. This is a
+                # display region, not a change to inference/extraction ROI.
+                left, top = max(0, x - 3), max(0, y - 3)
+                right, bottom = min(frame_w, x + w + 3), min(frame_h, y + h + 3)
+                if right > left and bottom > top:
+                    region = annotated[top:bottom, left:right]
+                    fill_layer = region.copy()
+                    cv2.fillPoly(
+                        fill_layer, [pts], color=color, lineType=cv2.LINE_AA,
+                        offset=(-left, -top),
+                    )
+                    cv2.addWeighted(fill_layer, shade_alpha, region, 1.0 - shade_alpha, 0, region)
             cv2.polylines(
                 annotated,
                 [pts],
@@ -44011,9 +46471,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             self.play_video_button.setEnabled(False)
 
             # Resolve URL in background thread
+            generation = self.next_video_reader_generation()
             resolver = VideoUrlResolverWorker(self, video_path)
-            resolver.resolved.connect(self._on_url_resolved)
-            resolver.error.connect(self._on_url_resolution_error)
+            resolver.resolved.connect(lambda capture, original, generation=generation:
+                                      self._on_url_resolved(capture, original, generation))
+            resolver.error.connect(lambda error, generation=generation:
+                                   self._on_url_resolution_error(error, generation))
             resolver.finished.connect(lambda: (
                 QApplication.restoreOverrideCursor(),
                 self.play_video_button.setEnabled(True)
@@ -44023,6 +46486,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 resolver,
             ))
             self._video_url_resolver = resolver
+            resolver.started.connect(self.update_capture_stop_button)
+            resolver.finished.connect(self.update_capture_stop_button)
             resolver.start()
             return
 
@@ -44038,12 +46503,16 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         self._start_video_playback(capture_source, original_source)
 
-    def _on_url_resolved(self, capture_source, original_source):
+    def _on_url_resolved(self, capture_source, original_source, generation=None):
         """Called when URL resolution completes successfully."""
+        if not self.is_current_video_reader_generation(generation):
+            return
         self._start_video_playback(capture_source, original_source)
 
-    def _on_url_resolution_error(self, error_message):
+    def _on_url_resolution_error(self, error_message, generation=None):
         """Called when URL resolution fails."""
+        if not self.is_current_video_reader_generation(generation):
+            return
         QApplication.restoreOverrideCursor()
         self.play_video_button.setEnabled(True)
         logger.error(f"Could not resolve video source for playback: {error_message}")
@@ -44126,6 +46595,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self._release_capture()
 
         self.initialize_classes("video")
+        self._collect_video_surface_available = True
+        self.show_frame_viewer()
         self.start_video_inference_worker()
 
         self.video_slider.setValue(0)
@@ -44386,6 +46857,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
     def stop_video_playback(self):
         """Stop video playback and release resources safely."""
+        self._collect_video_surface_available = False
         self.stop_video_reader_thread()
         self.stop_video_inference_thread()
         self._stop_and_delete_timer("timer2")
@@ -44643,6 +47115,36 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
     def eventFilter(self, source, event):
         try:
+            if source is getattr(self, "filter_class_spinbox", None) and event.type() == QEvent.EnabledChange:
+                self._update_review_action_scope()
+            if source is getattr(self, "status_label_tools", None) and event.type() in (
+                QEvent.Resize, QEvent.LayoutRequest, QEvent.FontChange,
+            ):
+                self._reflow_status_label_tools()
+                return False
+            if event.type() in (QEvent.KeyPress, QEvent.KeyRelease):
+                # Qt item views consume letter keys for incremental search.
+                # Resolve annotation navigation before the canvas/file/review
+                # view sees it, while leaving text editors and dialogs alone.
+                views = (
+                    getattr(self, "screen_view", None),
+                    getattr(self, "List_view", None),
+                    getattr(self, "preview_list", None),
+                    getattr(self, "grid_review_view", None),
+                )
+                navigation_target = any(
+                    view is not None and (source is view or source is view.viewport())
+                    for view in views
+                )
+                if navigation_target:
+                    setting_key = self.keybind_setting_for_text(
+                        event.text(), ("nextButton", "previousButton")
+                    )
+                    if setting_key:
+                        if event.type() == QEvent.KeyPress:
+                            return self.handle_navigation_key_press(setting_key, event)
+                        return self.handle_navigation_key_release(setting_key, event)
+
             if source is self and event.type() == QEvent.WindowActivate:
                 # Reconcile external file changes when the user returns to the
                 # app. Watching every directory write also reacts to each label
@@ -44715,14 +47217,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                     self.handle_left_click(index)
                     return True
 
-            if event.type() in (QEvent.KeyPress, QEvent.KeyRelease) and source is self.preview_list:
-                key = event.text()
-                setting_key = self.keybind_setting_for_text(key, ("nextButton", "previousButton"))
-                if setting_key:
-                    if event.type() == QEvent.KeyPress:
-                        return self.handle_navigation_key_press(setting_key, event)
-                    return self.handle_navigation_key_release(setting_key, event)
-
             return super().eventFilter(source, event)
 
         except Exception as e:
@@ -44787,6 +47281,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         row = index.row()
         self._selected_preview_annotation = None
+        self._sync_preview_annotation_actions()
         self._deletion_in_progress = True
         self.preview_list.setUpdatesEnabled(False)
 
@@ -45168,6 +47663,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         label_text,
         review_target=None,
         dimmed=False,
+        reuse=None,
     ):
         class_count = max(1, self.classes_dropdown.count() if hasattr(self, "classes_dropdown") else 1)
         class_color = get_color(
@@ -45177,6 +47673,25 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             class_names=getattr(self, "class_labels", None),
         )
         accent = class_color.name()
+
+        parts = getattr(reuse, "_preview_parts", None)
+        if (parts is not None and not isinstance(review_target, dict)
+                and not reuse.property("dataset_analysis_target")
+                and not getattr(reuse, "_preview_similarity_card", False)):
+            for name, text in (("class", class_name), ("type", label_type.upper()),
+                               ("id", f"ID {bbox.class_id}"), ("line", f"Line {idx + 1}"),
+                               ("size", size_text), ("label", label_text)):
+                if parts[name].text() != text:
+                    parts[name].setText(text)
+            parts["class"].setToolTip(class_name)
+            parts["label"].setToolTip(label_text)
+            reuse.setToolTip("")
+            reuse.setProperty("accent_color", accent)
+            style = self._preview_details_card_style(accent, False)
+            if reuse.styleSheet() != style:
+                reuse.setStyleSheet(style)
+            self._set_preview_widget_opacity(reuse, 0.62 if dimmed else 1.0)
+            return reuse, accent
 
         card = QFrame()
         card.setObjectName("previewDetailsCard")
@@ -45231,14 +47746,18 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         class_label.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
         class_label.setToolTip(class_name)
         title_row.addWidget(class_label, 1)
-        title_row.addWidget(self._preview_badge(label_type.upper(), "#1f2a34"))
+        type_badge = self._preview_badge(label_type.upper(), "#1f2a34")
+        title_row.addWidget(type_badge)
         layout.addLayout(title_row)
 
         meta_row = QHBoxLayout()
         meta_row.setSpacing(6)
-        meta_row.addWidget(self._preview_badge(f"ID {bbox.class_id}", "#20252c", "#d9e0e7"))
-        meta_row.addWidget(self._preview_badge(f"Line {idx + 1}", "#20252c", "#d9e0e7"))
-        meta_row.addWidget(self._preview_badge(size_text, "#20252c", "#d9e0e7"))
+        id_badge = self._preview_badge(f"ID {bbox.class_id}", "#20252c", "#d9e0e7")
+        line_badge = self._preview_badge(f"Line {idx + 1}", "#20252c", "#d9e0e7")
+        size_badge = self._preview_badge(size_text, "#20252c", "#d9e0e7")
+        meta_row.addWidget(id_badge)
+        meta_row.addWidget(line_badge)
+        meta_row.addWidget(size_badge)
         meta_row.addStretch()
         layout.addLayout(meta_row)
 
@@ -45254,6 +47773,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         layout.addWidget(label_preview)
 
         card.setProperty("accent_color", accent)
+        card._preview_parts = {"class": class_label, "type": type_badge, "id": id_badge,
+                               "line": line_badge, "size": size_badge, "label": label_preview}
         self._set_preview_widget_opacity(card, 0.62 if dimmed else 1.0)
         return card, accent
 
@@ -45756,6 +48277,53 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             return None
         return context
 
+    _PREVIEW_ANNOTATION_ACTION_TITLES = {
+        'save_negative': 'Save Negative Crop',
+        'save_negative_delete': 'Save Negative Crop + Delete Annotation',
+        'find_similar': 'Find Similar Annotations',
+        'remove_matches': 'Remove Similar Matches...',
+        'negative_remove_matches': 'Save Representative Negatives + Remove Matches...',
+        'change_class': 'Change Class...',
+        'copy_label': 'Copy YOLO Label',
+    }
+
+    def _sync_preview_annotation_actions(self):
+        button = getattr(self, "annotation_actions_button", None)
+        if button is not None:
+            choice = getattr(self, 'settings', {}).get('reviewAnnotationPrimaryAction', '')
+            title = self._PREVIEW_ANNOTATION_ACTION_TITLES.get(choice, 'Annotation Actions')
+            button.setText(title)
+            button.setToolTip(f"{title}. Use the arrow to choose another action; your last choice is remembered.")
+            button.setEnabled(self._selected_preview_annotation_context() is not None
+                              and not getattr(self, "_review_similarity_busy", False))
+
+    def run_selected_preview_annotation_action(self):
+        """Resolve the remembered operation against the current preview selection."""
+        if self._selected_preview_annotation_context() is None:
+            return
+        self._populate_selected_preview_annotation_menu()
+        choice = self.settings.get('reviewAnnotationPrimaryAction', '')
+        button = self.annotation_actions_button
+        for action in button.menu().actions():
+            if not action.isSeparator() and action.data() == choice:
+                action.trigger()
+                return
+        # A remembered bulk action may no longer apply after leaving similarity
+        # results. Keep the menu accessible so another operation can be chosen.
+        button.showMenu()
+
+    def find_similar_selected_preview_annotations(self):
+        context = self._selected_preview_annotation_context()
+        if context is not None:
+            self.find_similar_preview_annotations(*context)
+
+    def _populate_selected_preview_annotation_menu(self):
+        menu = self.annotation_actions_button.menu()
+        menu.clear()
+        context = self._selected_preview_annotation_context()
+        if context is not None:
+            self._populate_preview_annotation_menu(menu, context, remember_choice=True)
+
     def show_selected_preview_annotation_actions(self):
         """Open actions for the row selected by the existing left-click behavior."""
         context = self._selected_preview_annotation_context()
@@ -45774,12 +48342,16 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             int(line_index),
             str(label_text),
         )
+        self._sync_preview_annotation_actions()
         combo = getattr(self, "filter_class_spinbox", None)
         if combo is None:
             return
         similarity_index = combo.findText("Similar to Selected")
         if similarity_index < 0:
-            return
+            # An annotation selected from a review finding is just as explicit
+            # as one selected from the normal dataset browser.
+            combo.addItem("Similar to Selected")
+            similarity_index = combo.count() - 1
         if combo.currentIndex() == similarity_index:
             self._start_review_similarity_filter()
         else:
@@ -45797,6 +48369,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         used = set()
         seen = set()
         pending = {}
+        def identity(line):
+            # Scene saves can reformat the same YOLO values while a scan runs.
+            # Ignore serialization noise, not actual geometry/class changes.
+            try:
+                return " ".join(format(float(token), ".12g") for token in str(line).split())
+            except (TypeError, ValueError, OverflowError):
+                return str(line).strip()
+        line_keys = [identity(line) for line in lines]
         for record in records:
             expected = str(record.get("label_text", "") or "").strip()
             if not expected:
@@ -45805,29 +48385,30 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 line_index = int(record.get("line_index", -1))
             except (TypeError, ValueError):
                 line_index = -1
-            key = (line_index, expected)
+            expected_key = identity(expected)
+            key = (line_index, expected_key)
             if key in seen:
                 continue
             seen.add(key)
-            if 0 <= line_index < len(lines) and lines[line_index] == expected and line_index not in used:
+            if 0 <= line_index < len(lines) and line_keys[line_index] == expected_key and line_index not in used:
                 used.add(line_index)
                 item = dict(record)
-                item.update(line_index=line_index, label_text=expected)
+                item.update(line_index=line_index, label_text=lines[line_index])
                 resolved.append(item)
             else:
-                pending.setdefault(expected, []).append(record)
+                pending.setdefault(expected_key, []).append(record)
 
         available = {}
-        for index, line in enumerate(lines):
-            if index not in used and line in pending:
-                available.setdefault(line, []).append(index)
+        for index, line_key in enumerate(line_keys):
+            if index not in used and line_key in pending:
+                available.setdefault(line_key, []).append(index)
         for expected, unresolved in pending.items():
             candidates = available.get(expected, [])
             if len(candidates) > len(unresolved):
                 continue
             for record, line_index in zip(unresolved, candidates):
                 item = dict(record)
-                item.update(line_index=line_index, label_text=expected)
+                item.update(line_index=line_index, label_text=lines[line_index])
                 resolved.append(item)
         return resolved
 
@@ -45994,47 +48575,55 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.statusBar().showMessage(message, 7000)
         return removed_count > 0
 
+    def _populate_preview_annotation_menu(self, menu, context, include_similar=True, remember_choice=False):
+        """Share the exact same actions between the split button and legacy menu."""
+        image_file, line_index, label_text = context
+
+        def action(key, callback):
+            item = menu.addAction(self._PREVIEW_ANNOTATION_ACTION_TITLES[key])
+            item.setData(key)
+            def run(_checked=False):
+                if remember_choice:
+                    changed = self.settings.get('reviewAnnotationPrimaryAction') != key
+                    self.settings['reviewAnnotationPrimaryAction'] = key
+                    self._sync_preview_annotation_actions()
+                    if changed:
+                        self.queue_settings_save()
+                callback()
+            item.triggered.connect(run)
+
+        action('save_negative', lambda: self.save_preview_annotation_negative(*context, False))
+        action('save_negative_delete', lambda: self.save_preview_annotation_negative(*context, True))
+        if include_similar:
+            menu.addSeparator()
+            action('find_similar', lambda: self.find_similar_preview_annotations(*context))
+        if self._review_similarity_is_active() and getattr(self, "_review_similarity_matches", None):
+            menu.addSeparator()
+            action('remove_matches', lambda: self.remove_review_similarity_matches(False))
+            action('negative_remove_matches',
+                   lambda: self.remove_review_similarity_matches(True))
+        menu.addSeparator()
+        action('change_class', lambda: self.change_preview_annotation_class(*context))
+
+        def copy_label():
+            QApplication.clipboard().setText(str(label_text))
+            self.statusBar().showMessage("Copied YOLO annotation row.", 2500)
+
+        action('copy_label', copy_label)
+
     def show_preview_annotation_actions(self, image_file, line_index, label_text):
         """Show actions without placing controls inside preview rows."""
         self.hide_preview_hover_zoom()
         menu = QMenu(self)
-        save_action = menu.addAction("Save Negative Crop")
-        save_delete_action = menu.addAction("Save Negative Crop + Delete Annotation")
-        menu.addSeparator()
-        similar_action = menu.addAction("Find Similar Annotations")
-        remove_similar_action = None
-        save_remove_similar_action = None
-        if self._review_similarity_is_active() and getattr(self, "_review_similarity_matches", None):
-            remove_similar_action = menu.addAction("Remove Similar Matches...")
-            save_remove_similar_action = menu.addAction(
-                "Save Representative Negatives + Remove Matches..."
-            )
-        menu.addSeparator()
-        change_class_action = menu.addAction("Change Class...")
-        copy_action = menu.addAction("Copy YOLO Label")
+        self._populate_preview_annotation_menu(menu, (image_file, line_index, label_text))
         button = getattr(self, "annotation_actions_button", None)
         if button is not None:
             position = button.mapToGlobal(QtCore.QPoint(0, button.height()))
         else:
             position = QtGui.QCursor.pos()
-        chosen = menu.exec_(position)
-        if chosen is save_action:
-            self.save_preview_annotation_negative(image_file, line_index, label_text, False)
-        elif chosen is save_delete_action:
-            self.save_preview_annotation_negative(image_file, line_index, label_text, True)
-        elif chosen is similar_action:
-            self.find_similar_preview_annotations(image_file, line_index, label_text)
-        elif remove_similar_action is not None and chosen is remove_similar_action:
-            self.remove_review_similarity_matches(False)
-        elif save_remove_similar_action is not None and chosen is save_remove_similar_action:
-            self.remove_review_similarity_matches(True)
-        elif chosen is change_class_action:
-            self.change_preview_annotation_class(image_file, line_index, label_text)
-        elif chosen is copy_action:
-            QApplication.clipboard().setText(str(label_text))
-            self.statusBar().showMessage("Copied YOLO annotation row.", 2500)
+        menu.exec_(position)
 
-    def _create_thumbnail_widget(self, image_file, bbox, idx, img_width, img_height, pixmap):
+    def _create_thumbnail_widget(self, image_file, bbox, idx, img_width, img_height, pixmap, row=None):
         resized_pixmap, bounds, original_crop = self._build_preview_pixmap_for_bbox(bbox, img_width, img_height, pixmap)
         if resized_pixmap is None:
             return False
@@ -46051,6 +48640,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             getattr(self, "_preview_dataset_analysis_target", None)
             and review_target is None
         )
+        row_count = self.preview_list.rowCount() if row is None else row
+        previous_card = self.preview_list.cellWidget(row_count, 1) if row_count < self.preview_list.rowCount() else None
         details_widget, accent = self._create_preview_details_widget(
             bbox,
             class_name,
@@ -46060,10 +48651,20 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             label_text,
             review_target=review_target,
             dimmed=dimmed,
+            reuse=previous_card if not self._review_similarity_is_active() else None,
         )
 
-        thumbnail_label = QLabel()
+        thumbnail_label = self.preview_list.cellWidget(row_count, 0) if row_count < self.preview_list.rowCount() else None
+        if not isinstance(thumbnail_label, QLabel):
+            thumbnail_label = QLabel()
+        thumbnail_label.setProperty("clarity_revision", int(thumbnail_label.property("clarity_revision") or 0) + 1)
         thumbnail_label.setProperty("source_pixmap", original_crop)
+        thumbnail_label.setProperty("clarity_original", original_crop)
+        thumbnail_label.setProperty("clarity_bounds", bounds)
+        thumbnail_label.setProperty("clarity_file", image_file)
+        thumbnail_label.setProperty("clarity_image", pixmap)
+        thumbnail_label.setProperty("clarity_enhanced", False)
+        thumbnail_label.setToolTip("")
         thumbnail_label.setPixmap(resized_pixmap)
         thumbnail_label.setAlignment(Qt.AlignCenter)
         thumbnail_label.setAutoFillBackground(True)
@@ -46071,19 +48672,19 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         thumbnail_label.setProperty("accent_color", accent)
         thumbnail_label.setProperty("dataset_analysis_target", bool(review_target))
         thumbnail_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        thumbnail_label.setStyleSheet(
-            self._thumbnail_label_style(
-                False,
-                accent,
-                review_target=bool(review_target),
-            )
+        thumbnail_style = self._thumbnail_label_style(
+            False,
+            accent,
+            review_target=bool(review_target),
         )
+        if thumbnail_label.styleSheet() != thumbnail_style:
+            thumbnail_label.setStyleSheet(thumbnail_style)
         self._set_preview_widget_opacity(
             thumbnail_label, 0.62 if dimmed else 1.0
         )
 
-        row_count = self.preview_list.rowCount()
-        self.preview_list.insertRow(row_count)
+        if row_count == self.preview_list.rowCount():
+            self.preview_list.insertRow(row_count)
 
         image_item = QTableWidgetItem("")
         image_item.setData(Qt.DisplayRole, "")
@@ -46102,6 +48703,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 None,
             )
             if match is not None:
+                details_widget._preview_similarity_card = True
                 tooltip += f"\nSimilarity: {float(match.get('score', 0.0)) * 100.0:.1f}%"
                 if match.get("match_basis"):
                     tooltip += f"\nBest match: {str(match['match_basis']).title()}"
@@ -46114,7 +48716,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 details_widget.layout().insertWidget(0, score_label)
         image_item.setToolTip(tooltip)
         self.preview_list.setItem(row_count, 0, image_item)
-        self.preview_list.setCellWidget(row_count, 0, thumbnail_label)
+        if self.preview_list.cellWidget(row_count, 0) is not thumbnail_label:
+            self.preview_list.setCellWidget(row_count, 0, thumbnail_label)
         self.preview_list.setRowHeight(row_count, self._image_size_value + 18)
 
         bbox_item = QTableWidgetItem(label_text)
@@ -46131,10 +48734,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         details_item.setData(Qt.UserRole + 3, accent)
         details_item.setData(Qt.UserRole + 4, bool(review_target))
         self.preview_list.setItem(row_count, 1, details_item)
-        self.preview_list.setCellWidget(row_count, 1, details_widget)
+        if self.preview_list.cellWidget(row_count, 1) is not details_widget:
+            self.preview_list.setCellWidget(row_count, 1, details_widget)
         self.preview_list.setItem(row_count, 2, QTableWidgetItem(str(bbox.class_id)))
         self.preview_list.setItem(row_count, 3, QTableWidgetItem(size_text))
         self.preview_list.setItem(row_count, 4, bbox_item)
+
+        if bool(getattr(self, "settings", {}).get("objectClarityEnabled", False)):
+            self._object_clarity().register_preview(thumbnail_label)
 
         return True
 
@@ -46145,6 +48752,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             preview_list.clearContents()
             preview_list.setRowCount(0)
         self.current_preview_image = None
+        self._selected_preview_annotation = None
+        self._sync_preview_annotation_actions()
         self._preview_filtered_entries = []
         self._preview_loaded_count = 0
         self._preview_batch_image_file = None
@@ -46174,6 +48783,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.hide_preview_hover_zoom()
         self._highlighted_row = None
         self._selected_preview_annotation = None
+        self._sync_preview_annotation_actions()
         self._preview_filtered_entries = []
         self._preview_loaded_count = 0
         self._preview_batch_image_file = image_file
@@ -46186,17 +48796,18 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         label_file = os.path.splitext(image_file)[0] + ".txt"
         lines = self.load_label_lines(label_file)
 
-        self.preview_list.clearContents()
-        self.preview_list.setRowCount(0)
-
         if not lines:
+            self.preview_list.clearContents()
+            self.preview_list.setRowCount(0)
             self.preview_list.verticalScrollBar().setValue(0)
             QApplication.processEvents()
             logger.info(f"[preview] No labels for {image_file}")
             return
 
-        pixmap = QPixmap(image_file)
+        pixmap = self._editor_original_source().review_pixmap(image_file)
         if pixmap.isNull():
+            self.preview_list.clearContents()
+            self.preview_list.setRowCount(0)
             logger.error(f"[preview] Failed to load image: {image_file}")
             return
 
@@ -46249,9 +48860,15 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self._preview_batch_image_width = img_width
         self._preview_batch_image_height = img_height
 
-        scroll_position = self.preview_list.verticalScrollBar().value()
+        # Rebind visible rows in place. Table items are replaced so every file,
+        # line identity and action target is fresh, while visual widgets survive.
+        self.preview_list.clearSelection()
+        self.preview_list.setCurrentItem(None)
+        scroll_position = 0
 
         if not filtered_entries:
+            self.preview_list.clearContents()
+            self.preview_list.setRowCount(0)
             self.preview_list.verticalScrollBar().setValue(0)
             QApplication.processEvents()
             logger.info(f"[preview] No visible labels for {image_file}")
@@ -46271,8 +48888,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             )
             if target_position >= 0:
                 load_count = max(load_count, target_position + 1)
+        built_rows = 0
         for line_index, bbox in filtered_entries[:load_count]:
-            self._create_thumbnail_widget(image_file, bbox, line_index, img_width, img_height, pixmap)
+            if self._create_thumbnail_widget(image_file, bbox, line_index, img_width, img_height, pixmap, row=built_rows):
+                built_rows += 1
+        self.preview_list.setRowCount(built_rows)
 
         self._preview_loaded_count = load_count
         self.current_page = max(0, (load_count - 1) // batch_size)
@@ -46413,6 +49033,25 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         return self.normalize_path(image_file) if image_file else ""
 
     def _selected_review_file_path(self):
+        # Review selection/hover updates can lag behind image navigation. The
+        # displayed scene is authoritative while the image canvas is visible.
+        view = getattr(self, "screen_view", None)
+        stack = getattr(self, "viewer_stack", None)
+        canvas_visible = view is not None and (stack is None or stack.currentWidget() is view)
+        if canvas_visible:
+            scene = view.scene()
+            if scene is not None:
+                source = scene.property("darkfusion_source_image")
+                if source is not None:
+                    return self.normalize_path(source) if source and not self.is_placeholder_file(source) else ""
+                source = getattr(scene, "_darkfusion_annotation_image", None)
+                if source:
+                    return self.normalize_path(source)
+                if scene.property("darkfusion_placeholder_scene"):
+                    return ""
+            current_file = getattr(self, "current_file", None)
+            if current_file and not self.is_placeholder_file(current_file):
+                return self.normalize_path(current_file)
         if hasattr(self, "List_view"):
             model = self.List_view.model()
             indexes = self.List_view.selectedIndexes()
@@ -46465,35 +49104,24 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
     def go_to_selected_review_file(self):
         image_file = self._selected_review_file_path()
-        if not image_file or not os.path.exists(image_file):
-            QMessageBox.information(self, "Review", "The selected reviewed file could not be found.")
+        if not image_file or not os.path.isfile(image_file):
+            QMessageBox.information(self, "Reveal File", "The displayed image has no available file to reveal.")
             return False
-
-        image_file = os.path.normpath(image_file)
-        image_dir = os.path.dirname(image_file)
-
-        try:
-            if sys.platform.startswith("win"):
-                subprocess.Popen(["explorer.exe", f"/select,{image_file}"])
-            elif sys.platform == "darwin":
-                subprocess.Popen(["open", "-R", image_file])
-            else:
-                subprocess.Popen(["xdg-open", image_dir])
-        except Exception as e:
-            logger.warning(f"Could not reveal reviewed file in file explorer: {e}")
-            try:
-                os.startfile(image_dir)
-            except Exception as fallback_error:
-                QMessageBox.warning(
-                    self,
-                    "Review",
-                    f"Could not open the file folder:\n{fallback_error}",
-                )
-                return False
-
-        self.statusBar().showMessage(f"Revealed file: {os.path.basename(image_file)}", 3000)
-        logger.info(f"Review Go To File -> revealed in file explorer: {image_file}")
+        image_file = os.path.normpath(os.path.abspath(image_file))
+        worker = FileRevealWorker(image_file)
+        worker.signals.completed.connect(self._on_file_reveal_completed)
+        self.statusBar().showMessage(f"Revealing file: {os.path.basename(image_file)}", 3000)
+        QThreadPool.globalInstance().start(worker)
         return True
+
+    def _on_file_reveal_completed(self, image_file, selected, error):
+        if error:
+            logger.warning("Could not reveal file %s: %s", image_file, error)
+            QMessageBox.warning(self, "Reveal File", f"Could not reveal the image:\n{image_file}\n\n{error}")
+            return
+        action = "Revealed file" if selected else "Opened image folder"
+        self.statusBar().showMessage(f"{action}: {os.path.basename(image_file)}", 4000)
+        logger.info("%s: %s", action, image_file)
 
 
     @pyqtSlot(QModelIndex)
@@ -46534,6 +49162,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             self._selected_preview_annotation = None
             logger.debug("Preview row has no annotation item.")
 
+        self._sync_preview_annotation_actions()
         self.synchronize_list_view(image_file)
 
     def flash_bounding_box(self, bbox_index, image_file):
@@ -46948,7 +49577,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         header.setSectionResizeMode(3, QHeaderView.Fixed)
         header.setSectionResizeMode(4, QHeaderView.Fixed)
 
-        table.setStyleSheet("""
+        style = """
             QTableWidget {
                 background-color: #0f1216;
                 alternate-background-color: #0f1216;
@@ -46990,7 +49619,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 border-bottom: 1px solid #30363d;
                 font-weight: bold;
             }
-        """)
+        """
+        # Reapplying the identical sheet repolishes every crop/details widget.
+        # New rows inherit it automatically; only update it when it differs.
+        if table.styleSheet() != style:
+            table.setStyleSheet(style)
 
     # mute sounds
 
@@ -47370,6 +50003,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
     def clear_loaded_weights(self):
         """Unload model weights used by auto-labeling and live video/stream detection."""
+        self._gpu_released_detector = False
         self.weights_file_path = None
         self.cfg_file_path = None
         self.model_directory = None
@@ -47521,6 +50155,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         return width, height
 
     def engine_size_from_tensorrt(self, engine_path):
+        if not gpu_model_allowed(self, "detector"):
+            return None
         try:
             import tensorrt as trt
         except Exception as e:
@@ -47860,10 +50496,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 bounds_batches.append(image_bounds)
                 bbox_index_maps.append(image_indices)
 
-            self.statusBar().showMessage(
+            self.post_status_message(
                 "Checking overhead teammate markers and gamer tags...", 3000
             )
-            QApplication.processEvents()
             rejected_local = classifier.friendly_indices(
                 filter_images,
                 bounds_batches,
@@ -47875,7 +50510,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             logger.warning("Teammate auto-label filter unavailable: %s", error)
             if not getattr(self, "_teammate_filter_warning_shown", False):
                 self._teammate_filter_warning_shown = True
-                self.statusBar().showMessage(
+                self.post_status_message(
                     f"Teammate filter unavailable; predictions were kept: {error}", 6000
                 )
             return output
@@ -47893,7 +50528,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             )
             if not getattr(self, "_teammate_ocr_warning_shown", False):
                 self._teammate_ocr_warning_shown = True
-                self.statusBar().showMessage(
+                self.post_status_message(
                     "Teammate OCR unavailable; colored marker/nameplate filtering is still active.",
                     6000,
                 )
@@ -47914,7 +50549,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 int(evidence.get("visual_marker", 0)),
                 int(evidence.get("ocr_gamer_tag", 0)),
             )
-            self.statusBar().showMessage(
+            self.post_status_message(
                 f"Ignored {rejected_count} teammate prediction(s) · visual marker + gamer-tag OCR",
                 3000,
             )
@@ -47924,7 +50559,208 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         batches = self.filter_teammate_auto_label_batches([image], [bboxes], **kwargs)
         return batches[0] if batches else []
 
+    def _refine_yolo_boxes_with_sam3(self, image, bboxes):
+        """Refine only new detection boxes; never infer a class or drop a YOLO box."""
+        output = list(bboxes or [])
+        eligible = [index for index, box in enumerate(output) if self._label_type(box) == "bbox"]
+        stats = self.__dict__.setdefault("_yolo_sam3_stats", {"refined": 0, "kept": 0})
+        if not eligible or getattr(self, "_yolo_sam3_unavailable", ""):
+            return output
+        try:
+            image = self.ensure_rgb(image)  # Legacy helper returns BGR for Ultralytics.
+            if image is None or not image.size:
+                return output
+            height, width = image.shape[:2]
+            model = self._get_sam_model()
+            if model is None:
+                raise RuntimeError("SAM3 is not available; original YOLO boxes were kept.")
+            bounds = [self._bbox_xyxy_from_box_obj(output[index], width, height) for index in eligible]
+            prompts = [self.pad_bbox_xyxy(box, width, height, pad_ratio=.05) for box in bounds]
+            # All prompts share one image encoding. SAM's class field identifies
+            # the PROMPT, not a dataset class; masks may be filtered or reordered.
+            with torch.inference_mode():
+                results = model.predict(source=image, bboxes=prompts, conf=0.0,
+                                        **self._sam_predict_kwargs())
+            result = results[0] if results else None
+            masks = getattr(getattr(result, "masks", None), "data", None)
+            boxes = getattr(result, "boxes", None)
+
+            def cpu_array(value):
+                return np.asarray(value.detach().cpu().numpy() if hasattr(value, "detach") else value)
+
+            if masks is None or boxes is None:
+                stats["kept"] += len(eligible)
+                return output
+            ids, scores = cpu_array(boxes.cls).reshape(-1), cpu_array(boxes.conf).reshape(-1)
+            if (len(ids) != len(masks) or len(scores) != len(masks)
+                    or not np.isfinite(ids).all() or not np.isfinite(scores).all()
+                    or any(value != int(value) or not 0 <= int(value) < len(eligible) for value in ids)
+                    or len(set(int(value) for value in ids)) != len(ids)):
+                logger.warning("SAM3 prompt identities were ambiguous; original YOLO boxes were kept.")
+                stats["kept"] += len(eligible)
+                return output
+            accepted = 0
+            for mask_index, prompt_id in enumerate(ids):
+                prompt_id = int(prompt_id)
+                if scores[mask_index] < .70:
+                    continue
+                index = eligible[prompt_id]
+                original = output[index]
+                old_bounds = bounds[prompt_id]
+                mask = self._normalize_sam_mask_to_image(cpu_array(masks[mask_index]), width, height)
+                class_name = self.get_current_class_name_safe(original.class_id)
+                if not self.validate_sam_mask_for_bbox(mask, old_bounds, class_name=class_name):
+                    continue
+                rect = self.mask_to_bbox_rect(mask)
+                if rect is None:
+                    continue
+                x, y, box_w, box_h = rect
+                new_bounds = (x, y, x + box_w, y + box_h)
+                old_w, old_h = old_bounds[2] - old_bounds[0], old_bounds[3] - old_bounds[1]
+                ratio = box_w * box_h / max(1., old_w * old_h)
+                movement = math.hypot((new_bounds[0] + new_bounds[2] - old_bounds[0] - old_bounds[2]) / 2,
+                                      (new_bounds[1] + new_bounds[3] - old_bounds[1] - old_bounds[3]) / 2)
+                if (not .5 <= ratio <= 2. or movement > .20 * max(1., math.hypot(old_w, old_h))
+                        or self._propagation_iou(old_bounds, new_bounds) < .50):
+                    continue
+                xc, yc, bw, bh = self._xyxy_to_yolo_xywh(new_bounds, width, height)
+                output[index] = BoundingBox(original.class_id, xc, yc, bw, bh,
+                                            confidence=original.confidence)
+                accepted += 1
+            stats["refined"] += accepted
+            stats["kept"] += len(eligible) - accepted
+        except Exception as error:
+            # Disable only this optional assist for the rest of the run. The
+            # normal YOLO result, classes and output formats remain intact.
+            self._yolo_sam3_unavailable = str(error)
+            logger.warning("SAM3 auto-label assist unavailable: %s", error)
+        return output
+
+    def _yolo_gap_record(self, image_path, label_path, boxes, image_size, roi_metadata):
+        return dict(image_path=image_path, label_path=label_path,
+                    boxes=[box for box in boxes if self._label_type(box) == "bbox"],
+                    image_size=tuple(image_size), roi_metadata=dict(roi_metadata),
+                    image_version=label_file_version(image_path),
+                    label_version=label_file_version(label_path))
+
+    @staticmethod
+    def _yolo_gap_record_is_current(record):
+        try:
+            return (os.path.isfile(record["image_path"])
+                    and label_file_version(record["image_path"]) == record["image_version"]
+                    and label_file_version(record["label_path"]) == record["label_version"])
+        except OSError:
+            return False
+
+    def _finish_yolo_sam3_assist(self, records):
+        """Fill verified short gaps without changing any existing annotation row."""
+        stats = getattr(self, "_yolo_sam3_stats", {})
+        summary = f"\nSAM3: {stats.get('refined', 0)} box(es) refined."
+        if getattr(self, "_yolo_sam3_unavailable", ""):
+            return summary + " Assist unavailable; original YOLO boxes were kept where needed."
+        if getattr(self, "stop_labeling", False):
+            return summary + " Gap filling stopped."
+        candidates = find_yolo_box_gaps(records)
+        if not candidates:
+            return summary + " No confirmed short gaps to fill."
+        if getattr(self, "_sam3_propagation_batch_active", False) or any(
+            self.qthread_is_running(worker) for worker in (
+                getattr(self, "_sam3_propagation_warmup_worker", None),
+                getattr(self, "_adjacent_propagation_worker", None),
+            )
+        ):
+            return summary + " Gap filling skipped because the propagation tracker is busy."
+
+        status_label = QLabel(self)
+        proposals = []
+        self._propagation_stop_requested = False
+        self._last_propagation_stop_reasons = []
+        self._sam3_propagation_batch_active = True
+        self._active_propagation_preprocessing_state = self._preprocessing_state_snapshot()
+        self._active_propagation_polygon_preference = None  # This assist is boxes-only.
+        self._active_propagation_class_names = tuple(self.class_labels)
+        dialog_parent = getattr(self, "auto_label_dialog", None)
+        if dialog_parent is None or not dialog_parent.isVisible():
+            dialog_parent = self
+        try:
+            run_propagation_worker(
+                self,
+                lambda status: compute_yolo_box_gap_proposals(
+                    self, records, candidates, status,
+                    self._active_propagation_preprocessing_state, proposals),
+                status_label, len(candidates), self.stop_label_propagation,
+                lambda: bool(getattr(self, "_propagation_stop_requested", False)),
+                unit="short gaps",
+                dialog_parent=dialog_parent, window_title="SAM3 Auto Label Assist",
+            )
+        finally:
+            self._active_propagation_preprocessing_state = None
+            self._active_propagation_polygon_preference = None
+            self._active_propagation_class_names = None
+            self._sam3_propagation_batch_active = False
+            self._sam3_propagation_release_pending = True
+            self._release_sam_video_propagation_runtime()
+            status_label.deleteLater()
+        if self._propagation_stop_requested or self._last_propagation_stop_reasons:
+            return summary + " Gap filling stopped; no pending additions were saved."
+
+        by_frame = {}
+        for proposal in proposals:
+            by_frame.setdefault(proposal["index"], []).append(proposal)
+        manifest = None
+        added, failures = 0, 0
+        try:
+            for index, frame_proposals in sorted(by_frame.items()):
+                record = records[index]
+                involved = {index} | {item[key] for item in frame_proposals for key in ("start", "end")}
+                if not all(self._yolo_gap_record_is_current(records[item]) for item in involved):
+                    continue  # A deletion or newer manual correction wins.
+                image = self._read_image_cv(record["image_path"])
+                if image is None:
+                    continue
+                boxes = [item["box"] for item in frame_proposals]
+                size = record["image_size"]
+                boxes = self.remap_roi_bboxes_to_full_frame(boxes, record["roi_metadata"], size, size)
+                boxes = self.filter_bboxes_to_active_classes(boxes)
+                boxes = self.filter_bboxes_to_size_limits(boxes, *size, source="SAM3 YOLO gap fill")
+                boxes = self.filter_teammate_auto_labels(image, boxes, class_names=self.class_labels,
+                                                         source="SAM3 YOLO gap fill")
+                existing = self.load_label_lines(record["label_path"])
+                # Include all saved formats/classes in the duplicate check. A
+                # tracking proposal must not relabel an existing object.
+                existing_objects = [BoundingBox.from_str(line) for line in existing]
+                unique = []
+                for box in boxes:
+                    new_bounds = self._label_seed_bbox(box, *size)
+                    old_bounds = [self._label_seed_bbox(old, *size)
+                                  for old in existing_objects + unique if old is not None]
+                    if not any(bounds is not None and self._propagation_iou(new_bounds, bounds) >= .15
+                               for bounds in old_bounds):
+                        unique.append(box)
+                if not unique or not all(self._yolo_gap_record_is_current(records[item]) for item in involved):
+                    continue
+                if manifest is None:
+                    manifest = self._begin_propagation_batch(self.image_directory, "yolo_sam3_gap_fill")
+                if save_propagation_outputs(self, record, image,
+                                            existing + [box.to_str() for box in unique], manifest):
+                    added += len(unique)
+                    record["label_version"] = label_file_version(record["label_path"])
+                else:
+                    failures += 1
+        except Exception as error:
+            failures += 1
+            logger.warning("SAM3 YOLO gap fill stopped: %s", error, exc_info=True)
+        finally:
+            if manifest is not None:
+                self._finish_propagation_batch(manifest)
+        return (summary + f" {added} gap box(es) added."
+                + (f" {failures} save failure(s); check the log." if failures else "")
+                + (" Undo Last Batch can remove the gap additions." if added else ""))
+
+    @gpu_work("Auto labeling", keep=auto_label_resources)
     def auto_label_images2(self, overwrite=None):
+        if getattr(self, "_gpu_released_detector", False):
+            ensure_gpu_detector(self)
         logging.info("Starting auto_label_images2")
 
         class_names = self.sync_class_labels_from_dropdown()
@@ -48006,6 +50842,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         logging.info(f"Auto-label overwrite existing labels: {overwrite_existing}")
         self.reset_prediction_size_filter_stats("image auto-label")
+        sam3_assist = bool(getattr(self, "auto_label_sam3_assist", False))
+        gap_frames = [None] * total_images if sam3_assist else None
+        if sam3_assist:
+            self._yolo_sam3_stats = {"refined": 0, "kept": 0}
+            self._yolo_sam3_unavailable = ""
         # Replace each file only after successful inference/decoding. Never
         # clear the whole dataset before the first model/provider has run.
 
@@ -48049,13 +50890,21 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 except Exception as e:
                     logging.debug(f"Failed to get ROI bounds for image auto-label: {e}")
 
-            for image_file in batch_files:
+            for image_offset, image_file in enumerate(batch_files):
                 if self.stop_labeling:
                     logging.info("Labeling stopped by user.")
                     self.log_prediction_size_filter_summary("image auto-label")
                     return
 
-                image = self.read_image(image_file)
+                # Only the standard BGR reader shares with the editor. Custom
+                # readers (for example SAM's unchanged-depth loader) keep their
+                # own decoding and display semantics.
+                reader = self.read_image
+                shares_original = getattr(reader, "__func__", None) is MainWindow.read_image
+                if shares_original:
+                    image = reader(image_file, share_editor=True)
+                else:
+                    image = reader(image_file)
                 if image is None:
                     logging.warning(f"Skipping invalid image: {image_file}")
                     failed_image_count += 1
@@ -48066,7 +50915,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
                 try:
                     self.current_display_image = None
-                    self.display_image(image_file)
+                    previous_neighbors = getattr(self, '_editor_prefetch_paths', None)
+                    next_index = batch_start + image_offset + 1
+                    self._editor_prefetch_paths = source_images[next_index:next_index + 2] if shares_original else None
+                    try:
+                        self.display_image(image_file)
+                    finally:
+                        self._editor_prefetch_paths = previous_neighbors
 
                     with Image.open(image_file) as img:
                         img_width, img_height = img.size
@@ -48172,6 +51027,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                         conf_threshold=model_kwargs.get("conf")
                     )
 
+                    new_bboxes = self.filter_bboxes_to_active_classes(new_bboxes, active_class_ids)
+                    if sam3_assist:
+                        new_bboxes = self._refine_yolo_boxes_with_sam3(batch_imgs[i], new_bboxes)
+
                     # Keep only annotations intersecting the active ROI while
                     # preserving their complete full-image geometry.
                     new_bboxes = self.remap_roi_bboxes_to_full_frame(
@@ -48181,10 +51040,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                         (img_width, img_height),
                     )
 
-                    new_bboxes = self.filter_bboxes_to_active_classes(
-                        new_bboxes,
-                        active_class_ids
-                    )
                     new_bboxes = self.filter_bboxes_to_size_limits(
                         new_bboxes,
                         img_width,
@@ -48241,10 +51096,21 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                         if not saved and (labels_to_save or overwrite_existing):
                             raise IOError("The annotation file could not be replaced.")
                         logging.info(f"Labels saved to: {label_file}")
+                        if sam3_assist:
+                            gap_frames[batch_start + valid_indices[i]] = self._yolo_gap_record(
+                                image_file, label_file, new_bboxes, valid_img_whs[i], valid_roi_offsets[i]
+                            )
 
                         if (batch_start + i) % 3 == 0:
                             self.current_file = image_file
-                            self.display_image(image_file, rebuild_preview=False)
+                            previous_neighbors = getattr(self, '_editor_prefetch_paths', None)
+                            next_index = batch_start + len(batch_files)
+                            shares_original = getattr(self.read_image, "__func__", None) is MainWindow.read_image
+                            self._editor_prefetch_paths = source_images[next_index:next_index + 2] if shares_original else None
+                            try:
+                                self.display_image(image_file, rebuild_preview=False)
+                            finally:
+                                self._editor_prefetch_paths = previous_neighbors
                             QApplication.processEvents()
                     else:
                         logging.warning(f"Could not resolve label file for {image_file}")
@@ -48256,14 +51122,15 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 self.label_progress.setValue(batch_start + i + 1)
                 QApplication.processEvents()
 
+        assist_summary = self._finish_yolo_sam3_assist(gap_frames) if sam3_assist else ""
         self.set_label_progress(
             0, total_images, value=total_images, progress_format="Auto Label complete %v/%m"
         )
         self.log_prediction_size_filter_summary("image auto-label")
         if failed_image_count:
-            QMessageBox.warning(self, "Auto Label", f"Labeling finished with {failed_image_count} skipped/failed images. Their existing labels were kept. Check the log for details.")
+            QMessageBox.warning(self, "Auto Label", f"Labeling finished with {failed_image_count} skipped/failed images. Their existing labels were kept. Check the log for details." + assist_summary)
         else:
-            QMessageBox.information(self, "Information", "Labeling completed!")
+            QMessageBox.information(self, "Information", "Labeling completed!" + assist_summary)
         logging.info("auto_label_images2 finished; skipped/failed images: %s", failed_image_count)
         self.img_index_number_changed(0)
 
@@ -48320,8 +51187,21 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         mp_pose,
         num_expected_keypoints=0,
         conf_threshold=None,
+        inference_context=None,
     ):
         new_bboxes = []
+        annotation_mode = inference_context["annotation_mode"] if inference_context else None
+        if inference_context and conf_threshold is None:
+            conf_threshold = inference_context["confidence"]
+
+        def map_class_id(model_id):
+            if inference_context:
+                try:
+                    return inference_context["class_map"].get(int(model_id))
+                except (TypeError, ValueError, OverflowError):
+                    return None
+            return self.map_model_class_id_to_local_class_id(model_id)
+
         if conf_threshold is None:
             try:
                 conf_threshold = float(self.confidence_threshold_spinbox.value())
@@ -48356,7 +51236,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             except Exception:
                 count = 0
 
-            if count <= 0:
+            if count <= 0 and not inference_context:
                 try:
                     count = self.keypoint_list.rowCount()
                 except Exception:
@@ -48468,7 +51348,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         has_masks = masks_obj is not None and boxes_obj is not None
         has_obb = obb_obj is not None
 
-        if self.is_segmentation_mode():
+        if (annotation_mode == "segmentation" if inference_context else self.is_segmentation_mode()):
             if not has_masks:
                 return new_bboxes
 
@@ -48488,7 +51368,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 if conf < conf_threshold:
                     continue
 
-                local_class_id = self.map_model_class_id_to_local_class_id(class_id)
+                local_class_id = map_class_id(class_id)
                 if local_class_id is None:
                     continue
 
@@ -48519,7 +51399,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
             return new_bboxes
 
-        if self.is_obb_mode():
+        if (annotation_mode == "obb" if inference_context else self.is_obb_mode()):
             if not has_obb:
                 return new_bboxes
 
@@ -48536,7 +51416,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 if conf < conf_threshold or obb is None or len(obb) != 5:
                     continue
 
-                local_class_id = self.map_model_class_id_to_local_class_id(class_id)
+                local_class_id = map_class_id(class_id)
                 if local_class_id is None:
                     continue
 
@@ -48570,7 +51450,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
             return new_bboxes
 
-        if self.is_keypoint_mode():
+        if (annotation_mode == "keypoints" if inference_context else self.is_keypoint_mode()):
             expected_kpt_count = _resolve_expected_keypoint_count()
 
             if has_keypoints:
@@ -48596,7 +51476,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                     if not math.isfinite(conf) or conf < conf_threshold:
                         continue
 
-                    local_class_id = self.map_model_class_id_to_local_class_id(class_id)
+                    local_class_id = map_class_id(class_id)
                     if local_class_id is None:
                         continue
 
@@ -48699,7 +51579,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 if not math.isfinite(conf) or conf < conf_threshold:
                     continue
 
-                local_class_id = self.map_model_class_id_to_local_class_id(class_id)
+                local_class_id = map_class_id(class_id)
                 if local_class_id is None:
                     continue
 
@@ -48728,7 +51608,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
             return new_bboxes
 
-        if self.is_boxes_mode():
+        if (annotation_mode == "boxes" if inference_context else self.is_boxes_mode()):
             if not has_boxes:
                 return new_bboxes
 
@@ -48745,7 +51625,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 if conf < conf_threshold:
                     continue
 
-                local_class_id = self.map_model_class_id_to_local_class_id(class_id)
+                local_class_id = map_class_id(class_id)
                 if local_class_id is None:
                     continue
 
@@ -48786,7 +51666,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 if conf < conf_threshold:
                     continue
 
-                local_class_id = self.map_model_class_id_to_local_class_id(class_id)
+                local_class_id = map_class_id(class_id)
                 if local_class_id is None:
                     continue
 
@@ -49251,6 +52131,45 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         dialog.show_for_dropdown(initial_tab)
 
+    def _editor_original_source(self):
+        source = getattr(self, "_editor_image_source", None)
+        if source is None:
+            source = EditorImageSource()
+            self._editor_image_source = source
+        return source
+
+    def _prefetch_editor_neighbors(self, image_file):
+        """Prepare two originals without touching labels, thumbnails or Qt objects."""
+        try:
+            ordered_paths = getattr(self, '_editor_prefetch_paths', None)
+            if ordered_paths is not None:
+                self._editor_original_source().prefetch(ordered_paths)
+                return
+            issues = getattr(self, "validation_review_queue", None)
+            in_review = isinstance(getattr(self, "_validation_review_restore_state", None), dict)
+            if in_review and issues:
+                files = issues
+                path_at = lambda index: str(files[index].get("image_path", ""))
+                index = int(getattr(self, "validation_review_index", -1))
+            else:
+                files = getattr(self, "filtered_image_files", None) or getattr(self, "image_files", [])
+                path_at = lambda index: files[index]
+                index = int(getattr(self, "current_img_index", -1))
+            current = self.normalize_path(image_file)
+            if not (0 <= index < len(files) and self.normalize_path(path_at(index)) == current):
+                # Batch tools can display arbitrary files. Do not scan a large
+                # dataset just to speculate about their next navigation target.
+                self._editor_original_source().prefetch([])
+                return
+            direction = int(getattr(self, "_image_prefetch_direction", 1))
+            neighbors = [path_at(i) for i in (index + direction, index - direction)
+                         if index >= 0 and 0 <= i < len(files)]
+            self._editor_original_source().prefetch(
+                [path for path in neighbors if path and not self.is_placeholder_file(path)
+                 and self.normalize_path(path) != current])
+        except Exception:
+            logger.debug("Optional editor image prefetch skipped", exc_info=True)
+
     def get_cached_image(self, image_file):
         if not image_file or not os.path.exists(image_file):
             return None
@@ -49374,6 +52293,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         return [layer_names[int(i) - 1] for i in indices]
 
     def initialize_yolo(self):
+        if not gpu_model_allowed(self, "detector"):
+            return False
         try:
             self.classes = []
 
@@ -49418,7 +52339,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             self.net = None
             return False
 
-    def read_image(self, file_path: str) -> np.ndarray:
+    def read_image(self, file_path: str, *, share_editor=False) -> np.ndarray:
         """
         Reads an image from the given file path and returns it as a numpy array.
         Handles errors gracefully by logging them and returning None.
@@ -49426,7 +52347,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         try:
             if file_path is None:
                 raise ValueError("File path is None")
-            image = cv2.imread(file_path)
+            image = self._editor_original_source().read(file_path) if share_editor else cv2.imread(file_path)
             if image is None:
                 raise ValueError(f"Could not read image from {file_path}")
             return image
@@ -49434,11 +52355,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             logging.error(f"Failed to read image: {e}")
             return None
 
+    @gpu_work("Auto labeling", keep=auto_label_resources)
     def auto_label_images(self, overwrite=None):
         """
         Auto-label images using YOLO model with .weights and .cfg files.
         Includes overwrite, append, and cancel functionality.
         """
+        if getattr(self, "_gpu_released_detector", False):
+            ensure_gpu_detector(self)
         if getattr(self, "model_type", "") == 'weights' and (
             not getattr(self, 'weights_file_path', None) or not getattr(self, 'cfg_file_path', None)
         ):
@@ -49489,6 +52413,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         logging.info(f"OpenCV auto-label overwrite existing labels: {overwrite}")
         self.stop_labeling = False
         self.reset_prediction_size_filter_stats("OpenCV image auto-label")
+        sam3_assist = bool(getattr(self, "auto_label_sam3_assist", False))
+        gap_frames = [None] * total_images if sam3_assist else None
+        if sam3_assist:
+            self._yolo_sam3_stats = {"refined": 0, "kept": 0}
+            self._yolo_sam3_unavailable = ""
 
         roi_enabled = self.settings.get('videoUseROIForInference', False)
         roi_bounds = self.get_active_rois_for_inference() if roi_enabled else None
@@ -49515,6 +52444,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 return
 
             img_h, img_w = image.shape[:2]
+            new_bboxes = self.filter_bboxes_to_active_classes(new_bboxes)
+            if sam3_assist:
+                new_bboxes = self._refine_yolo_boxes_with_sam3(image, new_bboxes)
             roi_metadata = {"x": 0, "y": 0}
             if roi_bounds is not None:
                 _full_image, roi_metadata = self.extract_roi_region_for_inference(
@@ -49559,12 +52491,16 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             labels = [bbox.to_str(remove_confidence=True) for bbox in final_bboxes]
 
             if label_file:
-                self.save_labels_to_file(
+                saved = self.save_labels_to_file(
                     label_file,
                     labels,
                     mode="w",
                     allow_empty=overwrite,
                 )
+                if sam3_assist and (saved or (not labels and not overwrite)):
+                    gap_frames[idx] = self._yolo_gap_record(
+                        image_file, label_file, new_bboxes, (img_w, img_h), roi_metadata
+                    )
 
             if idx % 3 == 0:
                 self.display_image(image_file, rebuild_preview=False)
@@ -49572,11 +52508,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             self.label_progress.setValue(idx + 1)
             QApplication.processEvents()
 
+        assist_summary = self._finish_yolo_sam3_assist(gap_frames) if sam3_assist else ""
         self.set_label_progress(
             0, total_images, value=total_images, progress_format="Auto Label complete %v/%m"
         )
         self.log_prediction_size_filter_summary("OpenCV image auto-label")
-        QMessageBox.information(self, "Auto-Labeling", "Finished auto-labeling all images.")
+        QMessageBox.information(self, "Auto-Labeling", "Finished auto-labeling all images." + assist_summary)
         self.stop_labeling = False
         self.img_index_number_changed(0)
 
@@ -49747,11 +52684,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         img_height,
         source="predictions",
         record=True,
+        size_limits=None,
     ):
         if not predictions:
             return predictions
 
-        min_size_px, max_percent = self.current_prediction_size_filter_values()
+        min_size_px, max_percent = (size_limits if size_limits is not None
+                                    else self.current_prediction_size_filter_values())
         kept, skipped = shared_filter_predictions_to_size_limits(
             predictions,
             img_width,
@@ -49763,13 +52702,15 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             self.record_prediction_size_filter_skip(source, skipped)
         return kept
 
-    def filter_bboxes_to_size_limits(self, bboxes, img_width, img_height, source="labels", record=True):
+    def filter_bboxes_to_size_limits(self, bboxes, img_width, img_height, source="labels", record=True,
+                                    size_limits=None):
         return self.filter_predictions_to_size_limits(
             bboxes,
             img_width,
             img_height,
             source=source,
             record=record,
+            **({"size_limits": size_limits} if size_limits is not None else {}),
         )
 
     def filter_video_overlay_to_size_limits(self, overlay, source="video overlay", record=False):
@@ -49786,6 +52727,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             return overlay
 
         min_size_px, max_percent = self.current_prediction_size_filter_values()
+        signature = (img_w, img_h, float(min_size_px), float(max_percent))
+        if not record and overlay.get("_size_filter_signature") == signature:
+            return overlay
         filtered, skipped = shared_filter_overlay_to_size_limits(
             overlay,
             img_width=img_w,
@@ -49793,6 +52737,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             min_size_px=min_size_px,
             max_percent=max_percent,
         )
+        filtered["_size_filter_signature"] = signature
         if record and skipped:
             self.record_prediction_size_filter_skip(source, skipped)
         return filtered
@@ -49800,12 +52745,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
     def get_dnn_size_limits(self, img_width, img_height):
         return self.get_annotation_size_limits(img_width, img_height)
 
-    def run_opencv_dnn_inference(self, image) -> List[BoundingBox]:
+    def run_opencv_dnn_inference(self, image, inference_context=None) -> List[BoundingBox]:
         if image is None or not isinstance(image, np.ndarray) or image.size == 0:
             return []
 
-        if not getattr(self, "net", None) and not self.initialize_yolo():
-            return []
+        if getattr(self, "net", None) is None:
+            if inference_context or not self.initialize_yolo():
+                return []
 
         if image.ndim == 2:
             image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
@@ -49816,7 +52762,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             return []
 
         img_h, img_w = image.shape[:2]
-        net_w, net_h = self.get_network_size_wh()
+        net_w, net_h = (inference_context["network_size"] if inference_context
+                        else self.get_network_size_wh())
 
         blob = cv2.dnn.blobFromImage(
             image,
@@ -49831,7 +52778,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         output_layer_names = getattr(self, "layer_names", None) or self.get_dnn_output_layer_names()
         outputs = self.net.forward(output_layer_names)
 
-        active_class_ids = self.get_active_class_ids_from_ui()
+        active_class_ids = (set(inference_context["active_class_ids"]) if inference_context
+                            else self.get_active_class_ids_from_ui())
         if not active_class_ids:
             active_class_ids = set(range(len(getattr(self, "class_labels", []) or [])))
 
@@ -49840,8 +52788,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         class_ids = []
         skipped_size_count = 0
 
-        min_size_px, max_percent = self.current_prediction_size_filter_values()
-        conf_threshold = float(self.confidence_threshold_spinbox.value())
+        min_size_px, max_percent = (inference_context["size_limits"] if inference_context
+                                    else self.current_prediction_size_filter_values())
+        conf_threshold = (inference_context["confidence"] if inference_context
+                          else float(self.confidence_threshold_spinbox.value()))
 
         for output in outputs:
             output = np.asarray(output)
@@ -49915,7 +52865,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             boxes,
             confidences,
             conf_threshold,
-            float(self.nms_threshold_spinbox.value()),
+            inference_context["iou"] if inference_context else float(self.nms_threshold_spinbox.value()),
         )
         indices = np.array(indices).flatten().tolist() if len(indices) else []
 
@@ -50186,7 +53136,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
     def _review_similarity_is_active(self):
         combo = getattr(self, "filter_class_spinbox", None)
-        return bool(combo is not None and combo.currentText().startswith("Similar to Selected"))
+        return bool(combo is not None and combo.currentText().startswith("Similar to Selected")
+                    and getattr(self, "_review_similarity_results_ready", True))
 
     def _clear_review_similarity_state(self):
         self._review_similarity_reference = None
@@ -50194,10 +53145,16 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self._review_similarity_matches_by_image = {}
         self._review_similarity_origin_file = ""
         self._review_similarity_origin_index = -1
+        self._review_similarity_results_ready = False
 
     def _cancel_review_filter_request(self):
         """Invalidate workers whose snapshots may no longer match the dataset."""
         self._set_review_similarity_busy(False)
+        combo = getattr(self, "filter_class_spinbox", None)
+        if (combo is not None and combo.currentText().startswith("Similar to Selected")
+                and not getattr(self, "_review_similarity_results_ready", True)):
+            with blocked_signals(combo):
+                combo.setCurrentIndex(0)
         if hasattr(self, "filter_class_spinbox"):
             self.filter_class_spinbox.setEnabled(True)
         self.reset_label_progress(0)
@@ -50216,7 +53173,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if isinstance(getattr(self, "_validation_similarity_origin", None), dict):
             self._clear_review_similarity_state()
             self._restore_validation_similarity_origin()
+        elif getattr(self, "filter_class_spinbox", None) is not None:
+            with blocked_signals(self.filter_class_spinbox):
+                self.filter_class_spinbox.setCurrentIndex(0)
+            self.filter_class(-1)
 
+    @gpu_work("Review similarity", keep=("analysis",),
+              until=lambda owner: any(owner.qthread_is_running(worker) for worker in getattr(owner, "_review_similarity_threads", [])))
     def _start_review_similarity_filter(self, reference=None):
         capture_origin = reference is None
         if reference is None:
@@ -50279,6 +53242,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 except ValueError:
                     self._review_similarity_origin_index = -1
         self._review_similarity_reference = reference
+        self._review_similarity_results_ready = False
 
         current_worker = getattr(self, "_review_filter_worker", None)
         if current_worker is not None:
@@ -50335,9 +53299,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.statusBar().showMessage(
             f"Finding similar annotations at {threshold_percent}% or higher...", 3500
         )
+        logger.info("Similarity request %s: scanning %s images with %s at %s%%.",
+                    request_id, len(image_files), review_method(self.settings), threshold_percent)
         worker.start()
 
     def _set_review_similarity_busy(self, busy):
+        self._review_similarity_busy = bool(busy)
+        self._sync_preview_annotation_actions()
         button = getattr(self, "_review_similarity_stop_button", None)
         if button is None and busy:
             button = QtWidgets.QPushButton("Stop scan", self)
@@ -50389,9 +53357,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             self.filter_class_spinbox.setEnabled(True)
         self.reset_label_progress(100)
         self.statusBar().showMessage(
-            f"Similarity filter: {len(matches or [])} annotation(s) in {len(filtered_files or [])} image(s).",
+            f"Similarity filter: {len(self._review_similarity_matches)} annotation(s) in {len(self.filtered_image_files)} image(s).",
             5000,
         )
+        logger.info("Similarity results displayed: %s annotations in %s images.",
+                    len(self._review_similarity_matches), len(self.filtered_image_files))
         self._review_filter_worker = None
 
     def _apply_review_similarity_results(self, reference, filtered_files, matches):
@@ -50417,13 +53387,18 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             ordered_files.insert(0, source_image)
         self._review_similarity_reference = reference
         self._review_similarity_matches = list(matches or [])
+        # A search can outlive manual edits. Resolve against the saved rows once
+        # before updating either widget, never resurrecting a deleted/edited crop.
+        if not isinstance(getattr(self, "_validation_similarity_origin", None), dict):
+            self._review_similarity_matches = self._resolved_review_similarity_matches()
+        self._review_similarity_results_ready = True
         match_map = {}
         for record in self._review_similarity_matches:
             image_file = self.normalize_path(record.get("image_file", ""))
             if image_file:
                 match_map.setdefault(image_file, []).append(record)
         self._review_similarity_matches_by_image = match_map
-        self.filtered_image_files = list(dict.fromkeys(ordered_files))
+        self.filtered_image_files = [path for path in dict.fromkeys(ordered_files) if path in match_map]
 
         try:
             source_class = int(float(str(reference.get("label_text", "")).split()[0]))
@@ -50432,6 +53407,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if source_class >= 0:
             self.sync_class_checkboxes_with_filter(source_class)
             self.sync_selected_class_with_filter(source_class)
+
+        # Results must be visible, not merely populated inside an inactive tab
+        # after Find Similar was launched from a cleanup finding.
+        tabs = getattr(self, "tabWidget", None)
+        if tabs is not None:
+            review_index = self.tab_index_by_text(tabs, ("Review",))
+            if review_index >= 0:
+                tabs.setCurrentIndex(review_index)
 
         if isinstance(getattr(self, "_validation_similarity_origin", None), dict):
             self._apply_validation_similarity_queue(reference)
@@ -50570,6 +53553,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if isinstance(getattr(self, "_validation_similarity_origin", None), dict):
             self._clear_review_similarity_state()
             self._restore_validation_similarity_origin()
+        elif (getattr(self, "filter_class_spinbox", None) is not None
+              and self.filter_class_spinbox.currentText().startswith("Similar to Selected")):
+            with blocked_signals(self.filter_class_spinbox):
+                self.filter_class_spinbox.setCurrentIndex(0)
+            self.filter_class(-1)
         logger.error(f"Review filter failed: {message}")
         QMessageBox.warning(self, "Filter Images", f"Filter failed:\n{message}")
 
@@ -50807,10 +53795,21 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         Clears bounding boxes for the selected class.
         If 'All' (-1) is selected, it clears all bounding boxes.
         """
+        if getattr(self, "_review_label_clear_active", False):
+            return False
         current_text = self.filter_class_spinbox.currentText()
         if self._review_similarity_is_active():
             return self.remove_review_similarity_matches(False)
-        self.img_index_number_changed(0)  # Reset the image index to 0
+        for name in ("_review_filter_worker", "_filtered_export_worker",
+                     "_grid_delete_worker", "_propagation_range_worker", "_adjacent_propagation_worker"):
+            active_worker = getattr(self, name, None)
+            if active_worker is not None:
+                try:
+                    if active_worker.isRunning():
+                        self.statusBar().showMessage("Wait for the current dataset operation before clearing labels.", 5000)
+                        return False
+                except RuntimeError:
+                    pass
 
         if current_text.startswith("All"):
             class_index = -1
@@ -50828,37 +53827,106 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 return
 
 
-        # Process each image in the filtered list.
-        for img_file in self.filtered_image_files:
-            if self.is_placeholder_file(img_file):
-                continue
+        targets = [(path, os.path.splitext(path)[0] + ".txt")
+                   for path in list(self.filtered_image_files) if not self.is_placeholder_file(path)]
+        bulk_move = getattr(self, "_bulk_move_worker", None)
+        if bulk_move is not None and self.qthread_is_running(bulk_move):
+            move_folders = {os.path.normcase(os.path.abspath(path)) for path in (
+                bulk_move.source_dir, bulk_move.target_dir
+            )}
+            if any(os.path.normcase(os.path.abspath(os.path.dirname(path))) in move_folders for path, _label in targets):
+                self.statusBar().showMessage("Wait for files in this folder to finish moving before clearing their labels.", 5000)
+                return False
+        total = len(targets)
+        if not total:
+            self.set_label_progress(0, 1, value=1, progress_format="Clear Labels complete: no images")
+            return True
+        worker = ClearLabelsWorker(targets, class_index, self._write_label_lines, self)
+        loop = QtCore.QEventLoop()
+        self._review_label_clear_worker = worker
+        self._review_label_clear_active = True
+        control_states = []
 
-            label_file = os.path.splitext(img_file)[0] + '.txt'
-            if os.path.exists(label_file):
-                try:
-                    with open(label_file, 'r+') as file:
-                        lines = file.readlines()
-                        file.seek(0)
-                        file.truncate()
+        class InputGuard(QtCore.QObject):
+            def eventFilter(guard, target, event):
+                if event.type() in (
+                    QtCore.QEvent.MouseButtonPress, QtCore.QEvent.MouseButtonRelease,
+                    QtCore.QEvent.MouseButtonDblClick, QtCore.QEvent.MouseMove,
+                    QtCore.QEvent.KeyPress, QtCore.QEvent.KeyRelease,
+                    QtCore.QEvent.ShortcutOverride, QtCore.QEvent.Shortcut,
+                    QtCore.QEvent.Wheel, QtCore.QEvent.ContextMenu, QtCore.QEvent.Drop,
+                    QtCore.QEvent.InputMethod, QtCore.QEvent.TouchBegin, QtCore.QEvent.TouchUpdate,
+                ) and isinstance(target, QtWidgets.QWidget) and (target is self or self.isAncestorOf(target)):
+                    event.accept()
+                    return True
+                return False
 
-                        if class_index == -1:
-                            # If class -1 (All) is selected, delete all bounding boxes
-                            logging.info(f"Clearing ALL bounding boxes for {img_file}")
-                            continue  # Skip writing back anything (fully clears file)
+        application = QtWidgets.QApplication.instance()
+        input_guard = InputGuard(self)
 
-                        for line in lines:
-                            try:
-                                if class_index == -2 or int(line.split()[0]) != class_index:
-                                    file.write(line)
-                            except Exception as parse_error:
-                                logging.error(f"Error parsing line in {label_file}: {parse_error}")
-                except Exception as e:
-                    logging.error(f"Error processing {label_file}: {e}")
+        def progress(processed, count):
+            self.set_label_progress(0, max(1, count), value=processed,
+                                    progress_format="Clearing labels %v/%m (%p%)")
 
-        logging.info(f"Cleared bounding boxes for class index: {class_index}")
-
-        # Immediately refresh the UI so that the changes are reflected.
-        self.refresh_bounding_box_display()
+        worker.progress.connect(progress, Qt.QueuedConnection)
+        worker.finished.connect(loop.quit)
+        try:
+            for name in ("clear_all_button", "filter_class_spinbox"):
+                control = getattr(self, name, None)
+                if isinstance(control, QtWidgets.QWidget):
+                    control_states.append((control, control.isEnabled()))
+                    control.setEnabled(False)
+            for name in ("stop_next_timer", "stop_prev_timer"):
+                callback = getattr(self, name, None)
+                if callback is not None:
+                    callback()
+            application.installEventFilter(input_guard)
+            progress(0, total)
+            worker.start()
+            # Consume edit input instead of queueing it to replay after clearing.
+            # Paint, progress, resizing and safe close requests remain responsive.
+            loop.exec_()
+            while worker.isRunning():
+                loop.exec_()
+            worker.wait()  # Only after finished; never block painting through I/O.
+            application.removeEventFilter(input_guard)
+            result = worker.result
+            for path in result["changed"]:
+                getattr(self, "_review_filter_label_cache", {}).pop(self.normalize_path(path), None)
+            self.refresh_bounding_box_display()
+            self.refresh_annotation_preview_after_save()
+            if hasattr(self, "grid_review_is_active") and self.grid_review_is_active():
+                self.refresh_grid_review_view(preserve_position=True)
+            failures = result["failures"]
+            state = "stopped" if result["canceled"] else ("incomplete" if failures else "complete")
+            processed = result["processed"]
+            self.set_label_progress(0, max(1, total), value=processed if total else 1,
+                                    progress_format=f"Clear Labels {state}: %v/%m (%p%)")
+            logging.info("Clear Labels %s: %s changed file(s), %s failed file(s)",
+                         state, len(result["changed"]), len(failures))
+            self.statusBar().showMessage(
+                f"Clear Labels {state}: {len(result['changed'])} file(s) updated; {len(failures)} failed.", 7000
+            )
+            if failures:
+                QMessageBox.warning(self, "Clear Labels Incomplete",
+                    f"Updated {len(result['changed'])} file(s); {len(failures)} failed and were kept unchanged.\n"
+                    + "\n".join(failures[:5]))
+            return not failures and not result["canceled"]
+        finally:
+            if worker.isRunning():
+                worker.requestInterruption()
+                while worker.isRunning():
+                    loop.exec_()
+                worker.wait()
+            application.removeEventFilter(input_guard)
+            input_guard.deleteLater()
+            worker.progress.disconnect(progress)
+            self._review_label_clear_worker = None
+            self._review_label_clear_active = False
+            worker.deleteLater()
+            for control, enabled in control_states:
+                if not sip.isdeleted(control):
+                    control.setEnabled(enabled)
 
     def refresh_bounding_box_display(self):
         """
@@ -50883,6 +53951,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 scene.removeItem(item)
 
         try:
+            loaded_version = label_file_version(label_file)
             rects, segmentations, obbs = self.load_labels(
                 label_file,
                 self.image.width(),
@@ -50893,6 +53962,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             self.update_bbox_visibility()
             self.reinitialize_bounding_boxes()
             self.update_bounding_box_count_display()
+            scene._darkfusion_annotation_image = os.path.normcase(os.path.abspath(self.current_file))
+            scene._darkfusion_label_version = loaded_version
             scene.update()
 
         except Exception as e:
@@ -51184,7 +54255,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                         return True
         return False
 
-    def update_list_view(self, image_files=None):
+    def update_list_view(self, image_files=None, validate_files=True, preserve_grid_cache=False):
         if image_files is None:
             image_files = self.filtered_image_files if hasattr(self, 'filtered_image_files') else self.image_files
 
@@ -51206,7 +54277,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             f for f in image_files
             if f and not self.is_placeholder_file(f)
         ]
-        if len(image_files) <= 5000:
+        if validate_files and len(image_files) <= 5000:
             image_files = [f for f in image_files if os.path.exists(f)]
         logger.info(f"Updating ListView with {len(image_files)} files.")
 
@@ -51223,9 +54294,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if old_model is not None and old_model is not model and old_model.parent() is self.List_view:
             old_model.deleteLater()
         self.total_images.setText(f"Total: {len(image_files)}")
+        self._update_review_action_scope()
         logger.info("ListView updated successfully.")
         if hasattr(self, "grid_review_is_active") and self.grid_review_is_active():
-            self.refresh_grid_review_view(preserve_position=True)
+            self.refresh_grid_review_view(preserve_position=True, preserve_cache=preserve_grid_cache)
 
     def _rebuild_image_file_index(self):
         image_files = getattr(self, "image_files", []) or []
@@ -51434,6 +54506,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self._dataset_directory_refresh_timer.start()
 
     def _start_dataset_directory_refresh(self):
+        if getattr(self, "_image_deletion_in_progress", False):
+            self._dataset_directory_refresh_pending = True
+            return
         directory = self.normalize_path(getattr(self, "image_directory", ""))
         if not directory or not os.path.isdir(directory):
             return
@@ -51489,6 +54564,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
     def _apply_dataset_directory_refresh(self, directory, generation, scanned_files, changed=True):
         """Apply a background directory scan while preserving review position."""
+        if getattr(self, "_image_deletion_in_progress", False):
+            self._dataset_directory_refresh_pending = True
+            return
         active_directory = self.normalize_path(getattr(self, "image_directory", ""))
         if generation != getattr(self, "_dataset_directory_scan_generation", -1):
             return
@@ -51552,7 +54630,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         self.current_img_index = current_index
         self.current_image_index = self._full_dataset_index_for_file(self.current_file) if self.current_file else -1
-        self.update_list_view(self.filtered_image_files)
+        self.update_list_view(self.filtered_image_files, validate_files=False)
 
         if getattr(self, "img_index_number", None) is not None:
             self.img_index_number.blockSignals(True)
@@ -51574,59 +54652,58 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             )
 
     def apply_natural_sort_background(self):
-        """
-        Apply natural sorting after UI becomes responsive.
-        Keeps sequential frame navigation correct without blocking startup.
-        """
-        try:
-            import re
+        """Sort in a real worker, without rechecking every known image on disk."""
+        if getattr(self, "_image_deletion_in_progress", False):
+            self._natural_sort_pending = True
+            return
+        worker = getattr(self, "_natural_sort_worker", None)
+        if worker is not None:
+            self._natural_sort_pending = True
+            return
+        files = tuple(getattr(self, "image_files", []) or [])
+        if not files:
+            return
+        self._natural_sort_pending = False
+        worker = DatasetNaturalSortWorker(files, self.normalize_path(getattr(self, "image_directory", "")), self)
+        self._natural_sort_worker = worker
+        worker.completed.connect(self._apply_natural_sort_result)
+        worker.failed.connect(lambda message: logger.error("Natural sort failed: %s", message))
+        worker.finished.connect(self._natural_sort_finished)
+        worker.start()
 
-            current_file_before_sort = getattr(self, "current_file", None)
+    def _apply_natural_sort_result(self, ordered):
+        worker = self.sender()
+        if worker is not getattr(self, "_natural_sort_worker", None):
+            return
+        if worker.directory != self.normalize_path(getattr(self, "image_directory", "")):
+            return
+        if getattr(self, "_image_deletion_in_progress", False) or tuple(self.image_files) != worker.image_files:
+            self._natural_sort_pending = True
+            return
+        current = self.current_file  # The user may have navigated while sorting.
+        filtered = set(getattr(self, "filtered_image_files", []) or [])
+        self.image_files = list(ordered)
+        self.filtered_image_files = [path for path in ordered if path in filtered]
+        self._rebuild_image_file_index()
+        self.current_img_index = self.filtered_image_files.index(current) if current in filtered else -1
+        self.current_image_index = self._full_dataset_index_for_file(current) if current else -1
+        self.update_list_view(self.filtered_image_files, validate_files=False, preserve_grid_cache=True)
+        if getattr(self, "img_index_number", None) is not None:
+            with blocked_signals(self.img_index_number):
+                self.img_index_number.setMaximum(max(0, len(self.filtered_image_files) - 1))
+                self.img_index_number.setValue(max(0, self.current_img_index))
+        if current:
+            self.sync_list_view_selection(current)
+        self.update_dataset_progress()
 
-            def natural_key(path):
-                base = os.path.basename(path)
-                return [
-                    int(text) if text.isdigit() else text.lower()
-                    for text in re.split(r"(\d+)", base)
-                ]
-
-            logger.info("Applying natural sort in background...")
-            self.set_main_progress(92, 100)
-
-            self.image_files.sort(key=natural_key)
-            self._rebuild_image_file_index()
-
-            if not getattr(self, "filtered_image_files", None):
-                self.filtered_image_files = list(self.image_files)
-            else:
-                filtered_set = set(self.filtered_image_files)
-                self.filtered_image_files = [
-                    f for f in self.image_files
-                    if f in filtered_set
-                ]
-
-            self._prune_missing_dataset_files()
-            self.update_list_view(self.filtered_image_files)
-
-            if current_file_before_sort and current_file_before_sort in self.filtered_image_files:
-                new_index = self.filtered_image_files.index(current_file_before_sort)
-                self.current_file = current_file_before_sort
-                self.current_img_index = new_index
-                self.current_image_index = new_index
-
-                if hasattr(self, "img_index_number"):
-                    self.img_index_number.blockSignals(True)
-                    self.img_index_number.setMaximum(max(0, len(self.filtered_image_files) - 1))
-                    self.img_index_number.setValue(new_index)
-                    self.img_index_number.blockSignals(False)
-
-                self.sync_list_view_selection(current_file_before_sort)
-
-            logger.info("Natural sort complete.")
-            self.set_main_progress(100, 100)
-
-        except Exception as e:
-            logger.error(f"Natural sort failed: {e}")
+    def _natural_sort_finished(self):
+        worker = self.sender()
+        if worker is getattr(self, "_natural_sort_worker", None):
+            self._natural_sort_worker = None
+            if getattr(self, "_natural_sort_pending", False):
+                QTimer.singleShot(0, self.apply_natural_sort_background)
+        if worker is not None:
+            worker.deleteLater()
 
     def placeholder_image_path(self):
         """Theme artwork replaces the empty-view placeholder, never the viewport."""
@@ -51639,6 +54716,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
     def display_placeholder(self):
         """Display a non-annotatable empty-view image using the normal scene path."""
+        clarity = getattr(self, "_object_clarity_controller", None)
+        if clarity is not None:
+            clarity.reset()
         path = self.placeholder_image_path()
         pixmap = QPixmap(path)
         if pixmap.isNull():
@@ -51664,6 +54744,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             self.label_file = None
             self.processed_image = None
             self.current_display_image = None
+            source = getattr(self, "_editor_image_source", None)
+            if source is not None:
+                source.clear()
             self.annotation_scene_active = False
             self.train_view_active = False
             self.set_screen_view_scene_and_rect(scene)
@@ -51704,20 +54787,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             return None
 
     def is_placeholder_file(self, file_path):
-        if not file_path:
-            return False
-
         try:
-            file_path = os.path.normcase(os.path.abspath(str(file_path)))
-            image_root = Path(APP_DIR) / "styles" / "images"
-            placeholders = {image_root / "default.png", image_root / "default_temp.png"}
-            if file_path in {os.path.normcase(os.path.abspath(str(path))) for path in placeholders}:
-                return True
-            # No filesystem scan in this hot-path dataset check. Decorative art
-            # stays a placeholder even after selecting a different theme.
-            theme_root = os.path.normcase(os.path.abspath(str(Path(APP_DIR) / "styles" / "df-assets")))
-            candidate = Path(file_path)
-            return candidate.name == "idle-art.png" and candidate.parent.parent == Path(theme_root)
+            # Roots are fixed for this app installation. Cache them instead of
+            # rebuilding Path objects/default paths for every dataset row.
+            return is_placeholder_path(file_path, APP_DIR)
         except Exception:
             return False
 
@@ -51868,7 +54941,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         # Default working list is the full image list and must be kept in sync
         # with the actual folder contents even when files were deleted externally.
         self.filtered_image_files = list(self.image_files)
-        self._prune_missing_dataset_files()
+        # get_image_files just scanned this directory. Do not synchronously
+        # repeat an exists() check for every image in both copies of the list.
+        self.filtered_image_files = [path for path in self.filtered_image_files if not self.is_placeholder_file(path)]
+        self.image_files = list(self.filtered_image_files)
         self.restore_project_ui_state(apply_filter=True)
 
         # Show first real image if possible
@@ -51884,7 +54960,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.ensure_points_json_exists()
 
         # Update UI list now without extra dataset analysis
-        self.update_list_view(self.filtered_image_files)
+        self.update_list_view(self.filtered_image_files, validate_files=False)
         self.set_main_progress(90, 100)
 
         if hasattr(self, "img_index_number"):
@@ -51939,9 +55015,20 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         logger.info("Cleared UI, graphics scene, and stopped workers.")
 
-    def stop_existing_workers(self):
-        """Stops all running QThread workers safely before new dataset load."""
+    def stop_existing_workers(self, include_standalone_moves=False):
+        """Stop dataset workers; independent folder moves survive dataset changes."""
         try:
+            for name in ("_grid_delete_worker", "_natural_sort_worker"):
+                worker = getattr(self, name, None)
+                if worker is not None:
+                    worker.requestInterruption()
+                    # Cancellation is checked between pairs. Never terminate
+                    # a thread halfway through a filesystem transaction.
+                    worker.wait()
+                    setattr(self, name, None)
+                    worker.deleteLater()
+            self._natural_sort_pending = False
+            self._set_image_deletion_busy(False)
             dataset_scanner = getattr(self, "scan_annotations", None)
             if dataset_scanner is not None and hasattr(dataset_scanner, "cancel_active_scan"):
                 dataset_scanner.cancel_active_scan(wait_ms=3000)
@@ -51972,7 +55059,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 finally:
                     self._review_filter_worker = None
 
-            bulk_move_worker = getattr(self, "_bulk_move_worker", None)
+            bulk_move_worker = getattr(self, "_bulk_move_worker", None) if include_standalone_moves else None
             if bulk_move_worker is not None:
                 try:
                     if bulk_move_worker.isRunning():
@@ -52262,6 +55349,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             "annotations_removed": 0,
             "lines_deleted": 0,
             "errors": [],
+            "deleted_lines_by_file": {},
         }
 
         logger.info("Attempting to delete from %d label files", len(issues_by_file))
@@ -52275,7 +55363,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                     continue
 
                 # Read original file
-                with open(label_file, "r", encoding="utf-8", errors="ignore") as f:
+                with open(label_file, "r", encoding="utf-8") as f:
                     original_lines = f.readlines()
 
                 original_count = len(original_lines)
@@ -52288,13 +55376,15 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
                 lines_removed = len(original_lines) - len(kept_lines)
                 if lines_removed > 0:
-                    # Write back to file
-                    with open(label_file, "w", encoding="utf-8") as f:
-                        f.writelines(kept_lines)
+                    # A failed replacement leaves the original labels intact.
+                    write_label_text_atomic(label_file, "".join(kept_lines))
 
                     summary["files_modified"] += 1
                     summary["annotations_removed"] += lines_removed
                     summary["lines_deleted"] += lines_removed
+                    summary["deleted_lines_by_file"][label_file] = sorted(
+                        line for line in line_numbers if 1 <= line <= original_count
+                    )
 
                     logger.info(
                         "✓ Deleted %d of %d lines from %s (%d remain)",
@@ -53014,7 +56104,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         return inter_area / union_area if union_area else 0.0
 
     def delete_checked_grid_images(self):
-        """Delete the checked Grid View images in one in-memory update."""
+        """Start one background job for the checked snapshot, then update once."""
+        if getattr(self, "_image_deletion_in_progress", False):
+            return False
         model = getattr(self, "grid_thumbnail_model", None)
         selected_files = model.checked_files() if model is not None else []
         selected_files = [
@@ -53023,23 +56115,76 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         ]
         if not selected_files:
             return False
-        if getattr(self, "_image_deletion_in_progress", False):
-            return False
+        self._cancel_review_filter_request()
+        self.stop_next_timer()
+        self.stop_prev_timer()
+        self._set_image_deletion_busy(True)
+        # A scan started before this deletion must not put its stale snapshot
+        # back into the model after the delete job has finished.
+        self._dataset_directory_scan_generation = getattr(self, "_dataset_directory_scan_generation", 0) + 1
+        self._dataset_directory_scan_succeeded = False
+        directory = self.normalize_path(getattr(self, "image_directory", "") or os.path.dirname(selected_files[0]))
+        worker = GridImageDeleteWorker(selected_files, directory, self)
+        self._grid_delete_worker = worker
+        worker.progress.connect(self._on_grid_delete_progress)
+        worker.completed.connect(self._apply_checked_grid_deletion)
+        worker.finished.connect(self._grid_delete_finished)
+        self.statusBar().showMessage(f"Deleting {len(selected_files)} checked image pairs...")
+        worker.start()
+        return True
 
+    def _set_image_deletion_busy(self, busy):
+        self._image_deletion_in_progress = bool(busy)
+        if busy:
+            self._image_delete_widget_states = []
+            for name in ("screen_view", "List_view", "grid_review_view", "preview_list", "delete_button", "next_button",
+                         "previous_button", "img_index_number", "grid_view_button", "auto_scan_checkbox",
+                         "auto_label_yolo_button", "video_label_frame_button"):
+                widget = getattr(self, name, None)
+                if widget is not None:
+                    self._image_delete_widget_states.append((widget, widget.isEnabled()))
+                    widget.setEnabled(False)
+        else:
+            for widget, enabled in getattr(self, "_image_delete_widget_states", []):
+                try:
+                    widget.setEnabled(enabled)
+                except RuntimeError:
+                    pass
+            self._image_delete_widget_states = []
+
+    def _on_grid_delete_progress(self, processed, total):
+        if self.sender() is getattr(self, "_grid_delete_worker", None):
+            self.statusBar().showMessage(f"Deleting checked image pairs: {processed}/{total}")
+
+    def _grid_delete_finished(self):
+        worker = self.sender()
+        if worker is getattr(self, "_grid_delete_worker", None):
+            self._grid_delete_worker = None
+            self._set_image_deletion_busy(False)
+            if getattr(self, "_natural_sort_pending", False):
+                QTimer.singleShot(0, self.apply_natural_sort_background)
+            if getattr(self, "_dataset_directory_refresh_pending", False):
+                self._schedule_dataset_directory_refresh()
+        if worker is not None:
+            worker.deleteLater()
+
+    def _apply_checked_grid_deletion(self, summary):
+        worker = self.sender()
+        if worker is not getattr(self, "_grid_delete_worker", None):
+            return False
+        directory = self.normalize_path(getattr(self, "image_directory", "") or os.path.dirname(getattr(self, "current_file", "") or ""))
+        if summary.get("directory") != directory:
+            return False
+        model = getattr(self, "grid_thumbnail_model", None)
+        selected_files = list(summary.get("deleted_files", []))
+        delete_failures = list(summary.get("delete_failures", []))
         selected_set = set(selected_files)
-        self._image_deletion_in_progress = True
         try:
             self._cancel_review_filter_request()
-            filtered_before = [
-                self.normalize_path(path)
-                for path in (getattr(self, "filtered_image_files", []) or [])
-                if path and not self.is_placeholder_file(path)
-            ]
-            dataset_before = [
-                self.normalize_path(path)
-                for path in (getattr(self, "image_files", []) or [])
-                if path and not self.is_placeholder_file(path)
-            ]
+            # These are already normalized, active dataset lists. Revalidating
+            # every surviving path here would just move the stall to completion.
+            filtered_before = list(getattr(self, "filtered_image_files", []) or [])
+            dataset_before = list(getattr(self, "image_files", []) or [])
             selected_rows = [
                 row for row, path in enumerate(filtered_before) if path in selected_set
             ]
@@ -53048,17 +56193,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             )
             old_current = self.normalize_path(getattr(self, "current_file", "") or "")
 
-            deleted_files = []
-            delete_failures = []
-            for image_file in selected_files:
-                try:
-                    if self.delete_files(image_file) is not False:
-                        deleted_files.append(image_file)
-                except Exception as error:
-                    delete_failures.append(f"{os.path.basename(image_file)}: {error}")
-                    logger.error("Could not delete grid image pair %s: %s", image_file, error)
-
-            if not deleted_files:
+            if not selected_files:
                 if delete_failures:
                     QMessageBox.warning(
                         self,
@@ -53068,9 +56203,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                     self._schedule_dataset_directory_refresh()
                 return False
 
-            selected_files = deleted_files
-            selected_set = set(deleted_files)
-
             self.filtered_image_files = [
                 path for path in filtered_before if path not in selected_set
             ]
@@ -53078,7 +56210,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 path for path in dataset_before if path not in selected_set
             ]
             if model is not None:
-                model.clear_checked()
+                model._checked_files.difference_update(selected_set)
+            preview_file = self.normalize_path(getattr(self, "current_preview_image", "") or "")
+            if old_current in selected_set or preview_file in selected_set:
+                self.preview_list.clearContents()
+                self.preview_list.setRowCount(0)
+                self.current_preview_image = ""
 
             label_cache = getattr(self, "_review_filter_label_cache", {})
             for image_file in selected_files:
@@ -53113,7 +56250,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 self.current_file = None
                 self.current_img_index = -1
                 self.current_image_index = -1
-                self.update_list_view([])
+                self.update_list_view([], validate_files=False, preserve_grid_cache=True)
                 if getattr(self, "img_index_number", None) is not None:
                     with blocked_signals(self.img_index_number):
                         self.img_index_number.setMaximum(0)
@@ -53137,7 +56274,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             self.current_file = candidates[next_index]
             self.current_img_index = next_index
             self.current_image_index = self._full_dataset_index_for_file(self.current_file)
-            self.update_list_view(candidates)
+            self.update_list_view(candidates, validate_files=False, preserve_grid_cache=True)
             if getattr(self, "img_index_number", None) is not None:
                 with blocked_signals(self.img_index_number):
                     self.img_index_number.setMaximum(max(0, len(candidates) - 1))
@@ -53152,8 +56289,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 message += " No filtered images remained, so Review returned to All."
             self.statusBar().showMessage(message, 5000)
             return True
-        finally:
-            self._image_deletion_in_progress = False
+        except Exception as error:
+            logger.exception("Could not refresh the grid after deletion: %s", error)
+            self._schedule_dataset_directory_refresh()
+            return False
 
     def delete_current_image(self):
         """Delete exactly one real image and select a stable surviving image."""
@@ -53163,7 +56302,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         if hasattr(self, "grid_review_is_active") and self.grid_review_is_active():
             model = getattr(self, "grid_thumbnail_model", None)
-            if model is not None and model.checked_files():
+            if model is not None and model.checked_count():
                 return self.delete_checked_grid_images()
 
         current_file = self.normalize_path(getattr(self, "current_file", "") or "")
@@ -53235,7 +56374,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 ]
                 self._review_similarity_matches_by_image.pop(current_file, None)
 
-            if video_context is not None:
+            if video_context is not None and sparse_video_navigation(video_context):
                 current_frame = int(video_context["frame_index"])
                 total_frames = self._video_annotation_total_frame_count(video_context)
                 offset = 1 if total_frames <= 0 or current_frame + 1 < total_frames else -1
@@ -53338,18 +56477,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             logger.warning("Delete skipped for protected placeholder image.")
             return
 
-        try:
-            os.remove(file_path)  # Delete the image file.
-        except FileNotFoundError:
-            logger.warning(f"Image file not found during delete: {file_path}")
-
-        # Assume the label file has the same base name with a .txt extension.
-        txt_file_path = os.path.splitext(file_path)[0] + '.txt'
-        try:
-            os.remove(txt_file_path)  # Delete the associated annotation file.
-        except FileNotFoundError:
-            logger.debug(f"Label file not found during delete: {txt_file_path}")
-        return True
+        return delete_image_label_pair(file_path)
 
     def is_scene_empty(self):
         return all(isinstance(item, QGraphicsPixmapItem) or isinstance(item, QGraphicsTextItem) for item in self.screen_view.scene().items())
@@ -53406,6 +56534,19 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 elif file_name and self.is_placeholder_file(file_name):
                     self.annotation_scene_active = False
 
+            # Load the original before review crops so both views share its
+            # decoded pixels. Preprocessing below owns a separate working copy.
+            if file_name is not None:
+                if file_name != getattr(self, "last_logged_file_name", None):
+                    logger.info(f"display_image: file_name={file_name}")
+                    self.last_logged_file_name = file_name
+
+                image = self._editor_original_source().read(file_name)
+                if image is None:
+                    logger.error(f"Failed to load image: {file_name}. Falling back to placeholder.")
+                    self.display_placeholder()
+                    return None
+
             # ---- 3. Placeholder special case ----
             if file_name and self.is_placeholder_file(file_name):
                 self.preview_list.clearContents()
@@ -53428,19 +56569,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                     self.show_thumbnail_page(file_name, page=page)
                 else:
                     logger.debug("Skipping preview rebuild: already up to date.")
-
-            # ---- 5. Read image from file ----
-            if file_name is not None:
-                if file_name != getattr(self, "last_logged_file_name", None):
-                    logger.info(f"display_image: file_name={file_name}")
-                    self.last_logged_file_name = file_name
-
-                image = cv2.imread(file_name)
-
-                if image is None:
-                    logger.error(f"Failed to load image: {file_name}. Falling back to placeholder.")
-                    self.display_placeholder()
-                    return None
 
             # ---- 6. Validate image array ----
             if image is None:
@@ -53467,6 +56595,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
             # Convert display image to valid BGR/RGB-compatible format
             display_image = processed_image
+            if (bool(self.settings.get("visibilityAnnotationViewOnly", False))
+                    and not getattr(self, "_visibility_compare_original", False)):
+                # These pixels are only converted to the annotation-view pixmap.
+                # Auto-labeling and assisted tools retain current_display_image
+                # and processed_image from the shared preprocessing above.
+                display_image = self._apply_visibility_adjustments(
+                    display_image, for_annotation_display=True)
 
             if len(display_image.shape) == 2:
                 display_image = cv2.cvtColor(display_image, cv2.COLOR_GRAY2BGR)
@@ -53488,6 +56623,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 old_scene.clear()
 
             scene = QGraphicsScene(0, 0, self.image.width(), self.image.height())
+            scene.setProperty("darkfusion_source_image", os.path.abspath(file_name) if file_name else "")
             pixmap_item = QGraphicsPixmapItem(self.image)
             pixmap_item.setData(0, "annotation_image")
             pixmap_item.setTransformationMode(Qt.SmoothTransformation)
@@ -53576,6 +56712,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             ):
                 QTimer.singleShot(0, self.refresh_training_preview_if_enabled)
 
+            if file_name and rendered_image is not None:
+                self._prefetch_editor_neighbors(file_name)
+            clarity = getattr(self, "_object_clarity_controller", None)
+            if file_name and (clarity is not None or self.settings.get("objectClarityEnabled", False)
+                              or self.settings.get("objectClarityUseROI", False)):
+                self._object_clarity().activate(
+                    file_name, scene, self._editor_original_source().review_pixmap(file_name))
             return rendered_image
 
         except Exception as e:
@@ -53908,6 +57051,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.sync_scene_annotation_cache(current_file_path)
         self.update_blank_overlay_state(scene)
         self.show_thumbnail_page(current_file_path, page=getattr(self, "current_page", 0))
+        clarity = getattr(self, "_object_clarity_controller", None)
+        if clarity is not None:
+            clarity.schedule()
         if scene is not None:
             scene.update()
         self.screen_view.viewport().update()
@@ -54678,6 +57824,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             self.auto_head_run_button.setEnabled(True)
             self._safe_empty_cache()
 
+    @gpu_work("SAM3 label tools", keep=("sam_semantic", "sam_prompt"))
     def run_sam3_auto_heads(self):
         """Append validated SAM3 nested boxes inside existing parent annotations."""
         dataset_dir = self.current_dataset_directory()
@@ -54929,6 +58076,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             "grayscaleBrightness": 0,
             "enhanceImageEnabled": False,
             "visibilityPreprocessEnabled": False,
+            "visibilityAnnotationViewOnly": False,
+            "visibilityProtectHighlights": False,
             "visibilityBrightness": 0,
             "visibilityGamma": 100,
             "visibilityContrast": 100,
@@ -54948,12 +58097,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             return image
         return np.clip(image.astype(np.int16) + amount, 0, 255).astype(np.uint8)
 
-    def _apply_visibility_adjustments(self, image, state=None):
+    def _apply_visibility_adjustments(self, image, state=None, *, for_annotation_display=False):
         """Apply user-controlled visibility filters without changing dimensions."""
         if image is None or not isinstance(image, np.ndarray) or image.size == 0:
             return image
         state = state or self._preprocessing_state_snapshot()
         if not bool(state.get("visibilityPreprocessEnabled", False)):
+            return image
+        if bool(state.get("visibilityAnnotationViewOnly", False)) and not for_annotation_display:
             return image
 
         try:
@@ -54970,6 +58121,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             elif len(work.shape) == 3 and work.shape[2] == 4:
                 work = cv2.cvtColor(work, cv2.COLOR_BGRA2BGR)
             work = np.ascontiguousarray(work, dtype=np.uint8)
+            original = work
 
             if abs(gamma - 1.0) > 0.001:
                 lookup = np.clip(
@@ -55007,6 +58159,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 blurred = cv2.GaussianBlur(work, (0, 0), 1.0)
                 sharpened = cv2.addWeighted(work, 1.0 + sharpness, blurred, -sharpness, 0)
                 work = np.clip(sharpened, 0, 255).astype(np.uint8)
+            if for_annotation_display and bool(state.get("visibilityProtectHighlights", False)):
+                # Preserve near-saturated game effects/colors progressively.
+                # The blend uses source intensities, not inferred HUD/object masks.
+                weight = np.clip(original.max(axis=2).astype(np.int16) - 200, 0, 55)
+                weight = weight.astype(np.uint16)[:, :, None]
+                work = ((work.astype(np.uint16) * (55 - weight)
+                         + original.astype(np.uint16) * weight + 27) // 55).astype(np.uint8)
             return work
         except Exception as error:
             logger.warning("Visibility preprocessing failed: %s", error)
@@ -55042,44 +58201,48 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 logger.debug("Propagation clarity preprocessing failed: %s", error)
         return self._apply_visibility_adjustments(work, state)
 
-    def apply_preprocessing(self, image, bounding_boxes=None, img_width=None, img_height=None):
+    def apply_preprocessing(self, image, bounding_boxes=None, img_width=None, img_height=None, state=None):
         # Validate input image.
         if image is None or image.size == 0:
             logging.warning("Image is empty. Skipping preprocessing.")
             return image, []
 
-        if bool(getattr(self, "_visibility_compare_original", False)):
+        if (bool(state.get("compare_original", False)) if state is not None
+                else bool(getattr(self, "_visibility_compare_original", False))):
             return image, []
 
+        # Extraction uses its startup snapshot. Never read QWidget controls
+        # from its worker, even while a Settings dialog is processing events.
+        grayscale = state["grayscaleEnabled"] if state is not None else self.grayscale_Checkbox.isChecked()
+        super_resolution = state["super_resolution"] if state is not None else self.super_resolution_Checkbox.isChecked()
+        outline = state["outline"] if state is not None else self.outline_Checkbox.isChecked()
+        debug_edges = (state["debug_edges"] if state is not None else bool(
+            getattr(self, "debug_edge_display_checkbox", None) and self.debug_edge_display_checkbox.isChecked()
+        ))
+        heatmap = state["heatmap"] if state is not None else self.heatmap_Checkbox.isChecked()
+
         # Optional grayscale conversion.
-        if self.grayscale_Checkbox.isChecked():
+        if grayscale:
             image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
             image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
             image = self._apply_gray_brightness(
-                image, self.grey_scale_slider.value()
+                image, state["grayscaleBrightness"] if state is not None else self.grey_scale_slider.value()
             )
 
         # Super-resolution must run before color maps or overlays.
-        if self.super_resolution_Checkbox.isChecked():
+        if super_resolution:
             enhanced_image = self._apply_super_resolution_or_clarity(image)
             if enhanced_image is not None:
                 image = enhanced_image
 
         # Visibility controls are deliberately part of preprocessing so the
         # viewer and model-assisted labeling inspect the same pixels.
-        image = self._apply_visibility_adjustments(image)
+        image = self._apply_visibility_adjustments(image, state=state)
 
         # Edge buffer / debug edge display.
         # outline_Checkbox = enable snap/SAM3 logic
         # debug_edge_display_checkbox shows the edge overlay on the displayed image.
-        edge_needed = (
-            self.outline_Checkbox.isChecked()
-            or (
-                hasattr(self, "debug_edge_display_checkbox")
-                and self.debug_edge_display_checkbox is not None
-                and self.debug_edge_display_checkbox.isChecked()
-            )
-        )
+        edge_needed = outline or debug_edges
 
         if edge_needed:
             edge_source = image
@@ -55089,32 +58252,34 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             else:
                 edge_gray = edge_source
 
-            edges = cv2.Canny(edge_gray, self.slider_min_value, self.slider_max_value)
+            edges = cv2.Canny(
+                edge_gray,
+                state["edge_min"] if state is not None else self.slider_min_value,
+                state["edge_max"] if state is not None else self.slider_max_value,
+            )
 
             # Keep a usable processed edge buffer for snap fallback/debug.
-            self.processed_edges = edges.copy()
+            if state is None:
+                self.processed_edges = edges.copy()
 
             # Only overwrite processed_image with edges when snap is enabled.
             # This keeps SAM3/snap behavior tied to outline_Checkbox.
-            if self.outline_Checkbox.isChecked():
+            if outline and state is None:
                 self.processed_image = edges.copy()
 
             # Show edge overlay independently from snapping.
-            if (
-                hasattr(self, "debug_edge_display_checkbox")
-                and self.debug_edge_display_checkbox is not None
-                and self.debug_edge_display_checkbox.isChecked()
-            ):
+            if debug_edges:
                 edges_colored = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
                 image = cv2.addWeighted(image, 0.8, edges_colored, 0.2, 0)
 
         # Heatmap runs last because it is display-only.
-        if self.heatmap_Checkbox.isChecked():
+        if heatmap:
             image_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
             if image_gray.dtype != np.uint8:
                 image_gray = cv2.normalize(image_gray, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-            selected_map_name = self.heatmap_dropdown.currentText().strip().upper()
-            colormap = self.heatmap_colormap_options.get(selected_map_name, cv2.COLORMAP_JET)
+            colormap = (state["colormap"] if state is not None else self.heatmap_colormap_options.get(
+                self.heatmap_dropdown.currentText().strip().upper(), cv2.COLORMAP_JET
+            ))
             image = cv2.applyColorMap(image_gray, colormap)
 
         return image, []
@@ -55865,6 +59030,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             else self.current_video_transform_settings()
         )
         frames = manifest.setdefault("frames", {})
+        deleted_frames = excluded_video_frames(manifest)
+        if int(frame_index or 0) in deleted_frames:
+            # Explicit Label Frame is allowed to restore a previously deleted
+            # frame. Ordinary navigation never removes this exclusion.
+            deleted_frames.discard(int(frame_index or 0))
+            manifest["deleted_frames"] = sorted(deleted_frames)
         frames[str(max(0, int(frame_index or 0)))] = {
             "image": os.path.relpath(image_path, output_dir).replace("\\", "/"),
             "label": os.path.relpath(label_path, output_dir).replace("\\", "/"),
@@ -56700,6 +59871,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         - Prevents wrong-image saves by matching item.file_name to image_file
         """
 
+        if getattr(self, "_image_deletion_in_progress", False):
+            return
         if getattr(self, "_loading_image", False):
             logger.debug(f"Save skipped while image is loading/rebuilding: {image_file}")
             return
@@ -57321,27 +60494,21 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 enabled = False
 
         self._image_navigation_propagation_enabled = enabled
-        if enabled and getattr(self, "auto_scan_checkbox", None) is not None:
-            self.auto_scan_checkbox.setChecked(False)
-            self.stop_next_timer()
-            self.stop_prev_timer()
 
         if enabled:
             self.start_sam3_propagation_warmup()
         else:
             self._set_navigation_propagation_button_state("off")
-            self._sam3_propagation_release_pending = True
-            released = self._release_sam_video_propagation_runtime()
 
         if hasattr(self, "statusBar"):
             self.statusBar().showMessage(
-                "Frame-by-frame propagation enabled; preparing its SAM3 tracker in the background."
+                (
+                    "Frame-by-frame propagation enabled; its SAM3 tracker is ready."
+                    if getattr(self, "_sam3_video_propagation_ready", False)
+                    else "Frame-by-frame propagation enabled; preparing its SAM3 tracker in the background."
+                )
                 if enabled
-                else (
-                    "Frame-by-frame propagation disabled; its SAM3 tracker was released."
-                    if released
-                    else "Frame-by-frame propagation disabled; its SAM3 tracker will release when current work finishes."
-                ),
+                else "Frame-by-frame propagation disabled; its SAM3 tracker stays warm for quick reuse when GPU memory is available.",
                 4000,
             )
 
@@ -57458,6 +60625,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if not result.get("ok"):
             return False, str(result.get("message") or "Propagation did not produce a label.")
 
+        # Deleting an image also deletes its sidecar. A late result must not
+        # recreate that sidecar (or save a stale canvas) after the deletion.
+        if not target_file or not os.path.isfile(target_file):
+            return False, "Propagation skipped: the target image was deleted or moved."
+
         # Preserve any correction the user drew while background propagation ran.
         if target_file and self.normalize_path(getattr(self, "current_file", "")) == target_file:
             scene = self.screen_view.scene()
@@ -57520,6 +60692,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         )
 
     def _start_adjacent_propagation(self, source_file, target_file):
+        if not gpu_model_allowed(self, "sam_video"):
+            return False
         if getattr(self, "_sam3_propagation_shutting_down", False):
             return False
         worker = getattr(self, "_adjacent_propagation_worker", None)
@@ -57577,8 +60751,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
     def open_label_propagation_dialog(self, source_kind="images"):
         video_context = self._propagation_video_annotation_context()
-        if video_context is not None:
+        if video_context is not None and (
+            source_kind == "video" or sparse_video_navigation(video_context)
+        ):
             source_kind = "video"
+        else:
+            video_context = None
         source_kind = "video" if source_kind == "video" else "images"
         if source_kind == "images" and not getattr(self, "current_file", None):
             QMessageBox.information(self, "Propagate Labels", "Open an image dataset first.")
@@ -57622,6 +60800,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         range_combo = QComboBox(dialog)
         for text, value in (("Next frame", 1), ("10 frames", 10), ("50 frames", 50), ("Until uncertain", 0)):
             range_combo.addItem(text, value)
+        range_combo.setToolTip(
+            "Maximum frames per direction. Until uncertain continues to the end "
+            "or a safety stop. Image ranges use the active filtered image list; "
+            "propagation tracks your starting annotations, not newly appearing objects."
+        )
 
         existing_combo = QComboBox(dialog)
         existing_combo.addItem("Skip existing labels", "skip")
@@ -57644,7 +60827,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         scene_cut_check = QCheckBox("Stop on likely scene change", dialog)
         scene_cut_check.setChecked(True)
-        open_results_check = QCheckBox("Open propagated frames in Label when finished", dialog)
+        open_results_check = QCheckBox("Open propagated frames for editing when finished", dialog)
         open_results_check.setChecked(source_kind == "video")
         open_results_check.setVisible(source_kind == "video")
 
@@ -57684,8 +60867,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         stop_button.clicked.connect(self.stop_label_propagation)
 
         def undo_from_dialog():
-            if self.undo_last_label_propagation(status):
-                undo_button.setEnabled(False)
+            self.undo_last_label_propagation(status)
+            undo_button.setEnabled(bool(getattr(self, "_last_propagation_manifest", None)))
 
         undo_button.clicked.connect(undo_from_dialog)
 
@@ -57729,6 +60912,15 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
     def stop_label_propagation(self):
         self._propagation_stop_requested = True
+
+    def _note_propagation_stop(self, status_label, message):
+        """Keep a safety/error stop visible after the batch summary is displayed."""
+        reasons = list(getattr(self, "_last_propagation_stop_reasons", []) or [])
+        if message not in reasons:
+            reasons.append(message)
+        self._last_propagation_stop_reasons = reasons
+        status_label.setText(message)
+        logger.info("Label propagation: %s", message)
 
     def _propagation_seed_lines_from_image(self, object_mode):
         scene = self.screen_view.scene()
@@ -59211,24 +62403,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         predictor.prompts = {}
 
     def _run_propagation_frames_native_session(
-        self,
-        frame_records,
-        seed_image,
-        seed_lines,
-        options,
-        manifest,
-        status_label,
-        predictor,
+        self, frame_records, seed_image, seed_lines, options, manifest, status_label, predictor,
     ):
-        """Propagate a whole ordered range in one SAM3 memory session.
-
-        The installed Ultralytics video wrapper owns its temporal state for one
-        continuous source. A single temporary stream keeps that state alive and
-        removes the old two-frame re-encode at every step.
-        """
+        """Read and track one frame at a time in one continuous SAM3 session."""
         seed_h, seed_w = seed_image.shape[:2]
-        # The predictor resizes to this inference envelope anyway. Encoding a
-        # 1080p/4K temporary stream would add I/O without adding model detail.
         session_max = max(2, int(self._sam_imgsz()))
         session_scale = min(1.0, session_max / max(1, seed_w, seed_h))
         session_w = max(2, int(round(seed_w * session_scale)))
@@ -59238,323 +62416,238 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         prompt_bboxes = self._sam3_sequence_prompt_bboxes(
             seed_image, seed_lines, session_w, session_h
         )
-        native_tracks, pose_tracks = self._initialize_native_occlusion_tracks(
-            seed_image, seed_lines
-        )
+        native_tracks, pose_tracks = self._initialize_native_occlusion_tracks(seed_image, seed_lines)
         if not native_tracks and not pose_tracks:
             return None
 
-        descriptor, video_path = tempfile.mkstemp(
-            prefix="darkfusion_sam3_sequence_", suffix=".mp4"
-        )
-        os.close(descriptor)
-        writer = None
-        active_records = []
-        # Reuse the first prepared frames in short ranges, but never retain an
-        # entire long video in RAM. Overflow frames keep the existing reread path.
-        prepared_frames = {}
-        prepared_frame_bytes = 0
-        prepared_frame_budget = 64 * 1024 * 1024
+        progress = propagation_status(status_label, len(frame_records))
         changed_count = 0
         native_started = False
-        progress = QtWidgets.QProgressDialog(
-            "Preparing persistent SAM3 propagation...",
-            "Stop",
-            0,
-            max(1, len(frame_records) * 2),
-            self,
-        )
-        progress.setWindowTitle("Propagate Labels")
-        progress.setWindowModality(Qt.WindowModal)
-        progress.setMinimumDuration(0)
-        try:
-            video_fps = get_video_output_fps(self.settings.get("videoOutputFps") if hasattr(self, "settings") else None)
-            codec_fourcc = get_video_codec_fourcc(self.settings.get("videoCodec") if hasattr(self, "settings") else None)
-            if prompt_bboxes:
-                writer = cv2.VideoWriter(
-                    video_path,
-                    cv2.VideoWriter_fourcc(*codec_fourcc),
-                    video_fps,
-                    (session_w, session_h),
-                )
-                if not writer.isOpened():
-                    logger.warning("Could not create the persistent SAM3 sequence stream.")
-                    return None
-                writer.write(
-                    cv2.resize(
-                        seed_image, (session_w, session_h), interpolation=cv2.INTER_LINEAR
-                    )
-                )
+        results = source = None
+        pending = {}
+        sequence = {"ended": False}
+
+        def canceled():
+            return getattr(self, "_propagation_stop_requested", False) or progress.canceled()
+
+        def frames():
+            # BGR enters the normal Ultralytics preprocessor exactly once.
+            yield "propagation_seed.png", cv2.resize(seed_image, (session_w, session_h))
             previous_image = seed_image
             for index, record in enumerate(frame_records, start=1):
-                QApplication.processEvents()
-                if progress.wasCanceled():
-                    self._propagation_stop_requested = True
-                if getattr(self, "_propagation_stop_requested", False):
+                if canceled():
+                    self._note_propagation_stop(status_label, "Stopped by user.")
                     break
-                raw_target_image = record["read"]()
-                if raw_target_image is None or raw_target_image.size == 0:
-                    status_label.setText(
-                        f"Stopped: could not read frame {record['name']}."
-                    )
+                progress.update(current=index - 1, phase="reading",
+                                message=f"Reading {index:,} / {len(frame_records):,}: {record['name']}")
+                raw = record["read"]()
+                if canceled():
+                    self._note_propagation_stop(status_label, "Stopped by user.")
                     break
-                target_image = self._apply_propagation_preprocessing(
-                    raw_target_image, self._active_propagation_preprocessing_state
-                )
-                if options.get("stop_scene_cut") and self._propagation_scene_changed(
-                    previous_image, target_image
-                ):
-                    status_label.setText(
-                        f"Paused at {record['name']}: likely scene change."
-                    )
+                if raw is None or raw.size == 0:
+                    if record.get("skip_missing") and not os.path.isfile(record["image_path"]):
+                        progress.update(current=index, message=f"Skipped missing image: {record['name']}")
+                        continue
+                    self._note_propagation_stop(status_label, f"Stopped: could not read frame {record['name']}.")
                     break
-                if writer is not None:
-                    writer.write(
-                        cv2.resize(
-                            target_image,
-                            (session_w, session_h),
-                            interpolation=cv2.INTER_LINEAR,
-                        )
-                    )
-                frame_bytes = raw_target_image.nbytes + (
-                    target_image.nbytes if target_image is not raw_target_image else 0
-                )
-                if prepared_frame_bytes + frame_bytes <= prepared_frame_budget:
-                    raw_copy = raw_target_image.copy()
-                    processed_copy = (
-                        raw_copy if target_image is raw_target_image else target_image.copy()
-                    )
-                    prepared_frames[len(active_records)] = (raw_copy, processed_copy)
-                    prepared_frame_bytes += frame_bytes
-                active_records.append(record)
-                previous_image = target_image
-                progress.setValue(index)
-                status_label.setText(
-                    f"Prepared {len(active_records)} frame(s) for one SAM3 memory session..."
-                )
-            if writer is not None:
-                writer.release()
-                writer = None
-            if not active_records:
-                return 0
+                target = self._apply_propagation_preprocessing(raw, self._active_propagation_preprocessing_state)
+                if options.get("stop_scene_cut") and self._propagation_scene_changed(previous_image, target):
+                    self._note_propagation_stop(status_label, f"Paused at {record['name']}: likely scene change.")
+                    break
+                pending.clear()
+                pending.update(index=index, record=record, raw=raw, image=target)
+                previous_image = target
+                progress.update(phase="tracking",
+                                message=f"Tracking {index:,} / {len(frame_records):,}: {record['name']}")
+                yield record["name"], cv2.resize(target, (session_w, session_h))
+            sequence["ended"] = True
 
-            inference_lock = getattr(self, "_sam_video_inference_lock", None)
-            if inference_lock is None:
-                inference_lock = threading.RLock()
-                self._sam_video_inference_lock = inference_lock
+        inference_lock = getattr(self, "_sam_video_inference_lock", None)
+        if inference_lock is None:
+            inference_lock = threading.RLock()
+            self._sam_video_inference_lock = inference_lock
+        try:
             with inference_lock:
+                if canceled():
+                    self._note_propagation_stop(status_label, "Stopped by user.")
+                    return 0
+                progress.update(phase="starting", message="Starting SAM3 tracker; no folder-wide preparation is needed...")
                 if prompt_bboxes:
                     self._reset_sam3_video_session(predictor)
-                    results = iter(
-                        predictor(
-                            source=video_path,
-                            bboxes=prompt_bboxes,
-                            stream=True,
-                        )
-                    )
-                    # The first result is the prompted seed frame.
-                    next(results)
+                    source = sam3_frame_source(frames(), len(frame_records) + 1)
+                    results = iter(predictor(source=source, bboxes=prompt_bboxes, stream=True))
                 else:
-                    # Pose-only propagation does not need a SAM3 result stream.
-                    results = iter([None] * len(active_records))
+                    # Pose-only ranges need neither a video codec nor a SAM3 model.
+                    results = (None for _ in frames())
+                next(results)  # Prompted seed only; no target image has been read yet.
                 native_started = True
-                for index, record in enumerate(active_records, start=1):
-                    QApplication.processEvents()
-                    if progress.wasCanceled():
-                        self._propagation_stop_requested = True
-                    if getattr(self, "_propagation_stop_requested", False):
+                for result in results:
+                    if canceled():
+                        self._note_propagation_stop(status_label, "Stopped by user.")
                         break
-                    result = next(results)
-                    cached_frames = prepared_frames.pop(index - 1, None)
-                    if cached_frames is not None:
-                        raw_target_image, target_image = cached_frames
-                    else:
-                        raw_target_image = record["read"]()
-                        if raw_target_image is None or raw_target_image.size == 0:
-                            status_label.setText(
-                                f"Stopped: could not reread frame {record['name']}."
-                            )
-                            break
-                        target_image = self._apply_propagation_preprocessing(
-                            raw_target_image, self._active_propagation_preprocessing_state
-                        )
+                    index, record = pending["index"], pending["record"]
+                    raw_target_image, target_image = pending["raw"], pending["image"]
+                    if record.get("skip_missing") and not os.path.isfile(record["image_path"]):
+                        progress.update(current=index, message=f"Skipped missing image: {record['name']}")
+                        continue
                     target_h, target_w = target_image.shape[:2]
-                    masks = (
-                        self._sam3_result_masks(
-                            result, target_w, target_h, preserve_slots=True
-                        )
-                        if result is not None
-                        else []
-                    )
-                    native_lines, native_hidden = self._update_native_occlusion_tracks(
-                        target_image,
-                        masks,
-                        native_tracks,
-                    )
-                    pose_lines, pose_hidden = self._update_pose_occlusion_tracks(
-                        target_image,
-                        pose_tracks,
-                        options["confidence"],
-                    )
+                    masks = self._sam3_result_masks(result, target_w, target_h, preserve_slots=True) if result is not None else []
+                    native_lines, native_hidden = self._update_native_occlusion_tracks(target_image, masks, native_tracks)
+                    pose_lines, pose_hidden = self._update_pose_occlusion_tracks(target_image, pose_tracks, options["confidence"])
                     new_lines = native_lines + pose_lines
                     hidden_count = native_hidden + pose_hidden
-                    active_count = sum(
-                        1
-                        for track in native_tracks + pose_tracks
-                        if track.get("active", True)
-                    )
                     self._last_propagation_attempted_count = len(native_tracks) + len(pose_tracks)
                     self._last_propagation_rejected_count = hidden_count
-                    if not new_lines:
-                        if active_count > 0 and hidden_count > 0:
-                            progress.setValue(len(frame_records) + index)
-                            status_label.setText(
-                                f"Holding {hidden_count} occluded object(s) at {record['name']}; "
-                                "no guessed labels were saved."
-                            )
-                            continue
-                        status_label.setText(
-                            f"Paused at {record['name']}: all tracked objects were lost."
-                        )
+                    if canceled():
+                        self._note_propagation_stop(status_label, "Stopped by user.")
                         break
-
+                    if not new_lines:
+                        if any(track.get("active", True) for track in native_tracks + pose_tracks) and hidden_count > 0:
+                            progress.update(current=index, phase="tracking",
+                                            message=f"Holding {hidden_count} occluded object(s) at {record['name']}; no guessed labels saved.")
+                            continue
+                        self._note_propagation_stop(status_label, f"Paused at {record['name']}: all tracked objects were lost.")
+                        break
                     label_path = record["label_path"]
-                    existing = (
-                        self.load_label_lines(label_path)
-                        if os.path.exists(label_path)
-                        else []
-                    )
+                    existing = self.load_label_lines(label_path) if os.path.exists(label_path) else []
                     merged, changed, review_needed = self._merge_propagated_lines(
-                        existing,
-                        new_lines,
-                        options["existing"],
-                        (target_w, target_h),
+                        existing, new_lines, options["existing"], (target_w, target_h)
                     )
                     if review_needed:
-                        status_label.setText(
-                            f"Paused at {record['name']}: an existing label needs review."
-                        )
+                        self._note_propagation_stop(status_label, f"Paused at {record['name']}: an existing label needs review.")
                         break
                     if changed:
-                        self._backup_propagation_label(manifest, label_path)
-                        os.makedirs(os.path.dirname(label_path), exist_ok=True)
-                        if not self._write_label_lines(label_path, merged):
-                            status_label.setText(f"Stopped: could not save {label_path}.")
+                        if canceled():
+                            self._note_propagation_stop(status_label, "Stopped by user.")
                             break
-                        if record.get("save_image"):
-                            image_path = record.get("image_path")
-                            if image_path:
-                                self._backup_propagation_label(manifest, image_path)
-                            record["save_image"](raw_target_image)
+                        if not save_propagation_outputs(self, record, raw_target_image, merged, manifest):
+                            self._note_propagation_stop(status_label, f"Stopped: could not save propagated frame {record['name']}. Undo is available.")
+                            break
                         changed_count += 1
-
-                    progress.setValue(len(frame_records) + index)
-                    status_label.setText(
-                        f"Persistent SAM3: propagated {changed_count} frame(s); "
-                        f"processing {record['name']}"
-                        + (f"; holding {hidden_count} occluded" if hidden_count else "")
-                        + "..."
-                    )
+                    progress.update(current=index, phase="tracking", updated=changed_count,
+                                    message=f"Tracked {index:,} / {len(frame_records):,}; {changed_count:,} updated."
+                                    + (f" Holding {hidden_count} occluded object(s)." if hidden_count else ""))
+                else:
+                    if not sequence["ended"] and not canceled():
+                        self._note_propagation_stop(status_label, "Persistent SAM3 stopped: the result stream ended early.")
+                if canceled() and not getattr(self, "_last_propagation_stop_reasons", []):
+                    self._note_propagation_stop(status_label, "Stopped by user.")
             return changed_count
-        except (StopIteration, RuntimeError, ValueError, OSError) as e:
-            logger.warning("Persistent SAM3 propagation session failed: %s", e)
+        except (StopIteration, RuntimeError, ValueError, OSError) as error:
+            logger.warning("Persistent SAM3 propagation session failed: %s", error)
             if native_started:
-                status_label.setText(
-                    f"Persistent SAM3 stopped after {changed_count} updated frame(s): {e}"
-                )
+                self._note_propagation_stop(status_label,
+                    f"Persistent SAM3 stopped after {changed_count} updated frame(s): {str(error) or 'the result stream ended early.'}")
                 return changed_count
             return None
-        except Exception as e:
-            logger.exception("Unexpected persistent SAM3 propagation failure: %s", e)
+        except Exception as error:
+            logger.exception("Unexpected persistent SAM3 propagation failure: %s", error)
             if native_started:
-                status_label.setText(
-                    f"Persistent SAM3 stopped after {changed_count} updated frame(s)."
-                )
+                self._note_propagation_stop(status_label,
+                    f"Persistent SAM3 stopped after {changed_count} updated frame(s): {error}")
                 return changed_count
             return None
         finally:
-            if writer is not None:
-                writer.release()
-            try:
-                cleanup_lock = getattr(self, "_sam_video_inference_lock", None)
-                if cleanup_lock is None:
-                    self._reset_sam3_video_session(predictor)
-                else:
-                    with cleanup_lock:
+            # Closing a partially consumed predictor generator releases its own
+            # lock/context before resetting temporal state for a future run.
+            with inference_lock:
+                try:
+                    close_results = getattr(results, "close", None)
+                    if close_results is not None:
+                        close_results()
+                finally:
+                    if source is not None:
+                        source.close()
+                    if predictor is not None:
                         self._reset_sam3_video_session(predictor)
-            except Exception:
-                pass
-            try:
-                os.remove(video_path)
-            except OSError:
-                pass
-            progress.close()
 
     def _run_propagation_frames_fallback(
         self, frame_records, seed_image, seed_lines, options, manifest, status_label
     ):
-        """Retain the safe pairwise path for unavailable native SAM3 sessions."""
-        previous_image = seed_image
-        previous_lines = list(seed_lines)
+        """Pairwise compatibility path; the range worker owns all model work."""
+        previous_image, previous_lines = seed_image, list(seed_lines)
         changed_count = 0
-        progress = QtWidgets.QProgressDialog("Propagating labels...", "Stop", 0, len(frame_records), self)
-        progress.setWindowTitle("Propagate Labels")
-        progress.setWindowModality(Qt.WindowModal)
-        progress.setMinimumDuration(0)
-
+        progress = propagation_status(status_label, len(frame_records))
         for index, record in enumerate(frame_records, start=1):
-            QApplication.processEvents()
-            if progress.wasCanceled():
-                self._propagation_stop_requested = True
-            if getattr(self, "_propagation_stop_requested", False):
+            if getattr(self, "_propagation_stop_requested", False) or progress.canceled():
+                self._note_propagation_stop(status_label, "Stopped by user.")
                 break
+            progress.update(current=index - 1, phase="reading",
+                            message=f"Reading {index:,} / {len(frame_records):,}: {record['name']}")
             raw_target_image = record["read"]()
+            if getattr(self, "_propagation_stop_requested", False) or progress.canceled():
+                self._note_propagation_stop(status_label, "Stopped by user.")
+                break
             if raw_target_image is None or raw_target_image.size == 0:
-                status_label.setText(f"Stopped: could not read frame {record['name']}.")
+                if record.get("skip_missing") and not os.path.isfile(record["image_path"]):
+                    progress.update(current=index, message=f"Skipped missing image: {record['name']}")
+                    continue
+                self._note_propagation_stop(status_label, f"Stopped: could not read frame {record['name']}.")
                 break
-            target_image = self._apply_propagation_preprocessing(
-                raw_target_image, self._active_propagation_preprocessing_state
-            )
+            target_image = self._apply_propagation_preprocessing(raw_target_image, self._active_propagation_preprocessing_state)
             if options.get("stop_scene_cut") and self._propagation_scene_changed(previous_image, target_image):
-                status_label.setText(f"Paused at {record['name']}: likely scene change.")
+                self._note_propagation_stop(status_label, f"Paused at {record['name']}: likely scene change.")
                 break
-
-            new_lines = self._propagate_lines_to_frame_best(
-                previous_image, target_image, previous_lines, options["confidence"]
-            )
+            if getattr(self, "_propagation_stop_requested", False) or progress.canceled():
+                self._note_propagation_stop(status_label, "Stopped by user.")
+                break
+            progress.update(phase="tracking",
+                            message=f"Tracking {index:,} / {len(frame_records):,}: {record['name']}")
+            new_lines = self._propagate_lines_to_frame_best(previous_image, target_image, previous_lines, options["confidence"])
+            if getattr(self, "_propagation_stop_requested", False) or progress.canceled():
+                self._note_propagation_stop(status_label, "Stopped by user.")
+                break
             if not new_lines:
-                status_label.setText(f"Paused at {record['name']}: SAM3 or pose confidence was insufficient.")
+                self._note_propagation_stop(status_label, f"Paused at {record['name']}: SAM3 or pose confidence was insufficient.")
                 break
-
             label_path = record["label_path"]
             existing = self.load_label_lines(label_path) if os.path.exists(label_path) else []
-            h, w = target_image.shape[:2]
-            merged, changed, review_needed = self._merge_propagated_lines(
-                existing, new_lines, options["existing"], (w, h)
-            )
+            height, width = target_image.shape[:2]
+            merged, changed, review_needed = self._merge_propagated_lines(existing, new_lines, options["existing"], (width, height))
             if review_needed:
-                status_label.setText(f"Paused at {record['name']}: an existing label needs review.")
+                self._note_propagation_stop(status_label, f"Paused at {record['name']}: an existing label needs review.")
                 break
             if changed:
-                self._backup_propagation_label(manifest, label_path)
-                os.makedirs(os.path.dirname(label_path), exist_ok=True)
-                if not self._write_label_lines(label_path, merged):
-                    status_label.setText(f"Stopped: could not save {label_path}.")
+                if record.get("skip_missing") and not os.path.isfile(record["image_path"]):
+                    continue
+                if getattr(self, "_propagation_stop_requested", False) or progress.canceled():
+                    self._note_propagation_stop(status_label, "Stopped by user.")
                     break
-                if record.get("save_image"):
-                    image_path = record.get("image_path")
-                    if image_path:
-                        self._backup_propagation_label(manifest, image_path)
-                    record["save_image"](raw_target_image)
+                if not save_propagation_outputs(self, record, raw_target_image, merged, manifest):
+                    self._note_propagation_stop(status_label, f"Stopped: could not save propagated frame {record['name']}. Undo is available.")
+                    break
                 changed_count += 1
-
-            previous_image = target_image
-            previous_lines = new_lines
-            progress.setValue(index)
-            status_label.setText(f"Propagated {changed_count} frame(s); processing {record['name']}...")
-
-        progress.close()
+            previous_image, previous_lines = target_image, new_lines
+            progress.update(current=index, phase="tracking", updated=changed_count,
+                            message=f"Tracked {index:,} / {len(frame_records):,}; {changed_count:,} updated.")
         return changed_count
+
+    def _compute_propagation_frames(self, frame_records, seed_image, seed_lines, options, manifest, status):
+        """Worker-only dispatch: no widgets or GUI event pumping."""
+        progress = propagation_status(status, len(frame_records))
+        if progress.canceled() or getattr(self, "_propagation_stop_requested", False):
+            self._note_propagation_stop(status, "Stopped by user.")
+            return 0
+        processed_seed = self._apply_propagation_preprocessing(seed_image, self._active_propagation_preprocessing_state)
+        progress.update(phase="loading", message="Loading the propagation tracker...")
+        pose_only = all(
+            self._label_type(BoundingBox.from_str(line, preferred_polygon_type=self._polygon_label_parse_preference())) == "keypoints"
+            for line in seed_lines
+        )
+        predictor = None if pose_only else self.ensure_sam_video_predictor_loaded(imgsz=self._sam_imgsz())
+        if progress.canceled() or getattr(self, "_propagation_stop_requested", False):
+            self._note_propagation_stop(status, "Stopped by user.")
+            return 0
+        if predictor is not None or pose_only:
+            count = self._run_propagation_frames_native_session(
+                frame_records, processed_seed, seed_lines, options, manifest, progress, predictor
+            )
+            if count is not None:
+                return count
+            logger.warning("Persistent SAM3 unavailable before tracking; using pairwise fallback.")
+        return self._run_propagation_frames_fallback(
+            frame_records, processed_seed, seed_lines, options, manifest, progress
+        )
 
     def _run_propagation_frames(
         self, frame_records, seed_image, seed_lines, options, manifest, status_label
@@ -59565,50 +62658,55 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             getattr(self, "_sam3_propagation_warmup_worker", None),
             getattr(self, "_adjacent_propagation_worker", None),
         )) or getattr(self, "_sam3_propagation_batch_active", False):
-            status_label.setText("The propagation tracker is busy preparing or processing a frame. Try Propagate again when it is ready.")
+            self._note_propagation_stop(status_label, "The propagation tracker is busy preparing or processing a frame. Try Propagate again when it is ready.")
             return 0
         self._sam3_propagation_batch_active = True
         try:
             self._active_propagation_preprocessing_state = self._preprocessing_state_snapshot()
-            processed_seed = self._apply_propagation_preprocessing(
-                seed_image, self._active_propagation_preprocessing_state
+            self._active_propagation_polygon_preference = self._polygon_label_parse_preference()
+            classes = getattr(self, "classes_dropdown", None)
+            self._active_propagation_class_names = (
+                tuple(classes.itemText(index) for index in range(classes.count()))
+                if classes is not None else tuple(getattr(self, "class_names", ()) or ())
             )
-            predictor = self.ensure_sam_video_predictor_loaded(imgsz=self._sam_imgsz())
-            if predictor is not None:
-                changed_count = self._run_propagation_frames_native_session(
-                    frame_records,
-                    processed_seed,
-                    seed_lines,
-                    options,
-                    manifest,
-                    status_label,
-                    predictor,
-                )
-                if changed_count is not None:
-                    return changed_count
-                logger.warning(
-                    "Persistent SAM3 was unavailable before propagation began; using pairwise fallback."
-                )
-            return self._run_propagation_frames_fallback(
-                frame_records, processed_seed, seed_lines, options, manifest, status_label
+            for timer_name in ("stop_next_timer", "stop_prev_timer"):
+                stop_timer = getattr(self, timer_name, None)
+                if stop_timer is not None:
+                    stop_timer()
+            auto_scan = getattr(self, "auto_scan_checkbox", None)
+            if auto_scan is not None:
+                auto_scan.setChecked(False)
+            if not len(frame_records):
+                return 0
+            return run_propagation_worker(
+                self,
+                lambda status: self._compute_propagation_frames(frame_records, seed_image, seed_lines, options, manifest, status),
+                status_label, len(frame_records), self.stop_label_propagation,
+                lambda: bool(getattr(self, "_propagation_stop_requested", False)),
+                unit=options.get("_progress_unit", "images"),
             )
         finally:
             self._active_propagation_preprocessing_state = None
+            self._active_propagation_polygon_preference = None
+            self._active_propagation_class_names = None
             self._sam3_propagation_batch_active = False
-            if not getattr(self, "_image_navigation_propagation_enabled", False) or getattr(
-                self, "_sam3_propagation_release_pending", False
-            ):
+            if not getattr(self, "_image_navigation_propagation_enabled", False) or getattr(self, "_sam3_propagation_release_pending", False):
                 self._sam3_propagation_release_pending = True
                 self._release_sam_video_propagation_runtime()
 
     def propagate_image_sequence_labels(self, options, status_label):
-        if self._propagation_video_annotation_context() is not None:
+        video_context = self._propagation_video_annotation_context()
+        if video_context is not None and sparse_video_navigation(video_context):
             return self.propagate_video_labels(options, status_label)
         self._propagation_stop_requested = False
+        self._last_propagation_stop_reasons = []
         seed_lines = self._propagation_seed_lines_from_image(options["objects"])
         if not seed_lines or not self._propagation_pose_ready(seed_lines):
             return False
-        files = [self.normalize_path(path) for path in (self.filtered_image_files or self.image_files) if path]
+        active_files = getattr(self, "filtered_image_files", None)
+        if active_files is None:
+            active_files = self.image_files
+        files = [self.normalize_path(path) for path in active_files if path]
         current = self.normalize_path(self.current_file)
         try:
             start_index = files.index(current)
@@ -59624,15 +62722,22 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         manifest = self._begin_propagation_batch(os.path.dirname(current), "images")
         total_changed = 0
         for direction in directions:
-            indexes = list(range(start_index + direction, len(files) if direction > 0 else -1, direction))[:limit]
-            records = [
-                {
-                    "name": os.path.basename(files[index]),
-                    "label_path": self.get_label_file(files[index]),
-                    "read": lambda path=files[index]: self._read_image_cv(path),
-                }
-                for index in indexes
-            ]
+            records = []
+            for index in range(start_index + direction, len(files) if direction > 0 else -1, direction):
+                path = files[index]
+                # A directory-watch result may lag a deletion. Missing entries
+                # do not consume the requested range or abort surviving images.
+                if not os.path.isfile(path):
+                    continue
+                records.append({
+                    "name": os.path.basename(path),
+                    "image_path": path,
+                    "skip_missing": True,
+                    "label_path": self.get_label_file(path),
+                    "read": lambda path=path: self._read_image_cv(path),
+                })
+                if len(records) >= limit:
+                    break
             total_changed += self._run_propagation_frames(
                 records, seed_image, seed_lines, options, manifest, status_label
             )
@@ -59642,14 +62747,18 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         completed = self._finish_propagation_batch(manifest)
         if self.current_file:
             self.display_image(self.current_file, rebuild_preview=True)
+        reasons = self._last_propagation_stop_reasons
         status_label.setText(
-            f"Propagation finished: {total_changed} image(s) updated."
+            f"Propagation {'stopped' if reasons else 'finished'}: {total_changed} image(s) updated."
+            + (" " + " ".join(reasons) if reasons else "")
             + (" Undo is available." if completed else "")
         )
         return completed
 
     def propagate_video_labels(self, options, status_label):
+        options = dict(options, _progress_unit="frames")
         self._propagation_stop_requested = False
+        self._last_propagation_stop_reasons = []
         video_context = self._propagation_video_annotation_context()
         seed_lines = self._propagation_seed_lines_from_video(options["objects"])
         if not seed_lines:
@@ -59696,13 +62805,25 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         directions = [1, -1] if options["direction"] == "both" else [1 if options["direction"] == "forward" else -1]
         manifest = self._begin_propagation_batch(str(output_dir), "video")
         total_changed = 0
+        deletion_manifest = (
+            video_context.get("manifest") if video_context is not None
+            else read_json_file(str(output_dir / ".darkfusion" / "video_annotations.json"), default={})
+        ) or {}
+        deleted_frames = (
+            excluded_video_frames(deletion_manifest)
+            if deletion_manifest.get("source") == os.path.abspath(source) else set()
+        )
         try:
             for direction in directions:
-                frame_numbers = list(range(start_frame + direction, total_frames if direction > 0 else -1, direction))[:limit]
-                records = []
-                for frame_number in frame_numbers:
+                frame_numbers = [
+                    number for number in range(start_frame + direction, total_frames if direction > 0 else -1, direction)
+                    if number not in deleted_frames
+                ][:limit]
+                image_extension = self.get_image_extension()
+
+                def build_record(frame_number):
                     canonical_image, canonical_label = extraction_frame_paths(
-                        output_dir, source_path.stem, frame_number, self.get_image_extension()
+                        output_dir, source_path.stem, frame_number, image_extension
                     )
                     for extension in OUTPUT_IMAGE_SUFFIXES:
                         candidate = os.path.splitext(canonical_image)[0] + extension
@@ -59710,32 +62831,34 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                             canonical_image = candidate
                             break
                     image_path = Path(canonical_image)
-                    label_path = Path(canonical_label)
 
                     def read_frame(number=frame_number, path=str(image_path)):
                         if os.path.isfile(path):
                             return self._read_image_cv(path)
-                        capture.set(cv2.CAP_PROP_POS_FRAMES, number)
+                        if int(capture.get(cv2.CAP_PROP_POS_FRAMES)) != number:
+                            capture.set(cv2.CAP_PROP_POS_FRAMES, number)
                         ok, frame = capture.read()
                         return transform_video_frame_by_settings(frame, transform_settings) if ok else None
 
-                    def save_frame(frame, path=str(image_path), number=frame_number):
-                        saved = os.path.isfile(path) or save_cv_image(path, frame)
-                        if saved:
-                            self._record_video_annotation_frame(
-                                source, number, path, os.path.splitext(path)[0] + ".txt",
-                                transform_settings=transform_settings,
-                                total_frames=total_frames, fps=video_fps,
-                            )
-                        return saved
+                    def record_saved_frame(_frame, path=str(image_path), number=frame_number):
+                        self._record_video_annotation_frame(
+                            source, number, path, os.path.splitext(path)[0] + ".txt",
+                            transform_settings=transform_settings,
+                            total_frames=total_frames, fps=video_fps,
+                        )
 
-                    records.append({
+                    return {
                         "name": f"frame {frame_number}",
-                        "label_path": str(label_path),
+                        "label_path": canonical_label,
                         "image_path": str(image_path),
                         "read": read_frame,
-                        "save_image": save_frame,
-                    })
+                        "image_writer": save_cv_image,
+                        "on_saved": record_saved_frame,
+                    }
+
+                # Existence checks, decode and transform now happen in the
+                # worker only when that exact source frame is requested.
+                records = LazyPropagationRecords(frame_numbers, build_record)
                 total_changed += self._run_propagation_frames(
                     records, seed_image, seed_lines, options, manifest, status_label
                 )
@@ -59745,8 +62868,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             capture.release()
 
         completed = self._finish_propagation_batch(manifest)
+        reasons = self._last_propagation_stop_reasons
         status_label.setText(
-            f"Video propagation finished: {total_changed} frame(s) saved to the shared dataset {output_dir}."
+            f"Video propagation {'stopped' if reasons else 'finished'}: {total_changed} frame(s) saved to the shared dataset {output_dir}."
+            + (" " + " ".join(reasons) if reasons else "")
             + (" Undo is available." if completed else "")
         )
         if total_changed and options.get("open_results"):
@@ -59766,37 +62891,42 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if not manifest:
             QMessageBox.information(self, "Undo Propagation", "No propagation batch is available to undo.")
             return False
-        restored = 0
-        for record in reversed(manifest.get("files", [])):
-            target = record.get("target", "")
+        result = undo_propagation_outputs(manifest)
+        restored, failures = result["restored"], result["failures"]
+        manifest["files"] = result["remaining_files"]
+        self._last_propagation_manifest = manifest if failures else None
+        manifest_path = manifest.get("manifest_path")
+        if manifest_path:
             try:
-                if record.get("existed") and os.path.isfile(record.get("backup", "")):
-                    shutil.copy2(record["backup"], target)
-                elif target and os.path.exists(target):
-                    os.remove(target)
-                restored += 1
-            except OSError as e:
-                logger.warning(f"Could not undo propagated label {target}: {e}")
-        self._last_propagation_manifest = None
-        self.image_files = [path for path in (self.image_files or []) if os.path.exists(path)]
-        self.filtered_image_files = [path for path in (self.filtered_image_files or []) if os.path.exists(path)]
-        self._prune_missing_dataset_files()
-        if self.current_file and os.path.exists(self.current_file):
-            self.display_image(self.current_file, rebuild_preview=True)
-        elif self.filtered_image_files:
-            self.current_img_index = 0
-            self.current_image_index = 0
-            self.current_file = self.filtered_image_files[0]
-            self.update_list_view(self.filtered_image_files)
-            self.display_image(self.current_file, rebuild_preview=True)
-        else:
-            self.current_file = None
-            if hasattr(self, "display_placeholder"):
-                self.display_placeholder()
-        message = f"Undid the last propagation batch ({restored} label file(s))."
+                write_json_file_atomic(manifest_path, manifest)
+            except OSError as error:
+                logger.warning("Could not persist propagation Undo progress: %s", error)
+        if restored:
+            self.image_files = [path for path in (self.image_files or []) if os.path.exists(path)]
+            self.filtered_image_files = [path for path in (self.filtered_image_files or []) if os.path.exists(path)]
+            self._prune_missing_dataset_files()
+            if self.current_file and os.path.exists(self.current_file):
+                self.display_image(self.current_file, rebuild_preview=True)
+            elif self.filtered_image_files:
+                self.current_img_index = 0
+                self.current_image_index = 0
+                self.current_file = self.filtered_image_files[0]
+                self.update_list_view(self.filtered_image_files)
+                self.display_image(self.current_file, rebuild_preview=True)
+            else:
+                self.current_file = None
+                if hasattr(self, "display_placeholder"):
+                    self.display_placeholder()
+        message = (
+            f"Undo incomplete: {restored} file(s) restored; {len(manifest['files'])} file(s) kept for retry. "
+            + " ".join(failures[:3])
+            if failures else f"Undid the last propagation batch ({restored} file(s))."
+        )
         if status_label is not None:
             status_label.setText(message)
-        return True
+        elif failures:
+            QMessageBox.warning(self, "Undo Propagation Incomplete", message)
+        return not failures
 
     def navigate_frame(self, direction):
         """Navigate one image forward or backward."""
@@ -59816,6 +62946,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         current_frame_index = int(context["frame_index"])
         target_frame_index = current_frame_index + int(offset)
         total_frames = self._video_annotation_total_frame_count(context)
+        deleted_frames = excluded_video_frames(context.get("manifest") or {})
+        direction = 1 if int(offset) > 0 else -1
+        while target_frame_index in deleted_frames:
+            target_frame_index += direction
         if target_frame_index < 0 or (total_frames > 0 and target_frame_index >= total_frames):
             self.stop_next_timer()
             self.stop_prev_timer()
@@ -59866,36 +63000,48 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self._ensure_video_dataset_metadata(output_dir)
 
         # Keep the current working frame if decoding/saving the next one fails.
+        removed_current = False
         if save_current and scene is not None and not self.is_placeholder_file(current_file):
-            self._discard_unlabeled_sparse_video_frame(context, current_file)
+            removed_current = (
+                self._discard_unlabeled_sparse_video_frame(context, current_file)
+                and not os.path.isfile(current_file)
+            )
 
         def video_frame_sort_key(path):
             match = re.search(r"_frame_(\d+)$", Path(path).stem, flags=re.IGNORECASE)
             return int(match.group(1)) if match else float("inf")
 
         normalized_target = self.normalize_path(image_path)
-        all_images = [
-            self.normalize_path(path)
-            for path in (self.image_files or [])
-            if os.path.exists(path) and not self.is_placeholder_file(path)
-        ]
-        if normalized_target not in all_images:
-            all_images.append(normalized_target)
-        self.image_files = sorted(all_images, key=video_frame_sort_key)
-        filtered = [
-            self.normalize_path(path)
-            for path in (self.filtered_image_files or [])
-            if os.path.exists(path) and not self.is_placeholder_file(path)
-        ]
-        if normalized_target not in filtered:
-            filtered.append(normalized_target)
-        self.filtered_image_files = sorted(filtered, key=video_frame_sort_key)
+
+        def select_target(files, current_index):
+            # Existing frames are already in the dataset. Do not stat,
+            # normalize and sort the entire folder on every Prev/Next press.
+            # The directory watcher handles unrelated additions/deletions.
+            files = files if files is not None else []
+            changed = False
+            if removed_current:
+                files = [path for path in files if self.normalize_path(path) != current_file]
+                changed = True
+            hint = int(current_index or 0) + int(offset)
+            if 0 <= hint < len(files) and self.normalize_path(files[hint]) == normalized_target:
+                return files, hint, changed
+            try:
+                return files, files.index(normalized_target), changed
+            except ValueError:
+                # A newly materialized frame (or a frame outside the active
+                # filter) changes membership, so only then rebuild the order.
+                files = sorted([*files, normalized_target], key=video_frame_sort_key)
+                return files, files.index(normalized_target), True
+
+        self.image_files, full_index, _ = select_target(
+            self.image_files, getattr(self, "current_image_index", 0)
+        )
+        self.filtered_image_files, filtered_index, list_changed = select_target(
+            self.filtered_image_files, getattr(self, "current_img_index", 0)
+        )
         self.current_file = normalized_target
-        self.current_img_index = self.filtered_image_files.index(normalized_target)
-        try:
-            self.current_image_index = [self.normalize_path(path) for path in self.image_files].index(normalized_target)
-        except ValueError:
-            self.current_image_index = self.current_img_index
+        self.current_img_index = filtered_index
+        self.current_image_index = full_index
         self._video_annotation_return_source = source
         self._video_annotation_return_frame = target_frame_index
         self._video_annotation_return_output_dir = output_dir
@@ -59904,7 +63050,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.settings["lastImage"] = normalized_target
         self.settings["lastImageIndex"] = int(self.current_img_index)
         self.queue_settings_save(delay_ms=1000)
-        self.update_list_view(self.filtered_image_files)
+        if list_changed:
+            # All existing paths came from the active dataset and the target
+            # was just checked above. Avoid a synchronous per-file disk scan.
+            self.update_list_view(self.filtered_image_files, validate_files=False)
         self.display_image(normalized_target, rebuild_preview=True)
         self.sync_list_view_selection(normalized_target)
         if (
@@ -59940,6 +63089,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
     def navigate_by_offset(self, offset):
         """Jump directly by an image offset while loading only the destination."""
+        if getattr(self, "_image_deletion_in_progress", False) or getattr(self, "_sam3_propagation_batch_active", False):
+            return False
         if isinstance(getattr(self, "_validation_review_restore_state", None), dict):
             try:
                 issue_offset = int(offset)
@@ -59952,15 +63103,21 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if getattr(self, "navigation_busy", False):
             logger.debug("Navigation blocked: navigation_busy is True. Navigation may be stuck from previous operation.")
             return False
+
+        propagate = bool(getattr(self, "_image_navigation_propagation_enabled", False))
+        if propagate and not gpu_model_allowed(self, "sam_video"):
+            self.stop_next_timer()
+            self.stop_prev_timer()
+            return False  # Do not silently skip enabled propagation during a GPU job.
         if (
-            getattr(self, "_image_navigation_propagation_enabled", False)
-            and self.qthread_is_running(getattr(self, "_adjacent_propagation_worker", None))
+            propagate
+            and getattr(self, "_adjacent_propagation_worker", None) is not None
         ):
             self.stop_next_timer()
             self.stop_prev_timer()
             if hasattr(self, "statusBar"):
                 self.statusBar().showMessage(
-                    "Propagation is still running. Correct this frame when it finishes, then continue.",
+                    "Waiting for propagation on this frame to finish...",
                     4000,
                 )
             return False
@@ -59982,9 +63139,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
             current_file = self.normalize_path(self.current_file)
             video_context = self.video_annotation_context_for_image(current_file)
-            if video_context is not None:
+            if video_context is not None and sparse_video_navigation(video_context):
                 return self._navigate_video_annotation_by_offset(
-                    video_context, offset, current_file
+                    video_context, offset, current_file, allow_propagation=propagate
                 )
 
             files = getattr(self, "filtered_image_files", []) or []
@@ -60015,6 +63172,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 return False
 
             new_file = files[new_index]
+            self._image_prefetch_direction = 1 if offset > 0 else -1
 
             if not self.is_placeholder_file(current_file):
                 scene = self.screen_view.scene()
@@ -60026,7 +63184,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                         scene=scene,
                     )
 
-            if getattr(self, "_image_navigation_propagation_enabled", False):
+            if propagate:
                 if abs(offset) == 1:
                     propagation_message = "Propagation is starting in the background..."
                 else:
@@ -60063,7 +63221,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 return False
 
             if (
-                getattr(self, "_image_navigation_propagation_enabled", False)
+                propagate
                 and abs(offset) == 1
             ):
                 self._start_adjacent_propagation(current_file, self.current_file)
@@ -60094,25 +63252,34 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         finally:
             self.navigation_busy = False
 
-    # Updated next_frame and previous_frame to use the modified method
+    def _navigation_step_pending(self):
+        # A worker can stop before its queued result has been applied. Wait
+        # until its finished handler clears the reference, so the next step
+        # uses the completed frame and its saved labels as its source.
+        if getattr(self, "_sam3_propagation_shutting_down", False):
+            return False
+        return bool(
+            getattr(self, "navigation_busy", False)
+            or (
+                getattr(self, "_image_navigation_propagation_enabled", False)
+                and getattr(self, "_adjacent_propagation_worker", None) is not None
+            )
+        )
 
     def next_frame(self):
         # Stop scanning (if in progress)
         self.stop_next_timer()
         self.stop_prev_timer()
 
-        if self.grid_review_is_active():
-            return self.navigate_grid_selection(1)
-
         # Change the direction
         self.scan_direction = 'next'
 
         # Navigate to the next frame
-        moved = self.navigate_frame('next')
+        moved = self.navigate_grid_selection(1) if self.grid_review_is_active() else self.navigate_frame('next')
 
         # Continue while the button is physically held, or while Auto Scan is
         # armed. Navigation advances one image per timer tick in either case.
-        if moved and (self.auto_scan_checkbox.isChecked() or self.next_button.isDown()):
+        if (moved or self._navigation_step_pending()) and (self.auto_scan_checkbox.isChecked() or self.next_button.isDown()):
             self.start_next_timer()
         return moved
 
@@ -60121,16 +63288,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.stop_next_timer()
         self.stop_prev_timer()
 
-        if self.grid_review_is_active():
-            return self.navigate_grid_selection(-1)
-
         # Change the direction
         self.scan_direction = 'previous'
 
         # Navigate to the previous frame
-        moved = self.navigate_frame('previous')
+        moved = self.navigate_grid_selection(-1) if self.grid_review_is_active() else self.navigate_frame('previous')
 
-        if moved and (self.auto_scan_checkbox.isChecked() or self.previous_button.isDown()):
+        if (moved or self._navigation_step_pending()) and (self.auto_scan_checkbox.isChecked() or self.previous_button.isDown()):
             self.start_prev_timer()
         return moved
 
@@ -61362,6 +64526,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         return dataset_dir, image_path, label_path
 
     def update_augmentation_preview(self):
+        if self._object_clarity_augmentation_selected() and not gpu_model_allowed(self, "clarity_augmentation"):
+            return
+        if (getattr(self, "_clarity_augmentation_busy", False)
+                or getattr(self, "_augmentation_job", None) is not None
+                or getattr(self, "_sam3_batch_active", False)):
+            self._clarity_augmentation_preview_pending = True
+            return
         if not self.augmentation_preview_visible():
             return
 
@@ -61389,7 +64560,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             except Exception:
                 labels = []
 
-        image, _labels = self.apply_selected_augmentation_effects(image.copy(), labels)
+        try:
+            image, _labels = self.apply_selected_augmentation_effects(image.copy(), labels)
+        except Exception as error:
+            logger.exception("Augmentation preview failed: %s", error)
+            preview.setPixmap(QPixmap())
+            preview.setText("Preview unavailable; check the log")
+            return
         if image is None or not isinstance(image, np.ndarray) or image.size == 0:
             preview.setPixmap(QPixmap())
             preview.setText("No Preview")
@@ -61672,26 +64849,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         for index, (image_base_name, image_path) in enumerate(image_files_map.items()):
             try:
                 label_path = label_files_map.get(image_base_name)
-                label_lines = self._valid_annotation_lines_from_file(label_path)
-                if not label_lines:
-                    logger.info(f"Skipping copy source with no valid annotations: {image_path}")
-                    continue
-
-                output_ext = self.augmentation_output_extension_for_image(image_path)
-                output_image_name = f"{os.path.splitext(os.path.basename(image_path))[0]}{output_ext}"
-                output_image_path = os.path.join(output_path, output_image_name)
-                if output_ext == normalize_image_extension(os.path.splitext(image_path)[1], default=".jpg"):
-                    shutil.copy2(image_path, output_image_path)
-                else:
-                    image = self._read_image_cv(image_path)
-                    if image is None or not save_cv_image(output_image_path, image, quality=100):
-                        logger.warning(f"Failed saving copied augmentation image: {output_image_path}")
-                        continue
-
-                output_label_path = os.path.join(output_path, os.path.basename(label_path))
-                self._write_label_lines(output_label_path, label_lines)
-
-                copied += 1
+                if self._copy_single_augmentation_source(image_base_name, image_path, label_path, output_path):
+                    copied += 1
             except Exception as e:
                 logger.warning(f"Failed copying augmentation source {image_path}: {e}")
 
@@ -61739,6 +64898,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             if image is None:
                 return None, labels
 
+        if labels and self._object_clarity_augmentation_selected():
+            records = self._object_clarity_annotation_regions(image, labels, polygon_parse_preference)
+            image = self._render_object_clarity_augmentation(image, records)
+            if image is None:
+                return None, labels
+
         if labels and getattr(self, "sight_picture_effect", False):
             image, labels = self.apply_sight_overlay_augmentation(
                 image,
@@ -61782,6 +64947,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         return image, labels
 
+    @gpu_work("Augmentation", keep=lambda owner: ("clarity_augmentation",) if owner._object_clarity_augmentation_selected() else None,
+              until="_augmentation_job")
     def process_images_triggered(self):
         """
         Start or cancel the event-driven augmentation job.
@@ -61827,6 +64994,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             image_effects.append("sight_picture")
         if self.flip_images:
             image_effects.append("mirror")
+        if self._object_clarity_augmentation_selected():
+            image_effects.append("object_clarity")
 
         # Load class names using `load_classes`
         class_names = self.load_classes(data_directory=output_directory)
@@ -61889,6 +65058,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             "jpeg_compression_checkbox",
             "flip_checkbox",
             "make_copy",
+            "object_clarity_augmentation_checkbox",
             "augmentation_percent_spinbox",
             "image_format_combo",
         )
@@ -61955,16 +65125,21 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         output_image_path = os.path.join(output_path, output_image_name)
         source_ext = normalize_image_extension(os.path.splitext(image_path)[1], default=".jpg")
 
+        output_label_path = os.path.join(output_path, os.path.basename(label_path))
         if output_ext == source_ext:
-            shutil.copy2(image_path, output_image_path)
+            image = image_path
+            image_writer = lambda target, source: bool(shutil.copy2(source, target))
         else:
             image = self._read_image_cv(image_path)
-            if image is None or not save_cv_image(output_image_path, image, quality=100):
-                logger.warning("Failed saving copied augmentation image: %s", output_image_path)
-                return False
-
-        output_label_path = os.path.join(output_path, os.path.basename(label_path))
-        return bool(self._write_label_lines(output_label_path, label_lines))
+            if image is None:
+                raise ExtractionWriteError(f"Could not read augmentation source: {image_path}")
+            image_writer = lambda target, frame: save_cv_image(target, frame, quality=100)
+        return save_extraction_outputs(
+            output_image_path, image, image_writer,
+            label_path=output_label_path, labels=label_lines,
+            label_writer=lambda path, lines, mode="w": self._write_label_lines(path, lines),
+            preserve_existing_labels=False,
+        )
 
     def _process_next_augmentation_step(self):
         """Process one augmentation item, then yield back to Qt before continuing."""
@@ -62041,6 +65216,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             return
 
         self._augmentation_job = None
+        if getattr(self, "_clarity_augmentation_preview_pending", False):
+            self._clarity_augmentation_preview_pending = False
+            self.queue_augmentation_preview_update()
         for name, was_enabled in job.get("control_states", {}).items():
             widget = getattr(self, name, None)
             if isinstance(widget, QtWidgets.QWidget):
@@ -62083,7 +65261,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             errors,
             elapsed,
         )
-        if processed == 0:
+        if errors:
+            QMessageBox.warning(
+                self,
+                "Augmentation Finished With Errors",
+                f"{processed} complete output pair(s) were created.\nErrors: {errors}\n"
+                f"Elapsed: {elapsed:.1f} seconds\nCheck the log for failed saves or processing errors.",
+            )
+        elif processed == 0:
             QMessageBox.warning(
                 self,
                 "No Valid Annotations",
@@ -62149,12 +65334,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             output_path, f"{output_folder_name}_{timestamp}_{current_image}{output_ext}"
         )
 
-        if not save_cv_image(output_image_path, image, quality=100):
-            logger.warning(f"Failed to save processed image: {output_image_path}")
-            return
-
         output_label_path = os.path.join(output_path, f"{output_folder_name}_{timestamp}_{current_image}.txt")
-        self._write_label_lines(output_label_path, labels)
+        save_extraction_outputs(
+            output_image_path, image,
+            lambda path, frame: save_cv_image(path, frame, quality=100),
+            label_path=output_label_path, labels=labels,
+            label_writer=lambda path, lines, mode="w": self._write_label_lines(path, lines),
+            preserve_existing_labels=False,
+        )
 
         if update_progress:
             self.set_label_progress(
@@ -63516,6 +66703,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             info["error"] = "Eval weights path does not exist."
             return info
 
+        if not gpu_model_allowed(self, "detector"):
+            info["error"] = "Weight inspection is paused while another GPU workflow is running."
+            return info
+
         try:
             model = YOLO(weights_path)
             info["loaded"] = True
@@ -63705,7 +66896,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             return ""
 
         selected_path = self.normalize_path(target_yaml_path or "")
-        if selected_path and os.path.isfile(selected_path):
+        from darkfusion_training_runs import path_identity
+        if selected_path and path_identity(selected_path) == path_identity(data_yaml):
+            raise ValueError("The training configuration and dataset YAML must be different files.")
+        if selected_path:
             output_path = selected_path
         else:
             output_dir = os.path.dirname(data_yaml)
@@ -64048,91 +67242,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             files.extend(collect_from_entry(entry))
         return sorted(dict.fromkeys(path for path in files if path))
 
-    def _training_eval_yaml_names(self, yaml_data):
-        names = (yaml_data or {}).get("names") if isinstance(yaml_data, dict) else None
-        if isinstance(names, dict):
-            def sort_key(item):
-                key = item[0]
-                try:
-                    return int(key)
-                except Exception:
-                    return str(key)
-            return [str(value) for _key, value in sorted(names.items(), key=sort_key)]
-        if isinstance(names, (list, tuple)):
-            return [str(value) for value in names]
-        return []
-
-    def _training_eval_yaml_image_files(self, data_yaml_path, yaml_data=None, split="train"):
-        data_yaml_path = self.normalize_path(data_yaml_path)
-        if not data_yaml_path or not os.path.exists(data_yaml_path):
-            return []
-
-        yaml_data = yaml_data if isinstance(yaml_data, dict) else None
-        yaml_dir = os.path.dirname(data_yaml_path)
-        if yaml_data is None:
-            try:
-                with open(data_yaml_path, "r", encoding="utf-8", errors="ignore") as f:
-                    yaml_data = yaml.safe_load(f) or {}
-            except Exception:
-                yaml_data = {}
-
-        image_exts = {str(ext).lower() for ext in IMAGE_SUFFIXES}
-        dataset_root = self.normalize_path((yaml_data or {}).get("path", "") or "")
-        if dataset_root and not os.path.isabs(dataset_root):
-            dataset_root = self.normalize_path(os.path.join(yaml_dir, dataset_root))
-        if not dataset_root:
-            dataset_root = yaml_dir
-
-        def resolve_path(value, base_dir=None):
-            value = str(value or "").strip().strip('"').strip("'")
-            if not value:
-                return ""
-            if os.path.isabs(value):
-                return self.normalize_path(value)
-            for base in (base_dir, dataset_root, yaml_dir):
-                base = self.normalize_path(base or "")
-                if not base:
-                    continue
-                candidate = self.normalize_path(os.path.join(base, value))
-                if os.path.exists(candidate):
-                    return candidate
-            return self.normalize_path(os.path.join(dataset_root, value))
-
-        def collect_from_entry(entry, base_dir=None):
-            path = resolve_path(entry, base_dir)
-            if not path:
-                return []
-            ext = os.path.splitext(path)[1].lower()
-            if os.path.isfile(path) and ext == ".txt":
-                files = []
-                list_dir = os.path.dirname(path)
-                try:
-                    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                        for line in f:
-                            resolved = resolve_path(line, list_dir)
-                            if resolved and os.path.isfile(resolved) and os.path.splitext(resolved)[1].lower() in image_exts:
-                                files.append(resolved)
-                except Exception:
-                    return []
-                return files
-            if os.path.isdir(path):
-                files = []
-                for root, _dirs, names in os.walk(path):
-                    for name in names:
-                        if os.path.splitext(name)[1].lower() in image_exts:
-                            files.append(self.normalize_path(os.path.join(root, name)))
-                return files
-            if os.path.isfile(path) and ext in image_exts:
-                return [path]
-            return []
-
-        entries = (yaml_data or {}).get(split)
-        entries = entries if isinstance(entries, list) else [entries]
-        files = []
-        for entry in entries:
-            files.extend(collect_from_entry(entry))
-        return sorted(dict.fromkeys(path for path in files if path))
-
     def _training_eval_data_yaml_needs_auto_refresh(self, data_yaml_path):
         data_yaml_path = self.normalize_path(data_yaml_path or "")
         if not data_yaml_path or not os.path.exists(data_yaml_path):
@@ -64319,29 +67428,85 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         return True
 
     def _training_eval_selected_parameter_args(self, result, use_recommended):
-        from darkfusion_tune_settings import tune_target_path, read_dataset_tuned_hyperparameters
+        from darkfusion_tune_settings import read_dataset_tuned_hyperparameters
 
         rec = (result or {}).get("recommendations", {})
         data_yaml = self.normalize_path(rec.get("data_yaml_path") or (result or {}).get("data_yaml_path") or getattr(self, "data_yaml_path", ""))
         if not data_yaml:
             return list(rec.get("train_args", [])) if use_recommended else []
         if use_recommended:
-            path = self.normalize_path(
-                getattr(self, "recommended_args_path", "") or tune_target_path(data_yaml, True)
-            )
-            if not os.path.isfile(path):
-                return list(rec.get("train_args", []))
-            with open(path, "r", encoding="utf-8") as handle:
-                payload = yaml.safe_load(handle)
-            if not isinstance(payload, dict):
-                raise ValueError(f"Invalid training configuration in {path}")
-            configured_keys = (rec.get("hyperparams", {}) or {}).keys()
-            hyperparams = {key: payload[key] for key in configured_keys if key in payload}
+            # cfg= already supplies its settings. Cached recommendation args
+            # must not silently override a newly browsed or hand-edited cfg.
+            cfg_path = self._training_eval_selected_config_path(result)
+            if not cfg_path and hasattr(self, "recommended_args_path"):
+                raise ValueError("Select the existing training configuration, or turn Recommended Args off.")
+            if cfg_path:
+                from darkfusion_training_runs import path_identity
+                if path_identity(cfg_path) == path_identity(data_yaml):
+                    raise ValueError("The training configuration and dataset YAML must be different files.")
+                if not os.path.isfile(cfg_path):
+                    raise ValueError(f"Selected training configuration does not exist: {cfg_path}")
+                with open(cfg_path, "r", encoding="utf-8") as handle:
+                    if not isinstance(yaml.safe_load(handle), dict):
+                        raise ValueError(f"Invalid training configuration in {cfg_path}")
+                return [f"cfg={cfg_path}"]
+            return list(rec.get("train_args", []))
         else:
             hyperparams = read_dataset_tuned_hyperparameters(data_yaml)
-        blocked = {"data", "model", "imgsz", "epochs", "batch", "project", "name", "resume", "device", "workers", "cache", "save", "val", "plots", "amp", "rect", "freeze", "patience"}
+        blocked = {"data", "model", "imgsz", "epochs", "batch", "project", "name", "resume", "device", "workers", "cache", "save", "val", "plots", "amp", "rect", "freeze", "patience", "exist_ok", "pretrained", "distill_model", "dis", "gpu_per_trial"}
         return [f"{key}={self._training_eval_format_arg_value(value)}" for key, value in hyperparams.items()
-                if str(key).lower() not in blocked]
+                if key in DEFAULT_CFG_DICT and str(key).lower() not in blocked]
+
+    def _training_eval_selected_config_path(self, result):
+        # An existing (even cleared) UI selection takes precedence over cached
+        # evaluation output. Headless/restored callers can use their result.
+        return self.normalize_path(getattr(self, "recommended_args_path", (result or {}).get("training_recommendations_yaml", "")) or "")
+
+    def _training_eval_job_context(self, result):
+        """Freeze output ownership before a background tuning/calibration job."""
+        from copy import deepcopy
+        from darkfusion_tune_settings import tune_target_path
+
+        snapshot = deepcopy(result)
+        settings = getattr(self, "settings", {})
+        use_recommended = bool(settings.get("trainingEvaluatorUseOptimizedArgs", True))
+        data_yaml = snapshot.get("recommendations", {}).get("data_yaml_path") or snapshot.get("data_yaml_path", "")
+        target = (self._training_eval_selected_config_path(snapshot) or tune_target_path(data_yaml, True)) if use_recommended else data_yaml
+        keys = (
+            "ultralyticsDataYamlPath", "ultralyticsPtPath", "ultralyticsModelConfigPath",
+            "ultralyticsPretrainedModelPath", "ultralyticsTask", "ultralyticsTrainImgSize",
+            "ultralyticsTrainBatch", "ultralyticsTrainEpochs", "ultralyticsRect",
+            "ultralyticsFreezeEnabled", "ultralyticsFreeze", "ultralyticsPatienceEnabled",
+            "ultralyticsPatience", "ultralyticsRunsDirectory", "trainingEvaluatorUseOptimizedArgs",
+            "trainingEvaluatorRecommendedArgsYaml",
+        )
+        return {"result": snapshot, "use_recommended": use_recommended,
+                "target_yaml": self.normalize_path(target),
+                "selected_cfg": self._training_eval_selected_config_path(snapshot),
+                "setup": {key: deepcopy(settings.get(key)) for key in keys}}
+
+    def _training_eval_job_context_is_current(self, context):
+        from darkfusion_training_runs import path_identity
+
+        settings = getattr(self, "settings", {})
+
+        def comparable(values):
+            values = dict(values)
+            values["ultralyticsTask"] = str(values.get("ultralyticsTask") or "detect").lower()
+            # Saving global settings reads the legacy controls too. Case and
+            # disabled spin-box minimums must not make an unchanged setup look
+            # like a different job (e.g. detect/Detect, unchecked freeze 0/1).
+            if not values.get("ultralyticsFreezeEnabled"):
+                values["ultralyticsFreeze"] = 0
+            if not values.get("ultralyticsPatienceEnabled"):
+                values["ultralyticsPatience"] = 0
+            for key in ("ultralyticsDataYamlPath", "ultralyticsPtPath", "ultralyticsModelConfigPath",
+                        "ultralyticsPretrainedModelPath", "ultralyticsRunsDirectory", "trainingEvaluatorRecommendedArgsYaml"):
+                values[key] = path_identity(values.get(key))
+            return values
+
+        return (comparable({key: settings.get(key) for key in context["setup"]}) == comparable(context["setup"])
+                and path_identity(self._training_eval_selected_config_path(context["result"])) == path_identity(context["selected_cfg"]))
 
     def read_training_batch_calibration(self, output_path):
         output_path = self.normalize_path(output_path)
@@ -64356,7 +67521,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             logger.warning(f"Could not read batch calibration from {output_path}: {e}")
         return {}, ""
 
-    def apply_training_batch_calibration(self, result, calibration, source_path=""):
+    def apply_training_batch_calibration(self, result, calibration, source_path="", target_yaml=None, use_recommended=None, sync_controls=True):
         if not result or not isinstance(calibration, dict):
             return False
         if calibration.get("error"):
@@ -64384,15 +67549,29 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         calibration_record["batch"] = batch
         result["batch_calibration"] = calibration_record
         result["batch_calibration_path"] = source_path
-        # Try to update currently loaded YAML if available, otherwise create new one
-        loaded_yaml = self.normalize_path(getattr(self, "recommended_args_path", "") or "")
-        result["training_recommendations_yaml"] = self._write_training_recommendation_yaml(result, target_yaml_path=loaded_yaml)
-        self.training_evaluator_last_result = result
-        self.apply_training_evaluation_recommendations(
-            result,
-            apply_weights=False,
-            apply_optimized_args=bool(rec.get("train_args_text")),
-        )
+        if use_recommended is None:
+            use_recommended = bool(getattr(self, "settings", {}).get("trainingEvaluatorUseOptimizedArgs", True))
+        if use_recommended:
+            loaded_yaml = self.normalize_path(target_yaml if target_yaml is not None else self._training_eval_selected_config_path(result))
+            from darkfusion_training_runs import path_identity
+            data_yaml = rec.get("data_yaml_path") or result.get("data_yaml_path", "")
+            if loaded_yaml and path_identity(loaded_yaml) == path_identity(data_yaml):
+                raise ValueError("The training configuration and dataset YAML must be different files.")
+            if loaded_yaml and os.path.isfile(loaded_yaml):
+                with open(loaded_yaml, "r", encoding="utf-8") as handle:
+                    payload = yaml.safe_load(handle)
+                if not isinstance(payload, dict):
+                    raise ValueError(f"Invalid training configuration in {loaded_yaml}")
+                # Calibration owns batch only; do not overwrite a concurrently
+                # edited/tuned configuration with cached recommendations.
+                payload["batch"] = batch
+                self._training_eval_write_text_atomic(loaded_yaml, yaml.safe_dump(payload, sort_keys=False, allow_unicode=True))
+            else:
+                loaded_yaml = self._write_training_recommendation_yaml(result, target_yaml_path=loaded_yaml)
+            result["training_recommendations_yaml"] = loaded_yaml
+        if sync_controls:
+            self.training_evaluator_last_result = result
+            self.apply_training_evaluation_recommendations(result, apply_weights=False, apply_optimized_args=False)
         return True
 
     def evaluate_training_setup(
@@ -65134,6 +68313,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         return record
 
     def _training_eval_record_run(self, title, run_dir, log_path, command=None, process=None):
+        from darkfusion_training_runs import is_training_command
+
         run_dir = self.normalize_path(run_dir)
         log_path = self.normalize_path(log_path or self._training_eval_log_path(run_dir))
         record = {
@@ -65144,39 +68325,53 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             "process": process,
             "pid": int(process.pid) if process is not None and getattr(process, "pid", None) else None,
             "started_at": datetime.now().isoformat(timespec="seconds"),
+            "kind": "train" if is_training_command(command) else "evaluation",
         }
+        if record["pid"] and psutil is not None:
+            try:
+                record["process_created_at"] = psutil.Process(record["pid"]).create_time()
+            except Exception:
+                pass
         self.training_evaluator_active_run = record
         self.training_evaluator_last_run = dict(record)
+        if record["kind"] == "train":
+            self.training_evaluator_active_training_run = record
+            self.training_evaluator_last_training_run = dict(record)
         self._training_eval_discovered_run_cache = None
 
         if isinstance(getattr(self, "settings", None), dict):
             self.settings["trainingEvaluatorLastRunDir"] = run_dir
             self.settings["trainingEvaluatorLastRunLog"] = log_path
             self.settings["trainingEvaluatorLastRunTitle"] = record["title"]
-            command_tokens = [str(part).strip().lower() for part in (command or [])]
-            if "train" in command_tokens:
+            if record["kind"] == "train":
                 self.settings["trainingEvaluatorLastTrainingRunDir"] = run_dir
+                self.settings["trainingEvaluatorLastTrainingRunLog"] = log_path
+                self.settings["trainingEvaluatorLastTrainingRunTitle"] = record["title"]
             self.queue_settings_save()
         return record
 
-    def _training_eval_latest_saved_run(self):
+    def _training_eval_latest_saved_run(self, training_only=False):
         settings = getattr(self, "settings", {}) if isinstance(getattr(self, "settings", None), dict) else {}
         candidates = []
         for record in (
+            getattr(self, "training_evaluator_active_training_run", None) if training_only else None,
+            getattr(self, "training_evaluator_last_training_run", None) if training_only else None,
             getattr(self, "training_evaluator_active_run", None),
             getattr(self, "training_evaluator_last_run", None),
         ):
             if isinstance(record, dict) and record.get("run_dir"):
                 candidates.append(record)
 
-        saved_run_dir = settings.get("trainingEvaluatorLastRunDir", "")
+        saved_prefix = "trainingEvaluatorLastTrainingRun" if training_only else "trainingEvaluatorLastRun"
+        saved_run_dir = settings.get(saved_prefix + "Dir", "")
         if saved_run_dir:
             candidates.append({
-                "title": settings.get("trainingEvaluatorLastRunTitle", "Training"),
+                "title": settings.get(saved_prefix + "Title", "Training"),
                 "run_dir": saved_run_dir,
-                "log_path": settings.get("trainingEvaluatorLastRunLog", ""),
+                "log_path": settings.get(saved_prefix + "Log", ""),
                 "process": None,
                 "pid": None,
+                "kind": "train" if training_only else "",
             })
 
         discovered = self._training_eval_discover_latest_run()
@@ -65184,9 +68379,27 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             candidates.append(discovered)
 
         valid = []
+        seen_run_dirs = set()
         for record in candidates:
             run_dir = self.normalize_path(record.get("run_dir", ""))
             if run_dir and os.path.isdir(run_dir):
+                from darkfusion_training_runs import path_identity
+                run_key = path_identity(run_dir)
+                if run_key in seen_run_dirs:
+                    continue
+                if training_only:
+                    from darkfusion_training_runs import is_training_command
+                    if record.get("kind"):
+                        if record["kind"] != "train":
+                            continue
+                    elif record.get("command"):
+                        if not is_training_command(record["command"]):
+                            continue
+                    else:
+                        args, _ = self._training_eval_read_args_yaml(run_dir)
+                        if str(args.get("mode", "train") or "train").lower() != "train":
+                            continue
+                seen_run_dirs.add(run_key)
                 clean = dict(record)
                 clean["run_dir"] = run_dir
                 clean["log_path"] = self.normalize_path(clean.get("log_path") or self._training_eval_log_path(run_dir))
@@ -65216,8 +68429,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         pid = (record or {}).get("pid")
         if pid and psutil is not None:
             try:
+                from darkfusion_training_runs import process_matches_training_record
                 proc = psutil.Process(int(pid))
-                if proc.is_running() and proc.status() != psutil.STATUS_ZOMBIE:
+                if (proc.is_running() and proc.status() != psutil.STATUS_ZOMBIE
+                        and process_matches_training_record(proc.cmdline(), record)):
+                    created = (record or {}).get("process_created_at")
+                    if created is not None and abs(proc.create_time() - float(created)) > 0.01:
+                        return False
                     return True
             except Exception:
                 pass
@@ -65372,7 +68590,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
     def _training_eval_resume_info(self, record=None):
         if isinstance(record, str):
             record = {"run_dir": record}
-        record = dict(record or self._training_eval_latest_saved_run() or {})
+        record = dict(record or self._training_eval_latest_saved_run(training_only=True) or {})
         run_dir = self.normalize_path(record.get("run_dir", ""))
         log_path = self.normalize_path(record.get("log_path") or self._training_eval_log_path(run_dir))
         info = {
@@ -65473,7 +68691,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         return info
 
     def build_training_evaluator_resume_command(self, run_dir=None):
-        info = self._training_eval_resume_info(run_dir or self._training_eval_latest_saved_run())
+        info = self._training_eval_resume_info(run_dir or self._training_eval_latest_saved_run(training_only=True))
         if not info.get("resumable"):
             raise ValueError(info.get("note") or "No resumable training run was found.")
         last_pt = self.normalize_path(info.get("last_pt", ""))
@@ -65495,6 +68713,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self._append_ultralytics_memory_guard_args(cmd)
         return cmd
 
+    @gpu_work("Training / evaluation", keep=(), external=True, exclusive=True)
     def launch_training_evaluator_logged_command(self, command, title="Training Evaluator", run_dir=None):
         if not command:
             raise ValueError("No command to launch.")
@@ -65859,6 +69078,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         return {
             "task": task,
             "mode": "val",
+            "split": "val",
             "data": data_yaml,
             "model": model_path,
             "imgsz": imgsz,
@@ -65937,6 +69157,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         args = self._training_eval_run_args_from_log(log_path)
         if str(args.get("mode", "")).lower() != "val":
             return {}
+        if str(args.get("split", "val") or "val") != "val":
+            return {}
         metrics = self._training_eval_parse_all_metric_from_log(log_path)
         if not metrics:
             return {}
@@ -66007,6 +69229,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             self._training_eval_resolve_compare_path(target_data, APP_DIR),
             self._training_eval_resolve_compare_path(target_model, APP_DIR),
             target_imgsz,
+            str(target_args.get("split", "val") or "val"),
+            target_split_fingerprint,
             round(float(reference_time), 3),
         )
         now = time.time()
@@ -66043,6 +69267,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                         continue
                     args = record.get("args", {}) or {}
                     if str(args.get("mode", "")).lower() != "val":
+                        continue
+                    if str(args.get("split", "val") or "val") != str(target_args.get("split", "val") or "val"):
                         continue
                     if not self._training_eval_compare_arg_match(target_data, args.get("data", ""), APP_DIR, kind="data"):
                         continue
@@ -66113,7 +69339,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             )
             return text, tooltip
 
-        text = f"Baseline: missing for {model_name} @ {imgsz}. Run Validate Weights."
+        text = f"Baseline: missing for {model_name} @ {imgsz}. Run Metrics Only (mAP) in Validation Review."
         tooltip = "No matching validation baseline was found for the current model, obj.yaml split, and image size."
         return text, tooltip
 
@@ -67310,7 +70536,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         panel_layout.addWidget(self.validation_review_position_label)
         panel_layout.addWidget(self.validation_review_detail_label)
 
-        panel_layout.addWidget(QtWidgets.QLabel("Legend"))
+        self.validation_review_legend_label = QtWidgets.QLabel("Legend")
+        panel_layout.addWidget(self.validation_review_legend_label)
         self.validation_review_gt_checkbox = QtWidgets.QCheckBox("■  Ground truth")
         self.validation_review_gt_checkbox.setChecked(True)
         self.validation_review_gt_checkbox.setStyleSheet("color: #45d483; font-weight: 700;")
@@ -68035,6 +71262,19 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             return self.set_current_validation_review_status("negative_crop_saved")
         return False
 
+    def _fit_similarity_review_docks(self):
+        """Keep the crop/image list usable beside the compact matching summary."""
+        workflow = getattr(self, "menu_dock", None)
+        summary = getattr(self, "validation_review_dock", None)
+        issue = getattr(self, "validation_review_current_issue", None) or {}
+        if (not issue.get("similarity_match") or workflow is None or summary is None
+                or workflow.isFloating() or summary.isFloating()):
+            return
+        if self.dockWidgetArea(workflow) != self.dockWidgetArea(summary):
+            return
+        available = workflow.height() + summary.height()
+        self.resizeDocks([workflow, summary], [max(1, available * 3 // 4), max(1, available // 4)], Qt.Vertical)
+
     def _show_validation_review_issue(self, index, save_edits=True):
         issues = list(getattr(self, "validation_review_queue", []) or [])
         if not issues:
@@ -68047,6 +71287,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if not image_path or not os.path.isfile(image_path):
             self.statusBar().showMessage(f"Review image is missing: {image_path}", 5000)
             return False
+        was_similarity = bool((getattr(self, "validation_review_current_issue", None) or {}).get("similarity_match"))
         self.validation_review_index = index
         self.validation_review_current_issue = issue
         is_similarity = bool(issue.get("similarity_match"))
@@ -68056,12 +71297,16 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         source_label = getattr(self, "validation_review_source_label", None)
         if source_label is not None and not sip.isdeleted(source_label):
             source_label.setText("SIMILARITY MATCHES" if is_similarity else "DATASET ANALYSIS" if is_dataset_analysis else "MODEL VALIDATION")
+            source_label.setVisible(not is_similarity)  # The dock title already names this compact mode.
             source_label.setStyleSheet(
                 "QLabel { background: %s; border: 1px solid %s; border-radius: 4px; "
                 "padding: 5px; color: #ffffff; font-weight: 800; }"
                 % (("#234532", "#3b7a55") if is_dataset_analysis else ("#263d55", "#4779a7"))
             )
         ground_truth_checkbox = getattr(self, "validation_review_gt_checkbox", None)
+        legend_label = getattr(self, "validation_review_legend_label", None)
+        if legend_label is not None:
+            legend_label.setVisible(not is_similarity)
         if ground_truth_checkbox is not None and not sip.isdeleted(ground_truth_checkbox):
             ground_truth_checkbox.setVisible(True)
             ground_truth_checkbox.setText(
@@ -68208,7 +71453,18 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.validation_review_position_label.setText(
             f"{item_word} {index + 1} / {len(issues)}"
         )
-        self.validation_review_detail_label.setText("\n".join(details))
+        detail_text = "\n".join(details)
+        if is_similarity:
+            self.validation_review_detail_label.setText(
+                f"{issue.get('class_name', '') or issue.get('class_id', '')} · "
+                f"{float(issue.get('similarity_score', 0)) * 100:.1f}% similarity\n{os.path.basename(image_path)}"
+            )
+            self.validation_review_detail_label.setToolTip(detail_text)
+        else:
+            self.validation_review_detail_label.setText(detail_text)
+            self.validation_review_detail_label.setToolTip("")
+        if is_similarity and not was_similarity and isinstance(self, QtWidgets.QMainWindow):
+            QTimer.singleShot(0, self._fit_similarity_review_docks)
         queue_name = "Similarity matches" if is_similarity else "Dataset analysis" if is_dataset_analysis else "Validation review"
         self.statusBar().showMessage(f"{queue_name}: {issue_name}", 3000)
         return True
@@ -68243,15 +71499,20 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self._save_active_validation_review_edits()
         combo = getattr(self, "filter_class_spinbox", None)
         if not isinstance(getattr(self, "_validation_review_restore_state", None), dict):
+            restore_filter_index = combo.currentIndex() if combo is not None else 0
+            if (combo is not None and combo.currentText().startswith("Similar to Selected")
+                    and not getattr(self, "_review_similarity_results_ready", True)):
+                restore_filter_index = 0  # This pending search is about to be canceled.
             self._validation_review_restore_state = {
                 "current_image_index": int(getattr(self, "current_image_index", -1)),
-                "filter_index": combo.currentIndex() if combo is not None else 0,
+                "filter_index": restore_filter_index,
                 "class_visibility": dict(getattr(self, "class_visibility", {}) or {}),
                 "similarity_state": {
                     name: getattr(self, name, None) for name in (
                         "_review_similarity_reference", "_review_similarity_matches",
                         "_review_similarity_matches_by_image", "_review_similarity_origin_file",
                         "_review_similarity_origin_index", "_review_filter_origin",
+                        "_review_similarity_results_ready",
                     )
                 },
                 "image_files": list(getattr(self, "image_files", []) or []),
@@ -68259,6 +71520,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 "current_file": getattr(self, "current_file", ""),
                 "current_img_index": int(getattr(self, "current_img_index", 0) or 0),
                 "image_directory": getattr(self, "image_directory", ""),
+                "graphics_explicit": bool(getattr(self, "_graphics_dataset_explicitly_opened", False)),
+                "class_names": list(getattr(self, "class_names", []) or []),
             }
         self._cancel_review_filter_request()
         self._clear_review_similarity_state()
@@ -68275,6 +71538,31 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 self.validation_review_report = json.load(handle)
         except Exception:
             self.validation_review_report = {"issues": issues}
+        # Opening a user-selected finding is an explicit image-open action, not
+        # a startup restoration. The normal startup guard must remain strict,
+        # but must not erase this requested list or suppress its preview.
+        self._graphics_dataset_explicitly_opened = True
+        source_files = [self.normalize_path(path) for path in (getattr(self, "image_files", []) or [])]
+        if requested_image_path not in source_files:
+            self.image_directory = self.normalize_path(os.path.dirname(requested_image_path))
+            self.image_files = self.get_image_files(self.image_directory)
+            self.image_files.sort()
+            classes = []
+            classes_path = resolve_dataset_classes_path(self.image_directory, migrate=False)
+            if classes_path and os.path.isfile(classes_path):
+                try:
+                    with open(classes_path, "r", encoding="utf-8-sig") as stream:
+                        classes = [line.strip().replace("\u200b", "").replace("\xa0", "")
+                                   for line in stream if line.strip()]
+                except OSError as error:
+                    logger.warning("Could not read the review dataset's classes: %s", error)
+            if classes:
+                self.update_classes_dropdown(classes)
+        elif not getattr(self, "image_directory", None):
+            self.image_directory = self.normalize_path(os.path.dirname(requested_image_path))
+        combo = getattr(self, "filter_class_spinbox", None)
+        if combo is not None and combo.findText("Similar to Selected") < 0:
+            combo.addItem("Similar to Selected")
         self.validation_review_image_files = list(dict.fromkeys(
             self.normalize_path(item.get("image_path", ""))
             for item in issues
@@ -68507,6 +71795,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if isinstance(restore, dict):
             for name, value in restore.get("similarity_state", {}).items():
                 setattr(self, name, value)
+            self._graphics_dataset_explicitly_opened = bool(restore.get("graphics_explicit", True))
+            self.image_directory = restore.get("image_directory", getattr(self, "image_directory", ""))
+            previous_classes = restore.get("class_names")
+            if isinstance(previous_classes, list) and previous_classes != getattr(self, "class_names", []):
+                self.update_classes_dropdown(previous_classes)
             combo = getattr(self, "filter_class_spinbox", None)
             if combo is not None:
                 with blocked_signals(combo):
@@ -68527,6 +71820,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                     with blocked_signals(self.img_index_number):
                         self.img_index_number.setMaximum(max(0, len(self.filtered_image_files) - 1))
                         self.img_index_number.setValue(max(0, self.current_img_index))
+            elif not self._graphics_dataset_explicitly_opened:
+                self.current_file = None
+                self.current_img_index = self.current_image_index = -1
+                self.display_placeholder()
             self.update_dataset_progress()
         self._validation_review_restore_state = None
         self.validation_review_queue = []
@@ -68903,7 +72200,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         auto_yaml_checkbox.setToolTip("If Data is empty, find or create obj.yaml for the current dataset. Existing Data YAML is preserved.")
         optimized_args_checkbox = QtWidgets.QCheckBox("Recommended Args")
         optimized_args_checkbox.setChecked(bool(self.settings.get("trainingEvaluatorUseOptimizedArgs", True)))
-        optimized_args_checkbox.setToolTip("Use and update train_recommendations.yaml when checked. When unchecked, tuning saves parameters in the selected Data YAML and training reads them there. Explicit Extra arguments override saved values.")
+        optimized_args_checkbox.setToolTip("Use the selected training configuration when checked. When unchecked, tuning saves parameters in the selected Data YAML and training reads them there. Browsing never rewrites either file.")
         skip_image_scan_checkbox = QtWidgets.QCheckBox("Skip Image Scan")
         skip_image_scan_checkbox.setChecked(bool(self.settings.get("trainingEvaluatorSkipImageScan", False)))
         skip_image_scan_checkbox.setToolTip("Skip the full image scan and use quick parameter estimation. Useful after you've already scanned this dataset. Uncheck to do a full re-scan with detailed statistics.")
@@ -68918,7 +72215,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         recommended_args_display.setPlaceholderText("train_recommendations.yaml path will appear here or paste/browse")
         recommended_args_display.setToolTip("Path to train_recommendations.yaml file. Auto-populated after Generate Files + Parameters, or browse to load a pre-existing one.")
         browse_recommended_args_btn = QtWidgets.QPushButton("Browse")
-        browse_recommended_args_btn.setToolTip("Select an existing train_recommendations.yaml file to load.")
+        browse_recommended_args_btn.setToolTip(
+            "Select an existing training configuration YAML. Browsing only remembers "
+            "the selected path; it does not generate or overwrite the file."
+        )
         
         probe_epochs_spin = QtWidgets.QSpinBox()
         probe_epochs_spin.setRange(1, 20)
@@ -69343,8 +72643,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             "Choose Best/Last from the active training run or browse to <b>any compatible .pt weights</b>. "
             "INT8 becomes ready when the selected format supports it and a calibration dataset YAML "
             "is available. Exported files are written beside the selected checkpoint by Ultralytics.<br>"
-            "For DarkFusion's standalone ONNX Runtime backend, export as <b>ONNX</b>; leaving embedded "
-            "NMS off keeps Confidence and NMS/IOU adjustable inside DarkFusion."
+            "For DarkFusion's Windows ML / ONNX backend, export as <b>ONNX</b> with <b>Embed NMS off</b>. "
+            "This preserves native NMS-free heads when available. Confidence stays adjustable; "
+            "NMS/IOU applies only to models that need suppression, not NMS-free heads."
         )
         export_help.setWordWrap(True)
         export_help.setStyleSheet(
@@ -69358,7 +72659,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         export_form.setVerticalSpacing(8)
 
         def latest_run_export_checkpoint():
-            record = self._training_eval_latest_saved_run()
+            record = self._training_eval_latest_saved_run(training_only=True)
             run_dirs = [
                 self.normalize_path((record or {}).get("run_dir", "")),
                 restored_run_dir,
@@ -69835,7 +73136,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 worker.completed.connect(export_completed)
                 worker.failed.connect(export_failed)
                 worker.finished.connect(export_finished)
-                worker.start()
+                try:
+                    start_gpu_worker(self, worker, "Model export", exclusive=True)
+                except Exception:
+                    export_finished()
+                    raise
             except Exception as e:
                 export_state["running"] = False
                 export_status.setText(f"Export failed: {e}")
@@ -69936,7 +73241,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             if selected:
                 return selected
 
-            record = self._training_eval_latest_saved_run()
+            record = self._training_eval_latest_saved_run(training_only=True)
             run_dir = self.normalize_path((record or {}).get("run_dir", ""))
             for name in ("best.pt", "last.pt"):
                 candidate = self.normalize_path(os.path.join(run_dir, "weights", name))
@@ -70357,20 +73662,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             if not data_yaml or not os.path.isfile(data_yaml):
                 QMessageBox.warning(dialog, "Validation Review", "Select an existing dataset YAML first.")
                 return
-            active_record = self._training_eval_latest_saved_run()
+            active_record = self._training_eval_latest_saved_run(training_only=True)
             if self._training_eval_run_is_active(active_record or {}):
-                reply = QMessageBox.question(
+                QMessageBox.information(
                     dialog,
                     "Training Is Active",
-                    (
-                        "A separate validation pass can slow active GPU training or use additional VRAM.\n\n"
-                        "Start the analysis anyway?"
-                    ),
-                    QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.No,
+                    "Training has priority for GPU memory. Finish or stop training before starting a separate validation analysis.",
                 )
-                if reply != QMessageBox.Yes:
-                    return
+                return
             script_path = os.path.join(APP_DIR, "darkfusion_validation_review.py")
             if not os.path.isfile(script_path):
                 QMessageBox.warning(dialog, "Validation Review", f"Analyzer not found:\n{script_path}")
@@ -70577,6 +73876,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             model_path = self.normalize_path(train_model_edit.text().strip())
             rec["data_yaml_path"] = data_yaml
             result["data_yaml_path"] = data_yaml
+            result["training_recommendations_yaml"] = self.normalize_path(recommended_args_display.text().strip())
             rec["task"] = str(task_setup_combo.currentText()).strip().lower() or "detect"
             rec["imgsz"] = int(imgsz_spin.value())
             rec["batch"] = int(train_batch_spin.value())
@@ -70840,13 +74140,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             if not file_name:
                 return
             file_name = self.normalize_path(file_name)
+            # textChanged already synchronizes the selected path once. Browsing
+            # must not generate recommendations or try to open a runs folder.
             recommended_args_display.setText(file_name)
-            sync_settings()
-            sync_settings()
-            try:
-                os.startfile(directory)
-            except Exception as e:
-                QMessageBox.information(dialog, "Training Runs", f"Runs folder:\n{directory}\n\nCould not open it automatically: {e}")
 
         def browse_validation_source():
             mode = self._training_eval_validation_mode(validation_mode_combo.currentData())
@@ -70906,8 +74202,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         )
         health_check_btn = buttons.addButton("Setup Check", QtWidgets.QDialogButtonBox.ActionRole)
         preview_cmd_btn = buttons.addButton("Commands", QtWidgets.QDialogButtonBox.ActionRole)
-        validate_btn = buttons.addButton("Validate Weights", QtWidgets.QDialogButtonBox.ActionRole)
-        validate_cpu_btn = buttons.addButton("Validate CPU", QtWidgets.QDialogButtonBox.ActionRole)
         calibrate_batch_btn = buttons.addButton("Calibrate Batch", QtWidgets.QDialogButtonBox.ActionRole)
         tune_btn = buttons.addButton("Tune HParams", QtWidgets.QDialogButtonBox.ActionRole)
         resume_btn = buttons.addButton("Resume Last Run", QtWidgets.QDialogButtonBox.ActionRole)
@@ -71146,7 +74440,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             if not result:
                 return
             try:
-                use_train_args = optimized_args_checkbox.isChecked() or bool(result.get("tune_best_path"))
+                use_train_args = optimized_args_checkbox.isChecked()
                 train_cmd = self.build_training_evaluator_command(
                     result,
                     mode="train",
@@ -71166,7 +74460,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                     include_distillation=tune_distill_checkbox.isChecked(),
                 )
                 batch_cmd = self.build_training_evaluator_batch_command(result)
-                resume_info = self._training_eval_resume_info(self._training_eval_latest_saved_run())
+                resume_info = self._training_eval_resume_info(self._training_eval_latest_saved_run(training_only=True))
                 resume_text = ""
                 if resume_info.get("resumable"):
                     resume_cmd = self.build_training_evaluator_resume_command(resume_info.get("run_dir"))
@@ -71191,7 +74485,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 status_label.setText(f"Command preview failed: {e}")
                 self._training_eval_set_activity_indicator(run_widgets, "error", "Error", "Command preview failed")
 
-        def validate_weights(force_cpu=False):
+        def run_validation_metrics():
             sync_settings()
             status_label.setText("Checking checkpoint and launching validation...")
             self._training_eval_set_activity_indicator(
@@ -71262,6 +74556,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             ).strip().lower()
             result = {
                 "data_yaml_path": data_yaml,
+                "metrics_split": str(review_split_combo.currentData() or "all"),
                 "image_count": 0,
                 "weight_info": weight_info,
                 "recommendations": {
@@ -71279,33 +74574,28 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                     "train_args_text": "",
                 },
             }
-            self.training_evaluator_last_result = result
+            self.training_evaluator_last_metrics_result = result
             try:
-                run_name = self._training_eval_baseline_run_name(result, force_cpu=force_cpu)
+                split = result["metrics_split"]
+                run_name = self._training_eval_baseline_run_name(result)
+                if split != "val":
+                    run_name = f"metrics_{split}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
                 command = self.build_training_evaluator_command(result, mode="val", apply_optimized_args=False, run_name=run_name)
-                title = "Training Evaluator CPU Baseline Validation" if force_cpu else "Training Evaluator Baseline Validation"
-                run_title = "CPU Baseline" if force_cpu else "Baseline Validation"
-                if force_cpu:
-                    command = [
-                        part
-                        for part in command
-                        if not (("=" in str(part)) and str(part).split("=", 1)[0].strip().lower() == "device")
-                    ]
-                    command.append("device=cpu")
-                elif torch.cuda.is_available():
+                run_title = "Baseline Validation" if split == "val" else f"Metrics Only ({review_split_combo.currentText()})"
+                title = f"Training Evaluator {run_title}"
+                if torch.cuda.is_available():
                     reply = QMessageBox.question(
                         dialog,
                         "GPU Validation",
                         (
-                            "GPU validation can draw a hard power spike. "
-                            "If this PC has powered off during validation, use Validate CPU first.\n\n"
+                            "GPU validation can draw a hard power spike.\n\n"
                             "Start GPU validation anyway?"
                         ),
                         QMessageBox.Yes | QMessageBox.No,
                         QMessageBox.No,
                     )
                     if reply != QMessageBox.Yes:
-                        status_label.setText("GPU validation canceled. Use Validate CPU for the safest check.")
+                        status_label.setText("GPU validation canceled.")
                         self._training_eval_set_activity_indicator(run_widgets, "warning", "Needs attention", "GPU validation canceled")
                         return
                 process, run_dir, log_path = self.launch_training_evaluator_logged_command(
@@ -71487,7 +74777,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         def resume_last_run():
             sync_settings()
-            record = self._training_eval_latest_saved_run()
+            record = self._training_eval_latest_saved_run(training_only=True)
             info = self._training_eval_resume_info(record)
             if not info.get("resumable"):
                 QMessageBox.information(dialog, "Resume Training", info.get("note") or "No resumable training run was found.")
@@ -71531,7 +74821,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 self._training_eval_set_activity_indicator(run_widgets, "error", "Error", "Resume failed to start")
 
         def latest_training_control_record():
-            record = self._training_eval_latest_saved_run()
+            record = self._training_eval_latest_saved_run(training_only=True)
             run_dir = self.normalize_path((record or {}).get("run_dir", ""))
             if not run_dir or not os.path.isdir(run_dir):
                 return {}
@@ -71543,52 +74833,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             return clean
 
         def training_processes_for_record(record):
-            if psutil is None:
-                return []
-            run_dir = self.normalize_path((record or {}).get("run_dir", ""))
-            log_path = self.normalize_path((record or {}).get("log_path", ""))
-            run_name = os.path.basename(run_dir).lower()
-            normalized_log = log_path.replace("\\", "/").lower()
-            matches = []
-            known_pid = (record or {}).get("pid")
-            if known_pid:
-                try:
-                    process = psutil.Process(int(known_pid))
-                    if process.is_running():
-                        matches.append(process)
-                except Exception:
-                    pass
-            try:
-                for process in psutil.process_iter(["pid", "name", "cmdline"]):
-                    if any(existing.pid == process.pid for existing in matches):
-                        continue
-                    name = str(process.info.get("name") or "").lower()
-                    if "python" not in name:
-                        continue
-                    command = " ".join(process.info.get("cmdline") or [])
-                    command_normalized = command.replace("\\", "/").lower()
-                    is_training_process = (
-                        "darkfusion_command_runner.py" in command_normalized
-                        or "darkfusion_ultralytics_train.py" in command_normalized
-                    )
-                    if not is_training_process:
-                        continue
-                    if (
-                        (normalized_log and normalized_log in command_normalized)
-                        or (run_name and run_name in command_normalized)
-                    ):
-                        matches.append(process)
-            except Exception:
-                pass
-            runner_matches = []
-            for process in matches:
-                try:
-                    command = " ".join(process.cmdline()).lower()
-                except Exception:
-                    command = ""
-                if "darkfusion_command_runner.py" in command:
-                    runner_matches.append(process)
-            return runner_matches or matches
+            from darkfusion_training_runs import training_processes_for_record as find_processes
+            return find_processes(record, psutil)
 
         def terminate_training_record(record, reason):
             roots = training_processes_for_record(record)
@@ -71790,17 +75036,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             result = ensure_evaluation_result()
             if not result:
                 return
-            use_train_args = optimized_args_checkbox.isChecked() or bool(result.get("tune_best_path"))
+            use_train_args = optimized_args_checkbox.isChecked()
             self.apply_training_evaluation_recommendations(
                 result,
                 apply_weights=False,
-                apply_optimized_args=use_train_args,
+                # cfg=/dataset metadata is authoritative; do not copy stale
+                # cached recommendations back into legacy extra-args state.
+                apply_optimized_args=False,
             )
-            if use_train_args:
-                rec_args = str((result.get("recommendations", {}) or {}).get("train_args_text", "") or "").strip()
-                if rec_args:
-                    # cfg file updated by recommendation, UI reflects file path only
-                    pass
             sync_training_setup_to_state(update_result=True)
             result = overlay_current_setup_on_result(result)
             self.training_evaluator_last_result = result
@@ -71904,9 +75147,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         evaluate_btn.clicked.connect(run_evaluation)
         health_check_btn.clicked.connect(run_health_check)
         preview_cmd_btn.clicked.connect(preview_command)
-        validate_btn.clicked.connect(lambda: validate_weights(False))
-        review_validate_metrics_btn.clicked.connect(lambda: validate_weights(False))
-        validate_cpu_btn.clicked.connect(lambda: validate_weights(True))
+        review_validate_metrics_btn.clicked.connect(run_validation_metrics)
         calibrate_batch_btn.clicked.connect(calibrate_batch)
         tune_btn.clicked.connect(tune_hyperparams)
         resume_btn.clicked.connect(resume_last_run)
@@ -72153,6 +75394,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             self.processed_image = canvas.copy()
             scene = QGraphicsScene(0, 0, imgsz, imgsz)
             scene.setProperty("darkfusion_train_view_scene", True)
+            scene.setProperty("darkfusion_source_image", os.path.abspath(image_file))
             pixmap_item = QGraphicsPixmapItem(self.image)
             pixmap_item.setTransformationMode(Qt.SmoothTransformation)
             pixmap_item.setZValue(-1000)
@@ -72600,9 +75842,16 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         ]
 
         if mode == "val":
+            split = str(result.get("metrics_split", "val"))
+            if split not in {"all", "train", "val", "test"}:
+                raise ValueError(f"Invalid metrics split: {split}")
+            if task == "classify" and split == "all":
+                raise ValueError("Select Validation or Test for classification metrics; Entire Dataset requires an annotation dataset YAML.")
             cmd.extend([
                 f"name={run_name if run_name else f'eval_val_{timestamp}'}",
                 "save_json=True",
+                f"split={split}",
+                "exist_ok=True",
             ])
             self._append_ultralytics_memory_guard_args(cmd)
             return cmd
@@ -72618,23 +75867,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         ])
 
         freeze_value = int(rec.get("freeze", 0) or 0)
-        if freeze_value > 0:
-            cmd.append(f"freeze={freeze_value}")
+        cmd.append(f"freeze={freeze_value}")
 
         cmd.extend(self._ultralytics_distillation_args(mode=mode, task=task))
 
-        if apply_optimized_args:
-            cfg_path = self.normalize_path(
-                result.get("training_recommendations_yaml", "")
-                or getattr(self, "recommended_args_path", "")
-                or ""
-            )
-            if cfg_path and os.path.isfile(cfg_path):
-                # The copied default.yaml contains the complete, tuned
-                # Ultralytics configuration. Explicit args below remain last
-                # so they intentionally win if they differ from the cfg.
-                cmd.append(f"cfg={cfg_path}")
-            cmd.extend(str(arg) for arg in rec.get("train_args", []) if arg)
+        # With recommendations off, read the exact dataset's persisted tuning
+        # values, including after reopening DarkFusion without Generate.
+        cmd.extend(self._training_eval_selected_parameter_args(result, apply_optimized_args))
 
         self._append_ultralytics_memory_guard_args(cmd)
         return cmd
@@ -72757,6 +75996,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         except Exception:
             return subprocess.list2cmdline(command) if sys.platform == "win32" else shlex.join(command)
 
+    @gpu_work("Training / evaluation", keep=(), external=True, exclusive=True, nested_launcher=True)
     def launch_training_evaluator_command(self, command, title="Training Evaluator", keep_open=True):
         if not command:
             raise ValueError("No command to launch.")
@@ -72781,6 +76021,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if process is None:
             return
 
+        context = self._training_eval_job_context(result)
+        result = context["result"]
         tune_dir = self._training_eval_tune_dir_from_command(command)
         self.training_evaluator_tune_process = process
         widgets = getattr(self, "training_evaluator_run_widgets", None)
@@ -72788,22 +76030,41 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         timer = QTimer(self)
         timer.setInterval(5000)
         self.training_evaluator_tune_timer = timer
+        finished = False
 
         def widget_alive(widget):
             return widget is not None and not sip.isdeleted(widget)
 
         def finish(exit_code):
+            nonlocal finished
+            if finished:
+                return
+            finished = True
             timer.stop()
             if self.training_evaluator_tune_timer is timer:
                 self.training_evaluator_tune_timer = None
             if self.training_evaluator_tune_process is process:
                 self.training_evaluator_tune_process = None
 
-            best_hyperparams, source_path = self.read_training_tune_best_hyperparameters(tune_dir)
-            if best_hyperparams:
-                self.apply_training_tune_best_hyperparameters(result, best_hyperparams, source_path)
-                if widget_alive(optimized_args_checkbox):
-                    optimized_args_checkbox.setChecked(True)
+            current_setup = self._training_eval_job_context_is_current(context)
+            try:
+                best_hyperparams, source_path = self.read_training_tune_best_hyperparameters(tune_dir)
+                applied = self.apply_training_tune_best_hyperparameters(
+                    result, best_hyperparams, source_path,
+                    use_recommended=context["use_recommended"], target_yaml=context["target_yaml"],
+                ) if best_hyperparams else False
+            except Exception as error:
+                logger.warning("Could not save tuning results to %s: %s", context["target_yaml"], error)
+                if current_setup and widget_alive(status_label):
+                    status_label.setText(f"Could not save tune results: {error}. Original output remains in {tune_dir}.")
+                    self._training_eval_set_activity_indicator(widgets, "error", "Error", "Tune settings could not be saved")
+                return
+            if applied:
+                self.training_evaluator_last_tune_result = result
+                if not current_setup:
+                    logger.info("Tune saved to its original setup: %s; current controls left unchanged.", context["target_yaml"])
+                    return
+                self.training_evaluator_last_result = result
                 if callable(on_tuned):
                     try:
                         on_tuned(result)
@@ -72814,7 +76075,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 if widget_alive(status_label):
                     status_label.setText("Tune finished. Best hyperparameters are loaded; Start Training will use them.")
                 self._training_eval_set_activity_indicator(widgets, "success", "Ready", "Tune finished")
-            else:
+            elif current_setup:
                 if widget_alive(status_label):
                     if exit_code not in (0, None):
                         status_label.setText(f"Tune exited with code {exit_code}; no best_hyperparameters.yaml found.")
@@ -72824,6 +76085,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                         self._training_eval_set_activity_indicator(widgets, "warning", "Needs attention", "Tune finished without best hyperparameters")
 
         def poll():
+            if finished:
+                return
             try:
                 exit_code = process.poll()
             except Exception as e:
@@ -72847,6 +76110,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if process is None:
             return
 
+        context = self._training_eval_job_context(result)
+        result = context["result"]
         output_path = self._training_eval_option_value(command, "--output")
         self.training_evaluator_batch_process = process
         widgets = getattr(self, "training_evaluator_run_widgets", None)
@@ -72854,25 +76119,46 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         timer = QTimer(self)
         timer.setInterval(2000)
         self.training_evaluator_batch_timer = timer
+        finished = False
 
         def widget_alive(widget):
             return widget is not None and not sip.isdeleted(widget)
 
         def finish(exit_code):
+            nonlocal finished
+            if finished:
+                return
+            finished = True
             timer.stop()
             if self.training_evaluator_batch_timer is timer:
                 self.training_evaluator_batch_timer = None
             if self.training_evaluator_batch_process is process:
                 self.training_evaluator_batch_process = None
 
+            current_setup = self._training_eval_job_context_is_current(context)
             calibration, source_path = self.read_training_batch_calibration(output_path)
             if calibration.get("error"):
-                if widget_alive(status_label):
+                if current_setup and widget_alive(status_label):
                     status_label.setText(f"Batch calibration failed: {calibration.get('error')}")
-                self._training_eval_set_activity_indicator(widgets, "error", "Error", "Batch calibration failed")
+                    self._training_eval_set_activity_indicator(widgets, "error", "Error", "Batch calibration failed")
                 return
 
-            if self.apply_training_batch_calibration(result, calibration, source_path):
+            try:
+                applied = self.apply_training_batch_calibration(
+                    result, calibration, source_path, target_yaml=context["target_yaml"],
+                    use_recommended=context["use_recommended"], sync_controls=current_setup,
+                )
+            except Exception as error:
+                logger.warning("Could not save batch calibration to %s: %s", context["target_yaml"], error)
+                if current_setup and widget_alive(status_label):
+                    status_label.setText(f"Could not save batch calibration: {error}. Original output remains in {output_path}.")
+                    self._training_eval_set_activity_indicator(widgets, "error", "Error", "Batch settings could not be saved")
+                return
+            if applied:
+                self.training_evaluator_last_batch_result = result
+                if not current_setup:
+                    logger.info("Batch calibration saved for its original setup; current controls left unchanged.")
+                    return
                 if callable(on_calibrated):
                     try:
                         on_calibrated(result)
@@ -72883,7 +76169,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                 if widget_alive(status_label):
                     status_label.setText(f"Batch calibrated to {calibration.get('batch')}. Start Training will use it.")
                 self._training_eval_set_activity_indicator(widgets, "success", "Ready", "Batch calibration complete")
-            else:
+            elif current_setup:
                 if widget_alive(status_label):
                     if exit_code not in (0, None):
                         status_label.setText(f"Batch calibration exited with code {exit_code}; no usable result found.")
@@ -72893,6 +76179,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
                         self._training_eval_set_activity_indicator(widgets, "warning", "Needs attention", "No usable batch result")
 
         def poll():
+            if finished:
+                return
             try:
                 exit_code = process.poll()
             except Exception as e:
@@ -73042,10 +76330,17 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             QMessageBox.warning(self, "Knowledge Distillation", str(e))
             return
         
-        # Add cfg parameter if training config YAML exists
-        cfg_path = self.normalize_path(getattr(self, "recommended_args_path", "") or "")
-        if cfg_path and os.path.isfile(cfg_path):
-            cmd.append(f"cfg={cfg_path}")
+        # Keep the older training entry point on the same parameter source as
+        # the trainer dialog. It must not re-enable cfg= when recommendations
+        # are off or lose tuning saved in the selected dataset YAML.
+        try:
+            cmd.extend(self._training_eval_selected_parameter_args(
+                {"data_yaml_path": self.data_yaml_path},
+                bool(self.settings.get("trainingEvaluatorUseOptimizedArgs", True)),
+            ))
+        except (ValueError, OSError) as error:
+            QMessageBox.warning(self, "Training Parameters", str(error))
+            return
         
         self._append_ultralytics_memory_guard_args(cmd, use_evaluator_overrides=True)
 
@@ -73093,8 +76388,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             if distill_notes:
                 message += "\n\nDistillation notes:\n" + self._training_eval_format_distillation_notes(distill_notes)
             
-            cfg_path = self.normalize_path(getattr(self, "recommended_args_path", "") or "")
-            if cfg_path and os.path.isfile(cfg_path):
+            cfg_path = self._training_eval_command_value(cmd, "cfg")
+            if cfg_path:
                 message += f"\n\nTraining config: {cfg_path}"
             
             QMessageBox.information(self, "Training Started", message)
@@ -73201,9 +76496,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             params["simplify"] = bool(simplify)
         if self.is_parameter_supported(export_format, "batch"):
             params["batch"] = self.parse_positive_int(batch, "Export batch") if batch_enabled else 1
-        # None means raw output; False can select an NMS-free head in newer YOLO.
-        # An unchecked Embed NMS must not inadvertently change the trained head.
-        params["nms"] = True if nms else None
+        # False retains native NMS-free inference when the checkpoint supports it.
+        # None explicitly selects raw one-to-many output in recent Ultralytics,
+        # so it is NOT interchangeable with an unchecked Embed NMS control.
+        # Legacy heads without one-to-one weights still export their raw outputs.
+        params["nms"] = bool(nms)
 
         if bool(nms):
             if not self.is_parameter_supported(export_format, "nms"):
@@ -73253,6 +76550,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             params["data"] = calibration_path
         return params
 
+    @gpu_work("Model export", keep=("export",))
     def run_ultralytics_export(self, model_path, export_params):
         """Load a PT checkpoint and export it with already validated parameters."""
         model_path = self.normalize_path(model_path)
@@ -73271,6 +76569,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         return self.normalize_path(str(output))
 
     def load_model(self):
+        if not gpu_model_allowed(self, "export"):
+            return
         fname, _ = QtWidgets.QFileDialog.getOpenFileName(
             self,
             'Open file',
@@ -73302,6 +76602,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         self.handle_conversion()
 
     def export_model_for_conversion(self):
+        if not gpu_model_allowed(self, "export"):
+            raise GpuWorkBusy("Export model loading is paused while another GPU workflow is running.")
         model = getattr(self, "_export_model", None)
         path = self.normalize_path(getattr(self, "export_model_path", "") or getattr(self, "weights_file_path", ""))
         cached_path = self.normalize_path(getattr(self, "_export_model_path", ""))
@@ -73808,20 +77110,22 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
             return subprocess.list2cmdline(command)
         return shlex.join(command)
 
+    @gpu_work("Darknet training", keep=(), external=True, exclusive=True)
     def darknet_train(self):
         try:
             command, working_dir = self.build_darknet_train_command()
             command_display = self.format_command_for_log(command)
 
             if sys.platform == 'win32':
-                subprocess.Popen(["cmd.exe", "/k", command_display], cwd=working_dir)
+                process = subprocess.Popen(["cmd.exe", "/k", command_display], cwd=working_dir)
             else:
                 try:
-                    subprocess.Popen(["gnome-terminal", "--working-directory", working_dir, "--"] + command)
+                    process = subprocess.Popen(["gnome-terminal", "--working-directory", working_dir, "--"] + command)
                 except (FileNotFoundError, TypeError):
-                    subprocess.Popen(command, cwd=working_dir)
+                    process = subprocess.Popen(command, cwd=working_dir)
 
             logger.info(f"Command to be executed: {command_display}")
+            return process
         except Exception as e:
             logger.error(f"Failed to start Darknet training: {e}")
             QtWidgets.QMessageBox.critical(self, "Darknet Training", str(e))
@@ -74862,6 +78166,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         if os.path.normcase(source_dir) == os.path.normcase(target_dir):
             QMessageBox.warning(self, "Warning", "Source and target directories cannot be the same.")
             return
+        if not os.path.isdir(source_dir):
+            QMessageBox.warning(self, "Move Files", f"Source directory does not exist:\n{source_dir}")
+            return
 
         reply = QMessageBox.question(
             self, "Confirmation",
@@ -74883,7 +78190,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
         self.start_move_btn.setEnabled(False)
         self.start_move_btn.setText("Moving...")
-        self.set_label_progress_busy("Scanning files...")
+        progress = getattr(self, "bulk_move_progress", None)
+        if progress is not None:
+            progress.setRange(0, 0)
+            progress.setFormat("Scanning files...")
+            progress.setToolTip(f"Source: {source_dir}\nTarget: {target_dir}")
+            progress.show()
 
         worker = BulkMoveWorker(
             source_dir,
@@ -74895,16 +78207,15 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         worker.progress.connect(self.on_bulk_move_progress)
         worker.completed.connect(self.on_bulk_move_completed)
         worker.failed.connect(self.on_bulk_move_failed)
-        worker.finished.connect(worker.deleteLater)
+        worker.finished.connect(lambda worker=worker: self._cleanup_worker_reference("_bulk_move_worker", worker))
         worker.start()
 
     def on_bulk_move_progress(self, processed, total):
-        self.set_label_progress(
-            0,
-            max(1, int(total)),
-            value=min(int(processed), max(1, int(total))),
-            progress_format=f"Moving {int(processed)}/{int(total)}",
-        )
+        progress = getattr(self, "bulk_move_progress", None)
+        if progress is not None:
+            progress.setRange(0, max(1, int(total)))
+            progress.setValue(min(int(processed), max(1, int(total))))
+            progress.setFormat(f"Moving {int(processed)}/{int(total)}")
 
     def on_bulk_move_completed(self, summary):
         summary = dict(summary or {})
@@ -74913,33 +78224,42 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
         total = int(summary.get("total", 0))
         failed = list(summary.get("failed", []) or [])
         canceled = bool(summary.get("canceled", False))
+        details = "\n".join(failed[:20])
+        if len(failed) > 20:
+            details += f"\n...and {len(failed) - 20} more."
+        self._bulk_move_last_summary = summary
 
-        self.reset_label_progress(100 if not failed else 0)
         self.start_move_btn.setEnabled(True)
         self.start_move_btn.setText("Move Files")
-        self._bulk_move_worker = None
 
         if canceled:
-            QMessageBox.information(self, "Move Files", f"Move canceled after {moved}/{total} image pair(s). Skipped: {skipped}.")
+            message = f"Move canceled: {moved}/{total} image pair(s) moved. Skipped: {skipped}."
         elif failed:
-            preview = "\n".join(failed[:5])
-            more = f"\n...and {len(failed) - 5} more." if len(failed) > 5 else ""
-            skipped_note = f"\nSkipped: {skipped}" if skipped else ""
-            QMessageBox.warning(
-                self,
-                "Move Files",
-                f"Moved {moved}/{total} image pair(s), with {len(failed)} failure(s).{skipped_note}\n{preview}{more}",
-            )
+            message = f"Moved {moved}/{total} image pair(s). Failed: {len(failed)}. Skipped: {skipped}."
+            logger.warning("Standalone move finished with errors: %s", details)
         else:
             skipped_note = f" Skipped {skipped}." if skipped else ""
-            QMessageBox.information(self, "Success", f"Moved {moved} image pair(s) successfully.{skipped_note}")
+            message = f"Moved {moved} image pair(s).{skipped_note}"
+        progress = getattr(self, "bulk_move_progress", None)
+        if progress is not None:
+            progress.setRange(0, max(1, total))
+            progress.setValue(max(1, total) if not canceled else min(moved + skipped + len(failed), total))
+            progress.setFormat(message)
+            if failed:
+                progress.setToolTip(details)
+        self.statusBar().showMessage(message, 7000)
 
     def on_bulk_move_failed(self, message):
-        self.reset_label_progress(0)
         self.start_move_btn.setEnabled(True)
         self.start_move_btn.setText("Move Files")
-        self._bulk_move_worker = None
-        QMessageBox.critical(self, "Error", f"An error occurred while moving files:\n{message}")
+        progress = getattr(self, "bulk_move_progress", None)
+        if progress is not None:
+            progress.setRange(0, 1)
+            progress.setValue(0)
+            progress.setFormat("Move failed; hover for details")
+            progress.setToolTip(str(message))
+        self.statusBar().showMessage(f"Move failed: {message}", 10000)
+        logger.error("Standalone move failed: %s", message)
 
     def run_bulk_move(self, source_dir, target_dir):
         try:
@@ -74953,6 +78273,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_mainWindow):
 
 
 def run_pyqt_app():
+    configure_gui_opencv_threads()
     # These attributes must be configured before QApplication is created.
     # Qt then works in logical pixels and keeps icons sharp across monitors.
     try:
@@ -74975,6 +78296,10 @@ def run_pyqt_app():
 
     def request_app_shutdown():
         app._app_shutdown_requested = True
+        window = getattr(app, 'main_window', None)
+        viewer = getattr(window, 'frame_viewer', None)
+        if viewer is not None:
+            viewer._close_native_video_surface()
 
     app.aboutToQuit.connect(request_app_shutdown)
 

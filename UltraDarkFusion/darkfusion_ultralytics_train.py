@@ -333,10 +333,9 @@ def main() -> None:
     if keep_duplicates:
         install_keep_duplicate_label_patch()
     install_darkfusion_training_callbacks()
-    from ultralytics.cfg import entrypoint
+    from darkfusion_ultralytics_cli import run_ultralytics_entrypoint
 
-    sys.argv = ["yolo", *sys.argv[1:]]
-    entrypoint()
+    run_ultralytics_entrypoint(sys.argv[1:])
 
 
 if __name__ == "__main__":

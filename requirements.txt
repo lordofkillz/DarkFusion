@@ -3,7 +3,9 @@
 # Recommended source setup/update from the repository root:
 #   powershell -ExecutionPolicy Bypass -File .\install.ps1
 # Close DarkFusion and finish training first. The installer replaces overlapping
-# ORT packages and sets up the matching Microsoft Windows App SDK runtime.
+# ORT/TensorRT packages and sets up the matching Microsoft Windows App SDK runtime.
+# TensorRT 11 engines must be rebuilt from original checkpoints/ONNX files;
+# preserve existing engines until the newly exported copies have been verified.
 #
 # Advanced fresh-environment installation only:
 #   conda create -n fusion python=3.12.15 -y
@@ -24,107 +26,126 @@
 --extra-index-url https://pypi.nvidia.com
 
 # Build helpers used by direct ML packages.
-setuptools==83.0.0
-wheel==0.46.2
-ninja==1.13.0
+setuptools==84.2.1
+wheel==0.48.0
+ninja==1.13.2
 
 # Core ML / vision stack.
-torch==2.13.0+cu130
-torchvision==0.28.0+cu130
+# NumPy 1/OpenCV 4.11/SAHI 0.11 retain the current application APIs and ABI.
+torch==2.14.1+cu130
+torchvision==0.29.1+cu130
 numpy==1.26.4
-scipy==1.15.3
-Pillow==12.3.0
+scipy==1.17.1
+Pillow==13.0.0
 pi-heif==1.4.0
-PyYAML==6.0.2
-psutil==7.0.0
+PyYAML==6.0.3
+psutil==7.2.2
 GPUtil==1.4.0
-nvidia-ml-py==13.610.43
-tqdm==4.66.3
+nvidia-ml-py==13.615.71
+tqdm==4.70.1
 
 # OpenCV for DarkFusion, Ultralytics, SAHI, GroundingDINO, and EasyOCR.
 # Keep all three pinned together. EasyOCR declares the headless package explicitly.
-opencv-python==4.9.0.80
-opencv-contrib-python==4.9.0.80
-opencv-python-headless==4.9.0.80
+opencv-python==4.11.0.86
+opencv-contrib-python==4.11.0.86
+opencv-python-headless==4.11.0.86
 
 # YOLO / SAHI / SAM / YOLOE.
-ultralytics==8.4.144
-ray[tune]==2.56.0
-pydantic==2.7.1
-lap==0.5.12
+ultralytics==8.4.184
+ray[tune]==2.59.0
+pydantic==2.14.1
+lap==0.5.13
 sahi==0.11.36
 clip @ git+https://github.com/ultralytics/CLIP.git@88ade288431a46233f1556d1e141901b3ef0a36b
 
-# Direct GroundingDINO path used by dinov5_2.py.
+# Direct GroundingDINO path used by darkfusion_dino.py.
 # Keep local model weights separately, especially Sam/groundingdino_swint_ogc.pth.
 groundingdino-py==0.4.0
-transformers==5.17.0
+transformers==5.20.2
 tokenizers==0.23.3
 safetensors==0.8.0
-huggingface-hub==1.5.0
+huggingface-hub==1.33.0
 supervision==0.6.0
-timm==1.0.15
-pycocotools==2.0.6
+timm==1.0.30
+pycocotools==2.0.11
 addict==2.4.0
 yapf==0.43.0
 
 # Stable Diffusion inpainting.
-diffusers==0.38.0
+diffusers==0.41.0
 accelerate==1.15.0
 
 # ONNX inference: Windows ML hardware policy / DirectML; PyTorch training remains CUDA.
 # Install into a fresh environment. ORT variants share a namespace; never stack them.
-onnx==1.22.0
+onnx==1.23.2
 onnxruntime-windowsml==1.25.2.202605110140; platform_system == "Windows"
 wasdk-Microsoft.Windows.AI.MachineLearning[all]==2.3.0; platform_system == "Windows"
 wasdk-Microsoft.Windows.ApplicationModel.DynamicDependency.Bootstrap==2.3.0; platform_system == "Windows"
 winrt-runtime==3.2.1; platform_system == "Windows"
-onnxruntime==1.22.0; platform_system != "Windows"
+onnxruntime==1.31.0; platform_system != "Windows"
 # Install only ONE ONNX Runtime distribution: the variants share native files.
 # Windows ML includes DirectML/CPU and acquires compatible provider plugins.
 # Native TensorRT export/engine support is separate from the ONNX backend.
-# Do not replace this with the unsuffixed latest package (currently CUDA 13).
-tensorrt-cu12==10.9.0.34
+# One explicitly pinned CUDA 13 TensorRT family; do not stack cu12/cu13.
+tensorrt-cu13==11.4.0.106
 
 # Desktop UI.
 PyQt5==5.15.11
+# qt-material 2.15+ dropped Qt 5 bindings; DarkFusion uses PyQt5.
 qt-material==2.14
-pyqtgraph==0.13.7
+pyqtgraph==0.14.0
 
 # DarkFusion runtime features.
 easyocr==1.7.2
-pandas==2.2.3
-matplotlib==3.6.3
-plotly==6.1.2
-scikit-learn==1.7.0
-mss==10.0.0
+pandas==2.3.3
+matplotlib==3.11.2
+plotly==7.1.0
+scikit-learn==1.9.1
+mss==10.2.0
 PyAutoGUI==0.9.54
-SpeechRecognition==3.14.3
-python-dotenv==1.2.2
+SpeechRecognition==3.17.0
+python-dotenv==1.2.4
 requests==2.34.2
 # The default extra installs yt-dlp-ejs. The Windows installer also supplies
 # private hash-pinned FFmpeg/FFprobe/Deno via scripts/install-media-tools.py.
 # These are real executables, not the unrelated ffmpeg Python package.
-yt-dlp[default]==2026.8.19
+yt-dlp[default]==2026.10.21
 yt-dlp-ejs==0.8.0
-beautifulsoup4==4.13.4
-shapely==2.1.1
+beautifulsoup4==4.15.0
+shapely==2.2.0
 perlin-noise==1.14
 
 # Security-patched shared dependencies and optional runtime model/export helpers.
 # Keep these explicit so a fresh install has the same reviewed feature support.
-protobuf==5.29.6
-anyio==4.14.2
-filelock==3.20.3
-fonttools==4.60.2
-fsspec==2026.6.0
-idna==3.15
-pip==26.2.1
-pygments==2.20.0
-soupsieve==2.9.0
+protobuf==7.36.2
+Brotli==1.2.1
+anyio==4.15.1
+filelock==4.2.4
+fonttools==4.67.0
+fsspec==2026.9.0
+idna==3.20
+pip==26.2.2
+pygments==2.21.0
+soupsieve==3.0.4
 urllib3==2.8.0
-sentencepiece==0.2.1
-onnxslim==0.1.87
+msgpack==1.2.3
+sentencepiece==0.2.2
+onnxslim==0.1.98
 py-cpuinfo==9.0.0
 einops==0.8.2
-seaborn==0.12.2
+seaborn==0.13.2
+
+# Coupled helpers required by the current Ultralytics release.
+ultralytics-thop==2.2.3
+ultralytics-platform==0.1.92
+
+# TensorRT 11 reduced-precision exports use NVIDIA ModelOpt. Install its base
+# package plus these ONNX helpers, NOT [onnx]/[all]: those extras install a
+# conflicting onnxruntime-gpu distribution over Windows ML on Windows.
+nvidia-modelopt==0.47.0
+onnx-graphsurgeon==0.6.1
+onnxconverter-common==1.16.0
+polygraphy==0.53.6
+onnxscript==0.7.2
+cppimport==26.4.17
+lief==1.0.0

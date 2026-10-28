@@ -22,7 +22,7 @@ import darkfusion_windows_ml as runtime
 
 logger = logging.getLogger(__name__)
 _lock = threading.RLock()
-SCHEMA = 4  # Bounded RTX profiles and consistent Windows ML device registration.
+SCHEMA = 9  # Validate end-to-end background rows at the caller's confidence floor.
 
 
 @lru_cache(maxsize=128)
@@ -109,6 +109,7 @@ def _fingerprint(model, tensor):
              "contract": {key: getattr(model, key, None) for key in
                           ("task", "framework", "output_format", "end2end", "names", "damo_resize")},
              "box_units": model.runtime_options.get("darknet_box_units"),
+             "validation_confidence": getattr(model, "_comparison_confidence", 0.001),
              "cpu_fallback": model.include_cpu_fallback, "policy": model.runtime_options["auto_policy"]}
     value["comparison_epoch"] = model.runtime_options["comparison_epoch"]
     return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()
@@ -139,12 +140,14 @@ def _candidates(model):
     return choices
 
 
-def _assert_detection_rows(actual, expected):
+def _assert_detection_rows(actual, expected, *, confidence_floor=0.0):
     """Compare the same end-to-end detections without requiring TopK row order.
 
     Keep the original numeric tolerances for coordinates, scores and extras.
     Class IDs must match exactly, and duplicate rows require distinct matches.
-    No confidence filtering: even low-ranked outputs must remain equivalent.
+    Rows below the validation floor on both sides may have unconstrained box
+    regressions/TopK order. Their scores still match. A row eligible on either
+    side requires the original full coordinate/class/extra-data checks.
     """
     for rows, reference_rows in zip(actual, expected):
         if rows.shape != reference_rows.shape or rows.shape[-1] < 6:
@@ -152,10 +155,21 @@ def _assert_detection_rows(actual, expected):
         compatible = np.all(np.isclose(rows[:, None, :], reference_rows[None, :, :],
                                        rtol=5e-3, atol=5e-3, equal_nan=False), axis=-1)
         compatible &= rows[:, None, 5] == reference_rows[None, :, 5]
+        background = ((rows[:, 4] < confidence_floor)[:, None]
+                      & (reference_rows[:, 4] < confidence_floor)[None, :])
+        compatible |= background & np.isclose(rows[:, None, 4], reference_rows[None, :, 4],
+                                               rtol=5e-3, atol=5e-3, equal_nan=False)
         matches = np.full(len(reference_rows), -1, dtype=np.int64)
 
         def assign(row, seen):
-            for target in np.flatnonzero(compatible[row]):
+            targets = np.flatnonzero(compatible[row])
+            # Low-score TopK rows often share many valid background matches.
+            # Fill unused targets first instead of reassigning every prior row.
+            free = targets[matches[targets] < 0]
+            if len(free):
+                matches[free[0]] = row
+                return True
+            for target in targets:
                 if seen[target]:
                     continue
                 seen[target] = True
@@ -169,9 +183,35 @@ def _assert_detection_rows(actual, expected):
                 raise ValueError("Provider detections differ from CPU reference (not just row order).")
 
 
-def _measure(candidate, tensor, reference=None):
-    inputs = {candidate.input_name: tensor}
-    outputs = candidate.session.run(candidate.output_names, inputs)
+def _assert_raw_detections(candidate, actual, expected, batch_size):
+    """Check all scores, but ignore unused background box/extra regressions.
+
+    Low-confidence anchors have unconstrained box regressions: FP16 providers
+    can disagree there without changing any detection. Use the union of both
+    providers' confidence-eligible anchors, including class/objectness scores.
+    Coordinates/extras retain the existing tolerance and active class IDs must
+    agree. No predictions or user thresholds are altered by this comparison.
+    """
+    rows = candidate._raw_predictions(actual, batch_size)
+    reference = candidate._raw_predictions(expected, batch_size)
+    count = len(candidate.names)
+    offset, extras = candidate._raw_layout(rows.shape[-1])
+    scores, expected_scores = rows[..., offset:extras], reference[..., offset:extras]
+    np.testing.assert_allclose(scores, expected_scores, rtol=5e-3, atol=5e-3, equal_nan=False)
+    if offset == 5:
+        np.testing.assert_allclose(rows[..., 4], reference[..., 4], rtol=5e-3, atol=5e-3, equal_nan=False)
+        scores = scores * rows[..., 4:5]
+        expected_scores = expected_scores * reference[..., 4:5]
+    if count <= 0 or scores.shape[-1] != count:
+        raise ValueError("Raw provider class-score contract is invalid.")
+    floor = getattr(candidate, "_comparison_confidence", 0.001)
+    active = (scores.max(axis=-1) >= floor) | (expected_scores.max(axis=-1) >= floor)
+    np.testing.assert_array_equal(scores[active].argmax(axis=-1), expected_scores[active].argmax(axis=-1))
+    np.testing.assert_allclose(rows[active, :4], reference[active, :4], rtol=5e-3, atol=5e-3, equal_nan=False)
+    np.testing.assert_allclose(rows[active, extras:], reference[active, extras:], rtol=5e-3, atol=5e-3, equal_nan=False)
+
+
+def _validate_outputs(candidate, tensor, outputs, reference=None):
     if any(not np.isfinite(output).all() for output in outputs):
         raise ValueError("Provider returned non-finite model outputs.")
     if reference is not None:
@@ -184,15 +224,28 @@ def _measure(candidate, tensor, reference=None):
                 raise ValueError("CPU reference contains non-finite model outputs.")
             if index == 0 and getattr(candidate, "end2end", False):
                 _assert_detection_rows(candidate._raw_predictions(actual, tensor.shape[0]),
-                                       candidate._raw_predictions(expected, tensor.shape[0]))
+                                       candidate._raw_predictions(expected, tensor.shape[0]),
+                                       confidence_floor=getattr(candidate, "_comparison_confidence", 0.001))
+            elif (index == 0 and getattr(candidate, "framework", "") not in {"darknet", "damo"}
+                  and getattr(candidate, "task", "") in {"detect", "segment", "pose", "obb"}):
+                _assert_raw_detections(candidate, actual, expected, tensor.shape[0])
             else:
                 np.testing.assert_allclose(actual, expected, rtol=5e-3, atol=5e-3, equal_nan=False)
+
+
+def _measure(candidate, tensor, reference=None):
+    inputs = {candidate.input_name: tensor}
+    outputs = candidate.session.run(candidate.output_names, inputs)
+    _validate_outputs(candidate, tensor, outputs, reference)
     candidate.session.run(candidate.output_names, inputs)  # second untimed warm-up
     samples = []
     for _ in range(5):
         started = time.perf_counter()
-        candidate.session.run(candidate.output_names, inputs)
+        measured_outputs = candidate.session.run(candidate.output_names, inputs)
         samples.append((time.perf_counter() - started) * 1000)
+    # Native CUDA-graph capture occurs during warm-up. Do not accept a provider
+    # whose initial enqueue worked but subsequent captured execution is wrong.
+    _validate_outputs(candidate, tensor, measured_outputs, reference if reference is not None else outputs)
     return statistics.median(samples), outputs
 
 
@@ -208,6 +261,11 @@ def _adopt(model, candidate, report):
 def select_fastest(model, tensor):
     """Remember the fastest numerically validated compatible provider/device."""
     with _lock:
+        original_provider = model.providers[0] if model.providers else "CPUExecutionProvider"
+        original_device = getattr(model, "device_id", 0)
+        cpu = None
+        candidate = None
+        results = []
         try:
             key = _fingerprint(model, tensor)
             folder = Path(model.cache_dir) / "provider-performance"
@@ -217,6 +275,10 @@ def select_fastest(model, tensor):
                 cached = json.loads(path.read_text(encoding="utf-8"))
                 selected = (cached["provider"], int(cached["device"]))
                 if cached["schema"] == SCHEMA and cached["key"] == key and selected in choices:
+                    # Keeping the initial DirectML session alive while RTX Run
+                    # initializes cuDNN fails on the tested NVIDIA stack. The
+                    # caller holds the model's session lock throughout selection.
+                    model.session = None
                     candidate = _candidate(model, *selected)
                     # Cached winners still have to execute this input, not merely
                     # register successfully. No repeated benchmark is needed.
@@ -224,30 +286,35 @@ def select_fastest(model, tensor):
                     _adopt(model, candidate, dict(cached, source="cache"))
                     return
             except Exception:
+                candidate = None
                 pass  # Corrupt/stale/unloadable cache is safe to recompute.
             logger.info("Comparing ONNX providers once for %s, input %s; no preview or annotation writes.", model.model_path, tensor.shape)
             cpu = _candidate(model, "CPUExecutionProvider", 0)
             cpu_ms, reference = _measure(cpu, tensor)
-            best = cpu if ("CPUExecutionProvider", 0) in choices else None
-            best_ms = cpu_ms if best is not None else float("inf")
-            selected = ("CPUExecutionProvider", 0)
-            results = []
+            # Hold only CPU reference outputs/session while trying GPUs. Retain
+            # the winning descriptor, not its live GPU session, then reopen it.
+            model.session = None
+            selected = ("CPUExecutionProvider", 0) if ("CPUExecutionProvider", 0) in choices else None
+            best_ms = cpu_ms if selected is not None else float("inf")
             for provider, device in choices:
                 try:
                     candidate = cpu if provider == "CPUExecutionProvider" else _candidate(model, provider, device)
                     milliseconds = cpu_ms if candidate is cpu else _measure(candidate, tensor, reference)[0]
                     results.append({"provider": provider, "device": device, "median_ms": milliseconds})
                     if milliseconds < best_ms:
-                        best, best_ms, selected = candidate, milliseconds, (provider, device)
-                    if candidate is not best and candidate is not cpu:
-                        del candidate
+                        best_ms, selected = milliseconds, (provider, device)
                 except Exception as exc:
                     results.append({"provider": provider, "device": device, "error": str(exc)[:500]})
-            if best is None:
+                finally:
+                    candidate = None
+            if selected is None:
                 raise RuntimeError("No permitted provider passed the numeric comparison.")
+            candidate = cpu if selected[0] == "CPUExecutionProvider" else _candidate(model, *selected)
+            # Reopened engines must execute successfully before publication.
+            candidate.session.run(candidate.output_names, {candidate.input_name: tensor})
             report = {"schema": SCHEMA, "key": key, "provider": selected[0], "device": selected[1],
                       "median_ms": best_ms, "results": results, "source": "comparison"}
-            _adopt(model, best, report)
+            _adopt(model, candidate, report)
             try:
                 folder.mkdir(parents=True, exist_ok=True)
                 temporary = path.with_suffix(f".{os.getpid()}.tmp")
@@ -256,7 +323,18 @@ def select_fastest(model, tensor):
             except OSError as exc:
                 logger.warning("Provider comparison works, but its cache could not be saved: %s", exc)
         except Exception as exc:
-            # Never guess labels or discard the already usable hardware-policy
-            # session because a comparison/cache operation cannot be completed.
-            model.performance_selection = {"source": "hardware recommendation", "error": str(exc)}
+            candidate = None
+            if model.session is None:
+                # Restore the initial working backend if rebuilding a winner
+                # fails. CPU remains a last resort only when explicitly allowed.
+                try:
+                    restored = _candidate(model, original_provider, original_device)
+                except Exception:
+                    if cpu is None or not model.include_cpu_fallback:
+                        raise RuntimeError("Provider comparison failed and the original backend could not be restored.") from exc
+                    restored = cpu
+                _adopt(model, restored, {"device": getattr(restored, "device_id", original_device), "provider": restored.providers[0],
+                                        "source": "hardware recommendation"})
+            model.performance_selection = {"source": "hardware recommendation", "error": str(exc),
+                                           "results": results}
             logger.warning("Provider comparison unavailable; retaining %s: %s", model.providers, exc)
