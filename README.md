@@ -326,14 +326,86 @@ The following stay local and are ignored:
 For large public checkpoints, use a GitHub Release or a dedicated model host
 instead of committing them to normal Git history.
 
-## Community and acknowledgments
+## Community
 
-- [UltraDarkFusion Discord](https://discord.gg/fZTz8E44)
-- [Ultralytics](https://github.com/ultralytics/ultralytics)
-- [GroundingDINO](https://github.com/IDEA-Research/GroundingDINO)
-- [SAHI](https://github.com/obss/sahi)
-- [Darknet](https://github.com/hank-ai/darknet)
-- Inspired by [DarkMark](https://github.com/stephanecharette/DarkMark)
+Join the [UltraDarkFusion Discord](https://discord.gg/fZTz8E44) to discuss
+annotation workflows, share feedback, and connect with other users.
 
-UltraDarkFusion is licensed under the
+## Acknowledgments
+
+DarkFusion builds on the work of researchers, open-source maintainers, and
+platform developers. The projects below provide the models, libraries, and
+tools used throughout the application. Some integrations are optional and load
+only when their corresponding features are used.
+
+### Models and computer vision
+
+| Project | Role in DarkFusion |
+| --- | --- |
+| [Ultralytics](https://github.com/ultralytics/ultralytics) | YOLO inference, training, validation, tracking, model export, and integrations for YOLOE and SAM3. |
+| [YOLOE](https://github.com/THU-MIG/yoloe) | Open-vocabulary detection research and models, used through the Ultralytics integration. |
+| [Meta SAM 3](https://github.com/facebookresearch/sam3) | Segmentation models behind assisted annotation, snapping, propagation, and mask-based augmentation. |
+| [GroundingDINO](https://github.com/IDEA-Research/GroundingDINO) | Text-prompted object detection and automatic labeling. |
+| [Meta DINOv3](https://github.com/facebookresearch/dinov3) | Visual embeddings for similarity search, outlier detection, and dataset review. |
+| [OpenAI CLIP](https://github.com/openai/CLIP) and the [Ultralytics CLIP fork](https://github.com/ultralytics/CLIP) | Image-text similarity, semantic checks, and visual review features. |
+| [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) | The SRVGGNetCompact architecture and pretrained restoration model used by Object Clarity and clarity augmentation. |
+| [SAHI](https://github.com/obss/sahi) | Sliced inference for detecting objects within image regions. |
+| [Darknet](https://github.com/hank-ai/darknet) | Support for Darknet detector configurations and weights. |
+| [ByteTrack](https://github.com/FoundationVision/ByteTrack) and [BoT-SORT](https://github.com/NirAharon/BoT-SORT) | Object tracking algorithms accessed through Ultralytics and DarkFusion's ONNX tracking adapter. |
+| [EasyOCR](https://github.com/JaidedAI/EasyOCR) | Text recognition for OCR-assisted workflows. |
+| [Hugging Face Transformers](https://github.com/huggingface/transformers) | Model loading and processing for supported vision and image-text models. |
+| [Stable Diffusion](https://github.com/CompVis/stable-diffusion) | Inpainting research and Runway's inpainting checkpoint, used for background augmentation through Diffusers. |
+| [Hugging Face Diffusers](https://github.com/huggingface/diffusers) | Stable Diffusion inpainting for background augmentation. |
+| [Ollama](https://github.com/ollama/ollama) | Optional local vision-language model verification during dataset analysis. |
+
+### Inference and training infrastructure
+
+| Project | Role in DarkFusion |
+| --- | --- |
+| [PyTorch](https://github.com/pytorch/pytorch) and [TorchVision](https://github.com/pytorch/vision) | Neural network execution, CUDA training, tensor operations, and vision transforms. |
+| [ONNX](https://github.com/onnx/onnx) and [ONNX Runtime](https://github.com/microsoft/onnxruntime) | Exported model representation and the standalone ONNX inference backend. |
+| [Microsoft Windows ML](https://learn.microsoft.com/en-us/windows/ai/new-windows-ml/overview) and [DirectML](https://github.com/microsoft/DirectML) | Windows ONNX execution, hardware-provider selection, and GPU acceleration. |
+| [NVIDIA CUDA](https://developer.nvidia.com/cuda-toolkit), [TensorRT](https://github.com/NVIDIA/TensorRT), and [TensorRT for RTX](https://docs.nvidia.com/deeplearning/tensorrt-rtx/latest/) | NVIDIA GPU execution, native TensorRT engines, and the TensorRT RTX provider available through Windows ML. |
+| [NVIDIA Model Optimizer](https://github.com/NVIDIA/Model-Optimizer) | ModelOpt helpers for reduced-precision TensorRT exports. |
+| [Ray Tune](https://github.com/ray-project/ray) | Optional hyperparameter tuning through the Ultralytics training workflow. |
+
+### Desktop interface, images, and media
+
+| Project | Role in DarkFusion |
+| --- | --- |
+| [Python](https://www.python.org/) | Application logic and worker processes. |
+| [Qt](https://www.qt.io/) and [PyQt5](https://www.riverbankcomputing.com/software/pyqt/) | Desktop interface, annotation canvas, widgets, signals, and background UI work. |
+| [OpenCV](https://github.com/opencv/opencv) | Image and video I/O, preprocessing, geometry, augmentation, and capture. |
+| [PyQtGraph](https://github.com/pyqtgraph/pyqtgraph) and [qt-material](https://github.com/UN-GCPDS/qt-material) | Video display components and UI styling. |
+| [Python MSS](https://github.com/BoboTiG/python-mss) | Desktop capture fallback alongside the native Windows capture path. |
+| [yt-dlp](https://github.com/yt-dlp/yt-dlp) | Video and stream URL resolution and downloading. |
+| [FFmpeg and FFprobe](https://github.com/FFmpeg/FFmpeg) | Media decoding, inspection, extraction, and merging; Windows binaries are supplied by [Gyan's FFmpeg builds](https://github.com/GyanD/codexffmpeg). |
+| [Deno](https://github.com/denoland/deno) | The bundled JavaScript runtime used by yt-dlp's JavaScript support. |
+
+Image handling, dataset analysis, and reporting also use
+[NumPy](https://github.com/numpy/numpy),
+[Pillow](https://github.com/python-pillow/Pillow),
+[SciPy](https://github.com/scipy/scipy),
+[pandas](https://github.com/pandas-dev/pandas),
+[scikit-learn](https://github.com/scikit-learn/scikit-learn),
+[Shapely](https://github.com/shapely/shapely),
+[Matplotlib](https://github.com/matplotlib/matplotlib), and
+[Plotly](https://github.com/plotly/plotly.py).
+See [requirements.txt](requirements.txt) for the full Python dependency list
+and [media-tools.json](UltraDarkFusion/media-tools.json) for bundled media tools.
+
+### Inspiration
+
+[DarkMark](https://github.com/stephanecharette/DarkMark), by
+[Stephane Charette](https://github.com/stephanecharette), is an inspiration for
+DarkFusion's image annotation and dataset preparation workflow.
+
+## License and third-party notices
+
+UltraDarkFusion's application source is licensed under the
 [GNU Affero General Public License v3](LICENSE.txt).
+Third-party libraries, tools, and model weights have their own upstream licenses
+and notices. Included source attributions include the
+[DINOv3 notice](UltraDarkFusion/darkfusion_dinov3/NOTICE.md),
+[DINOv3 license](UltraDarkFusion/darkfusion_dinov3/LICENSE.md), and
+[Real-ESRGAN notice](UltraDarkFusion/licenses/Real-ESRGAN.txt).
