@@ -45,6 +45,42 @@ except ImportError as exc:  # pragma: no cover - exercised only in missing depen
 
 IMAGE_SUFFIXES = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 
+
+def _preparation_worker_initializer(torch):
+    """Limit only this worker's already-loaded OpenMP runtime."""
+    import ctypes
+    try:
+        if os.name == "nt":
+            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel.GetModuleHandleW.argtypes = [ctypes.c_wchar_p]
+            kernel.GetModuleHandleW.restype = ctypes.c_void_p
+            handle = kernel.GetModuleHandleW("libiomp5md.dll")
+            if not handle:
+                return None
+            library = ctypes.CDLL("libiomp5md.dll", handle=handle)
+        else:
+            # Never load a second OpenMP implementation into the process.
+            mode = getattr(os, "RTLD_NOLOAD", 0)
+            if not mode:
+                return None
+            directory = Path(torch.__file__).resolve().parent / "lib"
+            candidates = sorted(directory.glob("libgomp*.so*")) + sorted(directory.glob("libomp*.dylib"))
+            if not candidates:
+                return None
+            library = ctypes.CDLL(str(candidates[0]), mode=mode | os.RTLD_NOW)
+        set_threads = library.omp_set_num_threads
+        set_threads.argtypes = [ctypes.c_int]
+        set_threads.restype = None
+    except (AttributeError, OSError, TypeError):
+        return None
+
+    def initialize():
+        torch.get_num_threads()  # Finish lazy initialization before the local limit.
+        set_threads(1)
+
+    return initialize
+
+
 # Match Ultralytics' half().div_(255), not multiplication by an already rounded
 # FP16 reciprocal. All 256 byte values are representable exactly before division.
 _FP16_NORMALIZED_PIXELS = (np.arange(256, dtype=np.float32) / 255.0).astype(np.float16)
@@ -1697,10 +1733,13 @@ class DarkFusionOnnxModel:
             return None  # Select/validate providers before starting reusable preparation.
         with self._session_lock:
             if getattr(self, "_image_preparation_pool", None) is None:
-                # OpenMP's thread allowance is local to the calling worker.
-                # Keep independent image jobs from each spawning a full team.
+                initializer = _preparation_worker_initializer(torch)
+                if initializer is None:
+                    return None
+                # torch.set_num_threads also changes defaults for future threads.
+                # Configure OpenMP directly without changing PyTorch's defaults.
                 self._image_preparation_pool = ImagePreparationPool(
-                    initializer=lambda: torch.set_num_threads(1),
+                    initializer=initializer,
                     max_workers=min(8, os.cpu_count() or 1))
             pool = self._image_preparation_pool
             template = object.__new__(DarkFusionOnnxModel)
