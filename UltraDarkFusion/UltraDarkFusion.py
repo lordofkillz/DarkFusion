@@ -1,6 +1,6 @@
 from darkfusion_environment import configure_runtime
-from darkfusion_version import APP_VERSION
 configure_runtime()
+from darkfusion_version import APP_VERSION
 from darkfusion_environment import configure_gui_opencv_threads
 
 import warnings
