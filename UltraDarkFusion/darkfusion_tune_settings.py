@@ -9,6 +9,106 @@ import tempfile
 import yaml
 
 
+# These are training settings without duplicate controls in Train Setup.
+# Filter against the installed Ultralytics schema when opening the editor.
+TRAINING_HYPERPARAMETER_GROUPS = {
+    "Learning": ("optimizer", "lr0", "lrf", "momentum", "weight_decay", "warmup_epochs",
+                 "warmup_momentum", "warmup_bias_lr", "cos_lr", "nbs"),
+    "Augmentations": ("multi_scale", "mosaic", "close_mosaic", "mixup", "cutmix", "hsv_h",
+                      "hsv_s", "hsv_v", "degrees", "translate", "scale", "shear", "perspective",
+                      "flipud", "fliplr", "bgr", "copy_paste", "copy_paste_mode"),
+    "Precision and performance": ("amp", "quantize", "compile", "channels_last"),
+    "Loss and task": ("box", "cls", "cls_pw", "dfl", "pose", "kobj", "rle", "angle",
+                      "mask_ratio", "overlap_mask", "dropout", "auto_augment", "erasing"),
+    "Run controls": ("seed", "deterministic", "fraction", "save_period", "time"),
+}
+_TASK_PARAMETERS = {
+    "pose": {"pose"}, "kobj": {"pose"}, "rle": {"pose"}, "angle": {"obb"},
+    "mask_ratio": {"segment"}, "overlap_mask": {"segment"},
+    "copy_paste": {"segment", "obb"}, "copy_paste_mode": {"segment", "obb"},
+    "dropout": {"classify"}, "auto_augment": {"classify"}, "erasing": {"classify"},
+    "box": {"detect", "segment", "pose", "obb"},
+    "dfl": {"detect", "segment", "pose", "obb"},
+    **{key: {"detect", "segment", "pose", "obb"} for key in
+       ("mosaic", "close_mosaic", "mixup", "cutmix", "multi_scale", "degrees", "translate")},
+}
+
+
+def training_hyperparameter_groups(task="detect"):
+    from ultralytics.utils import DEFAULT_CFG_DICT
+    return {name: tuple(key for key in keys if key in DEFAULT_CFG_DICT
+                       and (key not in _TASK_PARAMETERS or task in _TASK_PARAMETERS[key]))
+            for name, keys in TRAINING_HYPERPARAMETER_GROUPS.items()}
+
+
+def training_augmentation_preset(name, task="detect"):
+    """Explicit user choices, limited to native training augmentation settings."""
+    from ultralytics.utils import DEFAULT_CFG_DICT
+    allowed = set(training_hyperparameter_groups(task)["Augmentations"])
+    if name == "lighter":
+        values = dict(mosaic=0.0, mixup=0.0, cutmix=0.0, copy_paste=0.0, multi_scale=0.0)
+    elif name == "defaults":
+        values = {key: DEFAULT_CFG_DICT[key] for key in allowed}
+    elif name == "mixing":
+        values = dict(mosaic=1.0, mixup=0.1, cutmix=0.1, multi_scale=0.25)
+    else:
+        raise ValueError("Choose an augmentation preset.")
+    return {key: value for key, value in values.items() if key in allowed}
+
+
+def read_training_configuration(path):
+    """Read the selected cfg, without generating files or changing its values."""
+    from ultralytics.utils import YAML
+    payload = YAML.load(path)
+    if not isinstance(payload, dict):
+        raise ValueError("Training configuration YAML must contain a mapping.")
+    return payload
+
+
+def training_hyperparameter_values(payload):
+    from ultralytics.utils import DEFAULT_CFG_DICT
+    values = dict(DEFAULT_CFG_DICT)
+    values.update({key: value for key, value in payload.items() if key in values})
+    return values
+
+
+def save_training_hyperparameters(path, changes, write_atomic, *, data_yaml="", baseline=None):
+    """Merge only edited native settings into the exact selected training cfg."""
+    if data_yaml and Path(path).resolve() == Path(data_yaml).resolve():
+        raise ValueError("Select the training configuration YAML, not the dataset YAML.")
+    payload = read_training_configuration(path)
+    from ultralytics.cfg import get_cfg
+    from ultralytics.utils import DEFAULT_CFG_DICT
+    allowed = {key for keys in TRAINING_HYPERPARAMETER_GROUPS.values() for key in keys}
+    if set(changes) - allowed:
+        raise ValueError("Change basic training settings using Train Setup.")
+    values = training_hyperparameter_values(payload)
+    if baseline is not None:
+        conflicts = [key for key in changes if values.get(key) != baseline.get(key)]
+        if conflicts:
+            raise ValueError("The YAML changed while editing. Reload before changing: " + ", ".join(conflicts))
+    values.update(changes)
+    for key, value in changes.items():
+        if key not in DEFAULT_CFG_DICT:
+            raise ValueError(f"This Ultralytics version does not support {key}.")
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError(f"{key} must be finite.")
+    config = get_cfg(overrides=values)
+    if config.quantize == 8 and config.compile:
+        raise ValueError("INT8 QAT requires compile=False. Turn compilation off before saving.")
+    if changes.get("quantize") == 8:
+        import importlib.util
+        if importlib.util.find_spec("modelopt") is None:
+            raise ValueError("INT8 QAT requires NVIDIA ModelOpt (nvidia-modelopt>=0.44).")
+    # Keep unknown/custom keys and all non-edited settings in the original file.
+    # get_cfg canonicalizes precision aliases, including quantize='int8'.
+    edited = {key: getattr(config, key) for key in changes}
+    if any(payload.get(key) != value or key not in payload for key, value in edited.items()):
+        payload.update(edited)
+        write_atomic(str(path), yaml.safe_dump(payload, sort_keys=False, allow_unicode=True))
+    return payload
+
+
 def tune_target_path(data_yaml, use_recommended):
     """Choose the recommendations file or the exact selected dataset YAML."""
     if not data_yaml:

@@ -1,11 +1,8 @@
 # ONNX execution providers
 
 DarkFusion selects among the execution providers available in its installed
-ONNX Runtime. Check them without changing the environment:
-
-```powershell
-python darkfusion_onnx_runtime.py --list-providers
-```
+ONNX Runtime. Open **Auto Label → Weights → ONNX provider setup** to inspect
+and refresh the providers using the application's existing setup controls.
 
 New Windows source installations use `onnxruntime-windowsml` and matching Windows
 App SDK projections. The installer supplies the signed Microsoft shared runtime
@@ -51,6 +48,15 @@ the ONNX model, or change the selected preprocessing/annotation contract.
 An installed provider can still reject an unsupported model; Automatic excludes
 failed or numerically inconsistent candidates, while a failed manual switch keeps
 the previous usable session.
+
+TensorRT RTX keeps a compiled startup cache in the configured cache directory.
+The first preparation runs in a cancellable background process; frame inference
+continues to use the local session. Model contents, shape/provider options,
+hardware, drivers, and runtime/provider versions determine cache reuse. A failed
+or incompatible cache retains the original ONNX loading path. ReID uses the same
+cache preparation while retaining Ultralytics' encoder and crop processing.
+Source weights, images, labels, and project classes are not rewritten.
+This uses the supported [Windows ML compiled-model mechanism](https://learn.microsoft.com/en-us/windows/ai/new-windows-ml/model-compilation).
 
 ONNX Runtime's Windows ML, CPU, GPU, DirectML, and OpenVINO pip distributions all provide
 the same `onnxruntime` module. Do not install them together or use the removed

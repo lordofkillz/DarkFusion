@@ -87,23 +87,33 @@ def _ray_files(root):
 
 
 def _experiment_root(root):
-    """Ray can increment the name because the console logger creates root first."""
+    """Tuners can increment the name because the console logger creates root first."""
     candidates = [root]
     candidates.extend(
         path for path in _children(root.parent)
         if path.name.startswith(root.name)
-        and path.name[len(root.name):].isdigit() and path.is_dir()
+        and re.fullmatch(r"-?\d+", path.name[len(root.name):])
+        and path.is_dir() and not path.is_symlink()
     )
     recognized = []
     for path in candidates:
         states, trials = _ray_files(path)
-        if states or trials or (path / "tuner.pkl").is_file():
-            modified = max((_mtime(p) for p in states + trials), default=_mtime(path))
-            recognized.append((modified, path, states, trials))
+        is_ray = bool(states or trials or (path / "tuner.pkl").is_file())
+        markers = [path / name for name in (
+            "tune_results.csv", "tune_results.ndjson", "best_hyperparameters.yaml", "best_hyperparameters.yml"
+        ) if (path / name).is_file()]
+        if is_ray or markers:
+            modified = max((_mtime(p) for p in states + trials + markers), default=_mtime(path))
+            recognized.append((modified, path, states, trials, is_ray))
     if recognized:
-        _, path, states, trials = max(recognized, key=lambda value: value[0])
-        return path, states, trials, True
+        _, path, states, trials, is_ray = max(recognized, key=lambda value: value[0])
+        return path, states, trials, is_ray
     return root, [], [], False
+
+
+def resolve_tune_directory(run_dir):
+    """Resolve both built-in and Ray output folders using their actual artifacts."""
+    return str(_experiment_root(Path(run_dir))[0]) if run_dir else ""
 
 
 def _nested_metrics(trial_dir):
@@ -225,7 +235,7 @@ def tuning_snapshot(run_dir, log_text="", iterations=0):
         return _snapshot(list(trials.values()), total)
 
     starts = list(re.finditer(r"Starting iteration\s+(\d+)\s*/\s*(\d+)", text, re.I))
-    builtin = (root / "tune_results.csv").is_file() or (root / "tune_results.ndjson").is_file()
+    builtin = (experiment / "tune_results.csv").is_file() or (experiment / "tune_results.ndjson").is_file()
     if not starts and not builtin and not total:
         return {}
     snapshot = _snapshot([], total)

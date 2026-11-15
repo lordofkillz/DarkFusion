@@ -51,8 +51,14 @@ opencv-contrib-python==4.11.0.86
 opencv-python-headless==4.11.0.86
 
 # YOLO / SAHI / SAM / YOLOE.
-ultralytics==8.4.184
+ultralytics==8.4.197
+dill==0.4.1
 ray[tune]==2.59.0
+# Ultralytics Ray Tune uses Optuna as its default search algorithm.
+optuna==5.0.0
+alembic==1.20.1
+sqlalchemy==2.1.6
+colorlog==6.12.0
 pydantic==2.14.1
 lap==0.5.13
 sahi==0.11.36
@@ -104,6 +110,7 @@ scikit-learn==1.9.1
 mss==10.2.0
 PyAutoGUI==0.9.54
 SpeechRecognition==3.17.0
+PyAudio==0.2.14
 python-dotenv==1.2.4
 requests==2.34.2
 # The default extra installs yt-dlp-ejs. The Windows installer also supplies
@@ -126,7 +133,7 @@ fsspec==2026.9.0
 idna==3.20
 pip==26.2.2
 pygments==2.21.0
-soupsieve==3.0.4
+soupsieve==4.0
 urllib3==2.8.0
 msgpack==1.2.3
 sentencepiece==0.2.2

@@ -6,6 +6,7 @@ Keep one set of measurements, rather than copying every label per candidate.
 """
 
 import math
+import os
 import re
 from collections import Counter
 
@@ -13,6 +14,68 @@ import numpy as np
 
 
 AUTO_SIZES = (320, 416, 512, 640, 768, 832, 960, 1024, 1280, 1536, 1920, 2048)
+
+
+def training_file_signature(path):
+    try:
+        stat = os.stat(path)
+        return stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_ino
+    except (OSError, TypeError, ValueError):
+        return None
+
+
+def training_image_dimensions(path):
+    """Read oriented dimensions without decompressing PNG image pixels."""
+    from PIL import Image
+
+    with open(path, "rb", buffering=512 * 1024) as stream:
+        with Image.open(stream) as image:
+            width, height = image.size
+            if image.format == "PNG" and getattr(image, "png", None) is not None:
+                # Pillow's PNG getexif() loads pixels to find trailing metadata.
+                # Use its existing metadata handlers, seeking past pixel chunks.
+                stream.seek(8)
+                file_size = os.fstat(stream.fileno()).st_size
+                after_pixels = False
+                while True:
+                    header = stream.read(8)
+                    if len(header) != 8:
+                        raise OSError("Truncated PNG metadata")
+                    length = int.from_bytes(header[:4], "big")
+                    kind = header[4:]
+                    position = stream.tell()
+                    end = position + length + 4
+                    if end > file_size:
+                        raise OSError("Truncated PNG chunk")
+                    if kind == b"IDAT":
+                        after_pixels = True
+                    elif kind == b"IEND" or (after_pixels and kind == b"fcTL"):
+                        break
+                    elif after_pixels and kind in {b"eXIf", b"tEXt", b"zTXt", b"iTXt"}:
+                        image.png.call(kind, position, length)
+                    stream.seek(end)
+                orientation = Image.Image.getexif(image).get(274)
+            else:
+                orientation = image.getexif().get(274)
+            return (height, width) if orientation in (6, 8) else (width, height)
+
+
+def parse_training_batch(value):
+    """Preserve Ultralytics AutoBatch targets and positive fixed batches."""
+    if str(value).strip().lower() == "auto":
+        return -1
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise ValueError("Batch must be Auto, -1, a memory fraction such as 0.7, or a positive integer.") from None
+    if math.isfinite(number):
+        if number == -1:
+            return -1
+        if 0 < number < 1:
+            return number
+        if number >= 1 and number.is_integer():
+            return int(number)
+    raise ValueError("Batch must be Auto, -1, a memory fraction such as 0.7, or a positive integer.")
 
 
 def aligned_size(value, stride=32):

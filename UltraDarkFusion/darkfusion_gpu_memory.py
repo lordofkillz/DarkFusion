@@ -238,12 +238,17 @@ def attach(owner):
         if window is None:
             return False
         workers = draining_video_workers + list(getattr(window, "_stopping_qthreads", []))
-        return _running(window, "video_inference_thread") or any(
+        loader = getattr(window, '_inference_model_load_worker', None)
+        loading = loader is not None and (not loader.cancel_requested or _running(window, '_inference_model_load_worker'))
+        return loading or _running(window, "video_inference_thread") or any(
             window.qthread_is_running(worker) for worker in workers)
 
     def suspend_detector():
         window = current()
         if window is not None:
+            loader = getattr(window, '_inference_model_load_worker', None)
+            if loader is not None:
+                loader.stop()
             worker = getattr(window, "video_inference_thread", None)
             if worker is not None and worker not in draining_video_workers:
                 draining_video_workers.append(worker)
@@ -260,6 +265,10 @@ def attach(owner):
                 worker._model = None
         draining_video_workers.clear()
         if window is not None:
+            loader = getattr(window, '_inference_model_load_worker', None)
+            if loader is not None:
+                loader.stop()
+                loader.result = None
             if getattr(window, "model", None) is not None or getattr(window, "net", None) is not None:
                 window._gpu_released_detector = True
             window.model = None
@@ -268,7 +277,8 @@ def attach(owner):
         return True
 
     manager.register("detector", Resource(
-        lambda: bool(draining_video_workers) or getattr(current(), "model", None) is not None or getattr(current(), "net", None) is not None,
+        lambda: bool(draining_video_workers) or getattr(current(), '_inference_model_load_worker', None) is not None
+            or getattr(current(), "model", None) is not None or getattr(current(), "net", None) is not None,
         release_detector, detector_busy, suspend_detector))
 
     manager.register("export", Resource(

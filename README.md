@@ -1,4 +1,4 @@
-# UltraDarkFusion 5.3.0
+# UltraDarkFusion 5.4.0
 
 > [!IMPORTANT]
 > **Before installing or using GPU inference, update Windows and your GPU driver.**
@@ -53,7 +53,28 @@ The [Python installation method](#python-installation) remains available below.
 GitHub's **Code → Download ZIP** provides the source for that method. For the
 recommended setup experience, use the **Download DarkFusionSetup.exe** link above.
 
-## What changed in 5.3.0
+## What changed in 5.4.0
+
+- The editor, canvas, annotation formats, review tools, auto-labeling, SAM,
+  propagation, video workflows, augmentations, and trainer now have dedicated
+  modules. Existing application entry points and annotation workflows remain
+  connected through the main window.
+- Optional SAHI video inference reuses the loaded model, batches compatible
+  tiles, preserves ROI and annotation geometry, and tracks after merging.
+- Training hyperparameters display generated values and provide accessible
+  controls. GUI settings take precedence; dataset YAML generation refreshes
+  the selected matching file and reports preparation errors before scanning.
+- Playback and capture use background initialization, bounded frame scheduling,
+  improved seeking, and an optional camera FPS-priority setting.
+- Model browsing, ONNX decoding/provider handling, class mapping, SAM warmup,
+  Review synchronization, and dataset file operations include the latest fixes.
+- Updated installation checks include every extracted feature module and the
+  reviewed dependency pins. Ultralytics updates can be checked and tested with
+  the guarded updater described below.
+
+See the [user guide](USER_GUIDE.md) for the current controls.
+
+## Earlier 5.3.0 updates
 
 ### Latest source updates
 
@@ -294,6 +315,31 @@ python -m pip install --no-user -r requirements.txt
 python scripts\verify_install.py
 python UltraDarkFusion\UltraDarkFusion.py
 ```
+
+### Updating Ultralytics
+
+Release installs keep the tested Ultralytics version pinned in `requirements.txt`.
+The repository's Dependabot configuration proposes weekly Ultralytics updates;
+it does not merge them or change a running installation automatically.
+
+To check the current environment from an activated Python shell:
+
+```powershell
+.\scripts\update-ultralytics.ps1 -PythonPath (Get-Command python).Source -CheckOnly
+```
+
+After closing DarkFusion, training and other Python jobs in that environment,
+run the same command without `-CheckOnly` to test and install the newest stable
+release. `-Version release` selects the repository pin; a numeric `-Version`
+selects that specific release. The updater downloads the candidate and previous
+wheels, checks the candidate separately, and restores the previous package if
+post-install verification fails. It does not upgrade Torch, CUDA, TensorRT or
+Windows ML dependencies. Logs and recovery wheels remain in the update cache.
+
+Compatibility checks cover the configuration schema, tracker/ReID interfaces,
+and native CPU predictions for boxes, pose, segmentation and OBB. Complete
+real-model/GPU acceptance before promoting a new release pin. Source users can
+also run `python scripts/verify_install.py --ultralytics-compat` independently.
 
 ## Models
 

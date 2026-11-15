@@ -7,14 +7,18 @@ from __future__ import annotations
 
 import atexit
 import ctypes
+import hashlib
 import importlib
 import importlib.metadata
 import json
 import logging
 import os
 from pathlib import Path
+import subprocess
 import sys
 import threading
+import time
+import uuid
 from functools import lru_cache, wraps
 from concurrent.futures import Future
 from queue import Queue
@@ -49,9 +53,14 @@ _diagnostics: list[str] = []
 _catalog_executor = None
 _catalog_thread = None
 _catalog_instance = None
+_compile_lock = threading.Lock()
 
 
 class WindowsMLSetupError(RuntimeError):
+    pass
+
+
+class ModelCompilationCancelled(WindowsMLSetupError):
     pass
 
 
@@ -448,3 +457,185 @@ def is_experimental(name):
 
 def provider_packages():
     return dict(_provider_packages)
+
+
+def _compilation_cancelled():
+    # The GUI model loader and live inference worker already own cancellation.
+    # Do not import Qt into standalone ONNX/compilation processes.
+    core = sys.modules.get('PyQt5.QtCore')
+    return bool(core is not None and core.QThread.currentThread().isInterruptionRequested())
+
+
+def _context_signature(source, provider, values, device_id, session_config):
+    from darkfusion_onnx_performance import _model_identity, _drivers
+    hardware = [device for device in devices() if provider == 'auto' or device['provider'] == provider]
+    for device in hardware:
+        device['metadata'].pop('LUID', None)
+    identity = dict(schema=1, source=_model_identity(source), provider=provider,
+        provider_options=values, device_id=device_id, session=session_config,
+        ort=get_ort().__version__, packages=provider_packages(), hardware=hardware,
+        drivers=_drivers(), os=sys.getwindowsversion().build)
+    return hashlib.sha256(json.dumps(identity, sort_keys=True).encode('utf-8')).hexdigest()
+
+
+def _cached_context_valid(target, marker, signature):
+    from darkfusion_onnx_performance import _file_hash
+    try:
+        data = json.loads(marker.read_text(encoding='utf-8'))
+        stat = target.stat()
+        return (isinstance(data, dict) and data.get('signature') == signature and stat.st_size > 0
+            and data.get('sha256') == _file_hash(str(target), stat.st_size, stat.st_mtime_ns))
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def _run_context_compiler(request):
+    environment = dict(os.environ, DARKFUSION_ONNX_COMPILE_WORKER='1', PYTHONNOUSERSITE='1')
+    process = subprocess.Popen([sys.executable, '-s', '-u', str(Path(__file__).resolve()), '--compile-context'],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment,
+        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    deadline = time.monotonic() + 600
+    payload = json.dumps(request).encode('utf-8')
+    try:
+        while True:
+            if _compilation_cancelled():
+                raise ModelCompilationCancelled('Model compilation cancelled.')
+            if time.monotonic() > deadline:
+                raise WindowsMLSetupError('Backend compilation timed out.')
+            try:
+                output, error = process.communicate(payload, timeout=.1)
+                break
+            except subprocess.TimeoutExpired:
+                payload = None
+        if process.returncode:
+            detail = (error or output).decode('utf-8', errors='replace')[-4000:]
+            raise WindowsMLSetupError(f'Backend compilation failed: {detail}')
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate(timeout=5)
+
+
+def compiled_model_path(source, provider, values, *, cache_dir, device_id=0,
+                        runtime_options=None, session_options=None, selection_policy=None,
+                        session_entries=None):
+    """Cache RTX conversion outside the GUI process; inference remains local.
+
+    No frame, tensor, detector, or inference request crosses the process boundary.
+    Provider/model/device/driver changes invalidate the cache, and the original
+    ONNX is retained for unsupported runtimes or a failed compilation.
+    """
+    automatic = provider == 'auto' and selection_policy in {'MAX_PERFORMANCE', 'PREFER_GPU'}
+    if automatic and 'NvTensorRTRTXExecutionProvider' not in values:
+        return source
+    if ((provider != 'NvTensorRTRTXExecutionProvider' and not automatic) or not installed()
+            or os.environ.get('DARKFUSION_ONNX_COMPILE_WORKER') == '1'
+            or not hasattr(get_ort(), 'ModelCompiler') or not isinstance(source, (str, os.PathLike))):
+        return source
+    source = os.path.abspath(os.fspath(source))
+    if not os.path.isfile(source):
+        return source
+    ort = get_ort()
+    options = session_options or ort.SessionOptions()
+    config = {name: getattr(options, name) for name in (
+        'enable_mem_pattern', 'enable_cpu_mem_arena', 'log_severity_level',
+        'intra_op_num_threads', 'inter_op_num_threads')}
+    config.update(execution_mode=int(options.execution_mode),
+        graph_optimization_level=int(options.graph_optimization_level))
+    config['entries'] = dict(session_entries or {})
+    config['selection_policy'] = selection_policy
+    try:
+        config['entries']['session.disable_cpu_ep_fallback'] = options.get_session_config_entry('session.disable_cpu_ep_fallback')
+    except RuntimeError:
+        pass
+    acquired = False
+    temporary = None
+    try:
+        while not acquired:
+            if _compilation_cancelled():
+                raise ModelCompilationCancelled('Model compilation cancelled.')
+            acquired = _compile_lock.acquire(timeout=.1)
+        signature = _context_signature(source, provider, values, int(device_id), config)
+        folder = Path(cache_dir).resolve() / 'compiled-contexts' / signature
+        target, marker = folder / 'model.onnx', folder / 'context.json'
+        if _cached_context_valid(target, marker, signature):
+            return str(target)
+        folder.mkdir(parents=True, exist_ok=True)
+        temporary = folder / f'model.{uuid.uuid4().hex}.tmp.onnx'
+        request = dict(source=source, output=str(temporary), provider=provider,
+            provider_options=values, device_id=int(device_id), runtime_options=settings(runtime_options),
+            session=config)
+        logger.info('Preparing compiled %s cache for %s.', provider, os.path.basename(source))
+        _run_context_compiler(request)
+        if _compilation_cancelled():
+            raise ModelCompilationCancelled('Model compilation cancelled.')
+        from darkfusion_onnx_performance import _file_hash
+        from darkfusion_dataset_operations import write_json_file_atomic
+        temporary.replace(target)
+        stat = target.stat()
+        write_json_file_atomic(str(marker), dict(signature=signature,
+            sha256=_file_hash(str(target), stat.st_size, stat.st_mtime_ns)))
+        return str(target)
+    except ModelCompilationCancelled:
+        raise
+    except Exception as error:
+        logger.warning('Compiled backend cache unavailable; using original ONNX: %s', error)
+        return source
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                logger.warning('Could not remove incomplete backend cache: %s', temporary)
+        if acquired:
+            _compile_lock.release()
+
+
+def invalidate_compiled_model(path):
+    """Invalidate our manifest, retaining the artifact for diagnosis."""
+    path = Path(path)
+    if path.name == 'model.onnx' and path.parent.parent.name == 'compiled-contexts':
+        try:
+            path.with_name('context.json').unlink(missing_ok=True)
+        except OSError as error:
+            logger.warning('Could not invalidate compiled backend cache: %s', error)
+
+
+def _compile_context_worker(request):
+    """Internal short-lived compiler service; never starts the application."""
+    ort = get_ort()
+    prepare(request['provider'], request['runtime_options'])
+    options = ort.SessionOptions()
+    config = request['session']
+    for name in ('enable_mem_pattern', 'enable_cpu_mem_arena', 'log_severity_level',
+                 'intra_op_num_threads', 'inter_op_num_threads'):
+        setattr(options, name, config[name])
+    options.execution_mode = ort.ExecutionMode(config['execution_mode'])
+    options.graph_optimization_level = ort.GraphOptimizationLevel(config['graph_optimization_level'])
+    for name, value in config['entries'].items():
+        options.add_session_config_entry(name, value)
+    if config['selection_policy']:
+        options.set_provider_selection_policy(getattr(ort.OrtExecutionProviderDevicePolicy, config['selection_policy']))
+    else:
+        selected = [device for device in ort.get_ep_devices() if device.ep_name == request['provider']]
+        index = request['device_id']
+        if not 0 <= index < len(selected):
+            raise WindowsMLSetupError('Selected compilation device is unavailable.')
+        options.add_provider_for_devices([selected[index]], request['provider_options'])
+    ort.ModelCompiler(options, request['source'], embed_compiled_data_into_model=True,
+        graph_optimization_level=options.graph_optimization_level).compile_to_file(request['output'])
+    import onnx
+    graph = onnx.load_model(request['output'], load_external_data=False)
+    if not any(node.op_type == 'EPContext' for node in graph.graph.node):
+        raise WindowsMLSetupError('The selected provider does not produce a compiled context.')
+
+
+if __name__ == '__main__' and sys.argv[1:] == ['--compile-context']:
+    sys.modules['darkfusion_windows_ml'] = sys.modules[__name__]
+    from darkfusion_environment import configure_runtime
+    configure_runtime()
+    _compile_context_worker(json.load(sys.stdin))

@@ -7,6 +7,7 @@ import sys
 import json
 import math
 import shutil
+import tempfile
 from datetime import datetime
 
 import numpy as np
@@ -79,25 +80,37 @@ def verify_image_label_keep_duplicates(args: tuple) -> list:
         return [None, None, None, None, None, nm, nf, ne, nc, msg]
 
 
-def _raise_cache_miss(*_args, **_kwargs):
-    raise FileNotFoundError("DarkFusion forced an in-memory Ultralytics label recache.")
-
-
-def _skip_cache_save(prefix, path, x, version):
-    if isinstance(x, dict):
-        x["version"] = version
-    return None
-
-
 def install_keep_duplicate_label_patch() -> None:
-    """Disable Ultralytics exact duplicate label row removal for this process."""
+    """Preserve duplicate rows with a separate, policy-checked dataset cache."""
     import ultralytics.data.dataset as dataset
     import ultralytics.data.utils as data_utils
+    from pathlib import Path
+
+    if getattr(dataset, "_darkfusion_keep_duplicates_installed", False):
+        return
+    policy = "darkfusion-keep-duplicates-v1"
+    load_cache = dataset.load_dataset_cache_file
+    save_cache = dataset.save_dataset_cache_file
+
+    def policy_path(path):
+        path = Path(path)
+        return path.with_name(f"{path.stem}.{policy}{path.suffix}")
+
+    def load_keep_duplicate_cache(path):
+        cache = load_cache(policy_path(path))
+        if cache.get("darkfusion_label_policy") != policy:
+            raise ValueError("Dataset cache has a different duplicate-label policy.")
+        return cache
+
+    def save_keep_duplicate_cache(prefix, path, cache, version):
+        cache["darkfusion_label_policy"] = policy
+        return save_cache(prefix, policy_path(path), cache, version)
 
     data_utils.verify_image_label = verify_image_label_keep_duplicates
     dataset.verify_image_label = verify_image_label_keep_duplicates
-    dataset.load_dataset_cache_file = _raise_cache_miss
-    dataset.save_dataset_cache_file = _skip_cache_save
+    dataset.load_dataset_cache_file = load_keep_duplicate_cache
+    dataset.save_dataset_cache_file = save_keep_duplicate_cache
+    dataset._darkfusion_keep_duplicates_installed = True
 
 
 def _finite_number(value) -> bool:
@@ -178,11 +191,13 @@ def install_darkfusion_training_callbacks() -> None:
         return
 
     original_run_callbacks = BaseTrainer.run_callbacks
+    original_final_eval = BaseTrainer.final_eval
 
     def marker_path(trainer, name: str) -> str:
         return os.path.join(str(trainer.save_dir), name)
 
     def acknowledge(trainer, request: str, point: str) -> None:
+        trainer._darkfusion_requested_stop = True
         request_path = marker_path(trainer, request)
         try:
             os.remove(request_path)
@@ -322,7 +337,28 @@ def install_darkfusion_training_callbacks() -> None:
                             "Use weights/darkfusion_healthy.pt or weights/best.pt."
                         )
 
+    def final_eval_with_resume_checkpoint(trainer):
+        # Ultralytics strips optimizer/epoch state during final evaluation.
+        # A user-requested stop must retain the last complete training state
+        # so Resume can continue this run rather than restart its optimizer.
+        if not getattr(trainer, "_darkfusion_requested_stop", False) or not os.path.isfile(trainer.last):
+            return original_final_eval(trainer)
+        descriptor, saved_path = tempfile.mkstemp(
+            prefix=".darkfusion-resume-", suffix=".pt", dir=os.path.dirname(trainer.last)
+        )
+        os.close(descriptor)
+        try:
+            shutil.copyfile(trainer.last, saved_path)
+        except BaseException:
+            os.remove(saved_path)
+            raise
+        try:
+            return original_final_eval(trainer)
+        finally:
+            os.replace(saved_path, trainer.last)
+
     BaseTrainer.run_callbacks = run_callbacks_with_stop_control
+    BaseTrainer.final_eval = final_eval_with_resume_checkpoint
     BaseTrainer._darkfusion_stop_controls_installed = True
 
 

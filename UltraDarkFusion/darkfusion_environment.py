@@ -38,3 +38,12 @@ def configure_runtime():
     sys.path[:] = [path for path in sys.path if not user_package(path)]
     site.ENABLE_USER_SITE = False
     os.environ['PYTHONNOUSERSITE'] = '1'
+
+
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+APP_SETTINGS_FILE = "settings.json"
+
+
+APP_SETTINGS_PATH = os.path.join(APP_DIR, APP_SETTINGS_FILE)

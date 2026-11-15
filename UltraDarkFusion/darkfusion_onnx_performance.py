@@ -111,6 +111,8 @@ def _fingerprint(model, tensor):
              "box_units": model.runtime_options.get("darknet_box_units"),
              "validation_confidence": getattr(model, "_comparison_confidence", 0.001),
              "cpu_fallback": model.include_cpu_fallback, "policy": model.runtime_options["auto_policy"]}
+    if (box_scale := getattr(model, "raw_box_scale", None)) is not None:
+        value["contract"]["raw_box_scale"] = box_scale
     value["comparison_epoch"] = model.runtime_options["comparison_epoch"]
     return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()
 

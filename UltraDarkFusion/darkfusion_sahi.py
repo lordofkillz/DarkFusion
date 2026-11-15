@@ -2,6 +2,7 @@ import logging
 import inspect
 import hashlib
 import tempfile
+import time
 import cv2
 import numpy as np
 
@@ -13,7 +14,7 @@ from sahi.postprocess.combine import (
     NMSPostprocess,
 )
 from sahi.prediction import ObjectPrediction
-from sahi.slicing import slice_image
+from sahi.slicing import slice_image, get_slice_bboxes
 from sahi.utils.cv import read_image
 import os
 from PIL import Image, UnidentifiedImageError
@@ -47,6 +48,9 @@ class SahiPredictWrapper:
         roi_bounds=None,
         roi_reference_size=None,
         onnx_runtime_options=None,
+        model=None,
+        prediction_kwargs=None,
+        cancelled=None,
     ):
         self.fp16 = bool(fp16)
         self.inference_backend = str(inference_backend or "auto").strip().lower()
@@ -55,19 +59,27 @@ class SahiPredictWrapper:
         self.confidence_threshold = max(0.0, min(1.0, float(confidence_threshold)))
         self._uses_darkfusion_onnx = False
         self.onnx_runtime_model = None
-        self.detection_model = self._create_detection_model(
-            model_type=model_type,
-            model_path=model_path,
-            confidence_threshold=confidence_threshold,
-            device=device,
-        )
+        self.prediction_kwargs = dict(prediction_kwargs or {})
+        self.cancelled = cancelled
+        if model is not None:
+            from types import SimpleNamespace
+            self._uses_darkfusion_onnx = getattr(model, '_darkfusion_inference_backend', '') == 'onnxruntime'
+            self.onnx_runtime_model = model if self._uses_darkfusion_onnx else None
+            self.detection_model = SimpleNamespace(model=model, device=device)
+        else:
+            self.detection_model = self._create_detection_model(
+                model_type=model_type,
+                model_path=model_path,
+                confidence_threshold=confidence_threshold,
+                device=device,
+            )
         native_model = getattr(self.detection_model, "model", None)
         self.task = str(getattr(self.onnx_runtime_model if self._uses_darkfusion_onnx else native_model, "task", "detect") or "detect")
         if self.task not in {"detect", "segment", "pose", "obb"}:
             raise ValueError("SAHI auto-label requires an object-annotation model; classification/ReID models cannot write object labels.")
         # SAHI's generic object adapter can discard pose/OBB data. Keep its
         # slicing/merging, but read the native Ultralytics results for these.
-        self.geometry_model = native_model if self.task in {"pose", "obb"} else None
+        self.geometry_model = native_model if model is not None or self.task in {"pose", "obb"} else None
         self.postprocess_type = postprocess_type
         self.postprocess_match_metric = postprocess_match_metric
         self.postprocess_match_threshold = float(postprocess_match_threshold)
@@ -215,8 +227,24 @@ class SahiPredictWrapper:
         second_area = max(0.0, float(second[2]) - float(second[0])) * max(0.0, float(second[3]) - float(second[1]))
         return intersection / max(1e-9, first_area + second_area - intersection)
 
+    @staticmethod
+    def _deduplicate_tile_predictions(predictions):
+        # Overlapping slices/full-frame passes can produce identical geometry.
+        # Collapse those before SAHI's spatial-index merge, retaining the best
+        # confidence and keeping distinct masks/skeletons/oriented boxes apart.
+        unique = {}
+        for prediction in predictions:
+            key = (int(prediction['class_id']), tuple(prediction['bbox']),
+                   repr(prediction.get('segmentation')), repr(prediction.get('obb')),
+                   repr(prediction.get('keypoints')))
+            previous = unique.get(key)
+            if previous is None or prediction['confidence'] > previous['confidence']:
+                unique[key] = prediction
+        return list(unique.values())
+
     def _merge_onnx_tile_predictions(self, predictions):
         """Apply the selected native SAHI postprocessor to ONNX tile results."""
+        predictions = self._deduplicate_tile_predictions(predictions)
         if not predictions:
             return []
         if len(predictions) == 1:
@@ -265,7 +293,7 @@ class SahiPredictWrapper:
         ]
         for item, prediction in zip(object_predictions, predictions):
             item._darkfusion_geometry = {key: prediction[key] for key in ("obb", "keypoints") if key in prediction}
-        return [
+        merged = [
             {
                 "bbox": tuple(float(value) for value in prediction.bbox.to_voc_bbox()),
                 "confidence": float(prediction.score.value),
@@ -275,19 +303,12 @@ class SahiPredictWrapper:
             }
             for prediction in processor(object_predictions)
         ]
+        # Some SAHI versions retain both the winner and an identical merged
+        # box when equal-score candidates visit the spatial index in a
+        # different order. Do not send that duplicate to display/tracking.
+        return self._deduplicate_tile_predictions(merged)
 
-    def _darkfusion_onnx_sliced_predictions(
-        self,
-        image_rgb,
-        slice_height,
-        slice_width,
-        overlap_height_ratio,
-        overlap_width_ratio,
-    ):
-        model = self._direct_model()
-        if model is None:
-            raise RuntimeError("The selected SAHI inference model was not initialized.")
-
+    def _decode_tile_predictions(self, result, offset_x, offset_y, image_shape):
         def array(value):
             if value is None:
                 return np.empty((0, 6))
@@ -296,75 +317,119 @@ class SahiPredictWrapper:
             if hasattr(value, "cpu"):
                 value = value.cpu()
             return np.asarray(value.numpy() if hasattr(value, "numpy") else value)
-        slices = slice_image(
-            image=image_rgb,
-            slice_height=max(1, int(slice_height)),
-            slice_width=max(1, int(slice_width)),
-            overlap_height_ratio=float(overlap_height_ratio),
-            overlap_width_ratio=float(overlap_width_ratio),
-            auto_slice_resolution=False,
-            verbose=False,
-        )
         predictions = []
-        inference_inputs = [
-            (tile.image, tuple(int(value) for value in tile.starting_pixel[:2]))
-            for tile in slices.sliced_image_list
-        ]
-        if self.perform_standard_pred:
-            inference_inputs.append((image_rgb, (0, 0)))
-
-        for inference_image, (offset_x, offset_y) in inference_inputs:
-            native_kwargs = {} if self._uses_darkfusion_onnx else {"device": self.detection_model.device, "verbose": False}
-            result_list = model.predict(
-                cv2.cvtColor(inference_image, cv2.COLOR_RGB2BGR),
-                conf=self.confidence_threshold,
-                iou=self.postprocess_match_threshold,
-                max_det=300,
-                **native_kwargs,
-            )
-            if not result_list:
+        boxes = getattr(result, "boxes", None)
+        rows = array(getattr(boxes, "data", None))
+        obb = getattr(result, "obb", None)
+        if obb is not None:
+            if getattr(getattr(obb, 'data', None), 'is_cuda', False) and hasattr(obb, 'cpu'):
+                obb = obb.cpu()
+            rows = np.column_stack((array(obb.xyxy), array(obb.conf), array(obb.cls)))
+            obb_corners, obb_rotated = array(obb.xyxyxyxy), array(obb.xywhr)
+        masks = getattr(result, "masks", None)
+        polygons = masks.xy if masks is not None else []
+        keypoints = getattr(result, "keypoints", None)
+        pose_points = array(keypoints.data) if keypoints is not None else []
+        for index, row in enumerate(rows):
+            if len(row) < 6:
                 continue
-            result = result_list[0]
-            boxes = getattr(result, "boxes", None)
-            rows = array(getattr(boxes, "data", None))
-            obb = getattr(result, "obb", None)
+            x1, y1, x2, y2, confidence, class_id = (float(value) for value in row[:6])
+            if x2 <= x1 or y2 <= y1:
+                continue
+            prediction = {
+                "bbox": (x1 + offset_x, y1 + offset_y, x2 + offset_x, y2 + offset_y),
+                "confidence": confidence,
+                "class_id": int(class_id),
+            }
             if obb is not None:
-                rows = np.column_stack((array(obb.xyxy), array(obb.conf), array(obb.cls)))
-            masks = getattr(result, "masks", None)
-            polygons = masks.xy if masks is not None else []
-            keypoints = getattr(result, "keypoints", None)
-            pose_points = array(keypoints.data) if keypoints is not None else []
-            for index, row in enumerate(rows):
-                if len(row) < 6:
-                    continue
-                x1, y1, x2, y2, confidence, class_id = (float(value) for value in row[:6])
-                if x2 <= x1 or y2 <= y1:
-                    continue
-                prediction = {
-                    "bbox": (x1 + offset_x, y1 + offset_y, x2 + offset_x, y2 + offset_y),
-                    "confidence": confidence,
-                    "class_id": int(class_id),
-                }
-                if obb is not None:
-                    points = np.array(array(obb.xyxyxyxy)[index], dtype=np.float32, copy=True)
-                    points += [offset_x, offset_y]
-                    prediction["obb"] = points.tolist()
-                    rotated = np.array(array(obb.xywhr)[index], dtype=np.float32, copy=True)
-                    rotated[:2] += [offset_x, offset_y]
-                    prediction["xywhr"] = rotated.tolist()
-                elif index < len(polygons) and len(polygons[index]) >= 3:
-                    points = np.array(polygons[index], dtype=np.float32, copy=True)
-                    points += [offset_x, offset_y]
-                    prediction["segmentation"] = [points.reshape(-1).tolist()]
-                    prediction["full_shape"] = list(image_rgb.shape[:2])
-                if index < len(pose_points):
-                    points = np.array(pose_points[index], dtype=np.float32, copy=True)
-                    visible = points[:, 2] > .01 if points.shape[1] > 2 else np.any(points[:, :2] != 0, axis=1)
-                    points[visible, :2] += [offset_x, offset_y]
-                    points[~visible, :2] = 0
-                    prediction["keypoints"] = points.tolist()
-                predictions.append(prediction)
-        return self._merge_onnx_tile_predictions(predictions)
+                points = np.array(obb_corners[index], dtype=np.float32, copy=True)
+                points += [offset_x, offset_y]
+                prediction["obb"] = points.tolist()
+                rotated = np.array(obb_rotated[index], dtype=np.float32, copy=True)
+                rotated[:2] += [offset_x, offset_y]
+                prediction["xywhr"] = rotated.tolist()
+            elif index < len(polygons) and len(polygons[index]) >= 3:
+                points = np.array(polygons[index], dtype=np.float32, copy=True)
+                points += [offset_x, offset_y]
+                prediction["segmentation"] = [points.reshape(-1).tolist()]
+                prediction["full_shape"] = list(image_shape[:2])
+            if index < len(pose_points):
+                points = np.array(pose_points[index], dtype=np.float32, copy=True)
+                visible = points[:, 2] > .01 if points.shape[1] > 2 else np.any(points[:, :2] != 0, axis=1)
+                points[visible, :2] += [offset_x, offset_y]
+                points[~visible, :2] = 0
+                prediction["keypoints"] = points.tolist()
+            predictions.append(prediction)
+        return predictions
+
+    def _darkfusion_onnx_sliced_predictions(
+        self, image_rgb, slice_height, slice_width, overlap_height_ratio,
+        overlap_width_ratio, *, inference_inputs=None, input_is_bgr=False,
+        batch_size=1, minimum_batch=1,
+    ):
+        model = self._direct_model()
+        if model is None:
+            raise RuntimeError("The selected SAHI inference model was not initialized.")
+        started = time.perf_counter()
+        if inference_inputs is None:
+            slices = slice_image(
+                image=image_rgb, slice_height=max(1, int(slice_height)),
+                slice_width=max(1, int(slice_width)),
+                overlap_height_ratio=float(overlap_height_ratio),
+                overlap_width_ratio=float(overlap_width_ratio),
+                auto_slice_resolution=False, verbose=False,
+            )
+            inference_inputs = [(tile.image, tuple(int(value) for value in tile.starting_pixel[:2]))
+                                for tile in slices.sliced_image_list]
+        else:
+            inference_inputs = list(inference_inputs)
+        if self.perform_standard_pred and not (
+                getattr(self, 'prediction_kwargs', None) and len(inference_inputs) == 1
+                and inference_inputs[0][0].shape == image_rgb.shape):
+            inference_inputs.append((image_rgb, (0, 0)))
+        prepared_ms = (time.perf_counter() - started) * 1000
+        native_kwargs = {} if self._uses_darkfusion_onnx else {'device': self.detection_model.device, 'verbose': False}
+        native_kwargs.update(getattr(self, 'prediction_kwargs', {}))
+        native_kwargs.setdefault('conf', self.confidence_threshold)
+        native_kwargs.setdefault('iou', self.postprocess_match_threshold)
+        native_kwargs.setdefault('max_det', 300)
+        predictions, calls, inferred_ms = [], 0, 0.
+        batch_size = max(1, int(batch_size))
+        index = 0
+        while index < len(inference_inputs):
+            if getattr(self, 'cancelled', None) is not None and self.cancelled():
+                raise RuntimeError('SAHI inference stopped.')
+            group = [inference_inputs[index]]
+            index += 1
+            # Keep the full-image pass separate from differently shaped tiles,
+            # retaining native letterbox behavior and fixed-engine contracts.
+            while (index < len(inference_inputs) and len(group) < batch_size
+                   and inference_inputs[index][0].shape == group[0][0].shape):
+                group.append(inference_inputs[index])
+                index += 1
+            inputs = [image if input_is_bgr else cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+                      for image, _offset in group]
+            if len(inputs) < minimum_batch:
+                inputs.extend([inputs[-1]] * (minimum_batch - len(inputs)))
+            call_kwargs = dict(native_kwargs)
+            if len(inputs) > 1:
+                call_kwargs['batch'] = len(inputs)
+            before_inference = time.perf_counter()
+            result_list = list(model.predict(inputs if len(inputs) > 1 else inputs[0], **call_kwargs) or [])
+            if len(result_list) != len(inputs):
+                raise RuntimeError(f'SAHI model returned {len(result_list)} results for {len(inputs)} tile inputs.')
+            if getattr(self, 'cancelled', None) is not None and self.cancelled():
+                raise RuntimeError('SAHI inference stopped.')
+            for result, (_image, (offset_x, offset_y)) in zip(result_list, group):
+                predictions.extend(self._decode_tile_predictions(result, offset_x, offset_y, image_rgb.shape))
+            inferred_ms += (time.perf_counter() - before_inference) * 1000
+            calls += 1
+        before_merge = time.perf_counter()
+        merged = self._merge_onnx_tile_predictions(predictions)
+        self.last_sliced_profile = dict(sahi_tiles=len(inference_inputs), sahi_calls=calls,
+            sahi_batch=batch_size, sahi_prepare_ms=prepared_ms, sahi_model_ms=inferred_ms,
+            sahi_merge_ms=(time.perf_counter()-before_merge)*1000)
+        return merged
 
     def _direct_model(self):
         return self.onnx_runtime_model if self._uses_darkfusion_onnx else getattr(self, "geometry_model", None)
@@ -782,3 +847,155 @@ class SahiPredictWrapper:
             "last_image_path": last_image_path,
             "last_detected_image_path": last_detected_image_path,
         }
+
+
+class SahiVideoModel:
+    """Slice live pixels with the existing model; return shared result geometry."""
+
+    def __init__(self, model, options, prediction_kwargs, cancelled=None):
+        self.model = model
+        self.names = model.names
+        self.task = str(getattr(model, 'task', 'detect'))
+        self.options = dict(options or {})
+        self.prediction_kwargs = dict(prediction_kwargs or {})
+        self.device = self.prediction_kwargs.get('device')
+        if self.device is None or self.device == '':
+            self.device = str(getattr(model, 'device', None) or 'cpu')
+        self.tracker = None
+        self._slice_plan_key = None
+        self._slice_boxes = ()
+        self._batch_limit = None
+        self.last_profile = {}
+        self._darkfusion_inference_backend = getattr(model, '_darkfusion_inference_backend', 'ultralytics')
+        from ultralytics.utils import DEFAULT_CFG_DICT
+        self._native_quantize_keyword = self._darkfusion_inference_backend != 'onnxruntime' and 'quantize' in DEFAULT_CFG_DICT
+        self.predictor = SahiPredictWrapper(
+            'ultralytics', '', self.prediction_kwargs.get('conf', .25), self.device,
+            model=model, prediction_kwargs=self.prediction_kwargs, cancelled=cancelled,
+            postprocess_type=self.options.get('postprocess_type', 'GREEDYNMM'),
+            postprocess_match_metric=self.options.get('postprocess_match_metric', 'IOS'),
+            postprocess_match_threshold=self.options.get('postprocess_match_threshold', .5),
+            postprocess_class_agnostic=self.options.get('postprocess_class_agnostic', False),
+            perform_standard_pred=self.options.get('perform_standard_pred', True),
+        )
+
+    def _tile_inputs(self, frame):
+        height, width = frame.shape[:2]
+        key = (height, width, int(self.options.get('slice_height', 640)),
+               int(self.options.get('slice_width', 640)),
+               float(self.options.get('overlap_height_ratio', .2)),
+               float(self.options.get('overlap_width_ratio', .2)))
+        if key != self._slice_plan_key:
+            self._slice_boxes = tuple(tuple(box) for box in get_slice_bboxes(
+                image_height=height, image_width=width, slice_height=max(1, key[2]),
+                slice_width=max(1, key[3]), overlap_height_ratio=key[4],
+                overlap_width_ratio=key[5], auto_slice_resolution=False))
+            self._slice_plan_key = key
+        return [(frame[y1:y2, x1:x2], (x1, y1)) for x1, y1, x2, y2 in self._slice_boxes]
+
+    def _tile_batch_policy(self):
+        """Return maximum/minimum tile batch sizes supported by this backend."""
+        if self._batch_limit is not None:
+            return self._batch_limit, 1
+        model = self.model
+        if self._darkfusion_inference_backend == 'onnxruntime':
+            shape = getattr(model, 'input_shape', ()) or ()
+            if shape and isinstance(shape[0], (int, np.integer)) and shape[0] > 0:
+                # The shared ORT model pads/trims its fixed batch itself.
+                return int(shape[0]), 1
+            providers = str(getattr(model, 'providers', None) or getattr(model, 'provider', '')).lower()
+            # RTX/TensorRT EP optimization profiles can further restrict a
+            # symbolic graph's batch. Keep their existing compiled contract.
+            if 'tensorrt' in providers:
+                return 1, 1
+            return (4, 1) if any(name in providers for name in ('cuda', 'dml')) else (1, 1)
+        auto_backend = getattr(getattr(model, 'predictor', None), 'model', None)
+        if getattr(auto_backend, 'format', '') == 'engine':
+            backend = getattr(auto_backend, 'backend', None)
+            try:
+                if not backend.dynamic:
+                    fixed = int(backend.bindings['images'].shape[0])
+                    return max(1, fixed), max(1, fixed)
+                engine = backend.model
+                if hasattr(engine, 'get_tensor_profile_shape'):
+                    minimum, _optimal, maximum = engine.get_tensor_profile_shape('images', 0)
+                else:
+                    minimum, _optimal, maximum = engine.get_profile_shape(0, engine.get_binding_index('images'))
+                low, high = max(1, int(minimum[0])), max(1, int(maximum[0]))
+                return max(low, min(4, high)), low
+            except (AttributeError, KeyError, TypeError, ValueError, RuntimeError):
+                return 1, 1
+        import torch
+        if str(self.device).lower() != 'cpu' and isinstance(getattr(model, 'model', None), torch.nn.Module):
+            return 4, 1
+        return 1, 1
+
+    def predict(self, source, **kwargs):
+        from darkfusion_onnx_runtime import OrtResult, OrtBoxes, OrtMasks, OrtKeypoints, OrtOBB
+        frame = np.asarray(source)
+        if frame.ndim != 3 or frame.shape[2] != 3 or not frame.size:
+            raise ValueError('SAHI video requires a nonempty BGR frame.')
+        # Per-tile tracking would treat adjacent tiles as different video frames.
+        # Track only the merged full-frame result in track(), below.
+        self.predictor.prediction_kwargs = dict(self.prediction_kwargs, **kwargs)
+        if self._native_quantize_keyword and 'half' in self.predictor.prediction_kwargs:
+            half = self.predictor.prediction_kwargs.pop('half')
+            # Match Ultralytics' native mapping once without emitting a
+            # deprecation warning for every slice of every video frame.
+            self.predictor.prediction_kwargs.setdefault('quantize', 16 if half else None)
+        self.predictor.prediction_kwargs['mode'] = 'predict'
+        self.predictor.prediction_kwargs.pop('_prepared_video', None)
+        before_plan = time.perf_counter()
+        inputs = self._tile_inputs(frame)
+        plan_ms = (time.perf_counter() - before_plan) * 1000
+        batch_size, minimum_batch = self._tile_batch_policy()
+        def sliced(batch):
+            return self.predictor._darkfusion_onnx_sliced_predictions(
+                frame, self.options.get('slice_height', 640), self.options.get('slice_width', 640),
+                self.options.get('overlap_height_ratio', .2), self.options.get('overlap_width_ratio', .2),
+                inference_inputs=inputs, input_is_bgr=True, batch_size=batch, minimum_batch=minimum_batch)
+        try:
+            predictions = sliced(batch_size)
+        except RuntimeError as error:
+            if batch_size <= 1 or minimum_batch > 1 or 'out of memory' not in str(error).lower():
+                raise
+            error.__traceback__ = None
+            self._batch_limit = 1
+            logger.warning('SAHI tile batch exceeded available memory; retaining single-tile inference.')
+            from darkfusion_gpu_memory import _trim_cuda
+            _trim_cuda()
+            predictions = sliced(1)
+        self.last_profile = dict(self.predictor.last_sliced_profile)
+        self.last_profile['sahi_prepare_ms'] += plan_ms
+        predictions = sorted(predictions, key=lambda item: item['confidence'], reverse=True)
+        predictions = predictions[:int(kwargs.get('max_det', self.prediction_kwargs.get('max_det', 300)))]
+        shape = frame.shape[:2]
+        result = OrtResult(frame, '', self.names, {})
+        rows = [list(item['bbox']) + [item['confidence'], item['class_id']] for item in predictions]
+        result.boxes = OrtBoxes(rows, shape)
+        if self.task == 'segment':
+            polygons = []
+            for item in predictions:
+                contours = [np.asarray(points, dtype=np.float32).reshape(-1, 2)
+                            for points in item.get('segmentation', []) if len(points) >= 6]
+                polygons.append(max(contours, key=cv2.contourArea) if contours else np.empty((0, 2), np.float32))
+            # Overlays already consume polygons. Avoid allocating N full-frame
+            # raster masks just to convert them back into the same polygons.
+            result.masks = OrtMasks(np.empty((len(polygons), 0, 0), np.uint8), shape)
+            result.masks._xy = polygons
+        elif self.task == 'pose' and predictions:
+            result.keypoints = OrtKeypoints([item['keypoints'] for item in predictions], shape)
+        elif self.task == 'obb':
+            result.obb = OrtOBB([item['xywhr'] + [item['confidence'], item['class_id']]
+                                for item in predictions], shape)
+        return [result]
+
+    __call__ = predict
+
+    def track(self, source, persist=False, tracker='bytetrack.yaml', **kwargs):
+        from darkfusion_onnx_tracking import ProjectTrackerAdapter, tracker_config_key
+        results = self.predict(source, **kwargs)
+        key = tracker_config_key(tracker, self.device)
+        if not persist or self.tracker is None or self.tracker.config_key != key:
+            self.tracker = ProjectTrackerAdapter(tracker, self.device)
+        return [self.tracker.apply(result) for result in results]

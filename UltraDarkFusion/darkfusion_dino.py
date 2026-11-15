@@ -17,6 +17,8 @@ import numpy as np
 import groundingdino
 import groundingdino.datasets.transforms as T
 from groundingdino.util.inference import load_image, predict
+from darkfusion_annotations import class_name_index
+from darkfusion_dataset_operations import write_label_text_atomic
 from darkfusion_model_compat import load_groundingdino_model as load_model
 from prediction_size_filter import prediction_size_allowed_xyxy
 
@@ -365,8 +367,7 @@ def save_thresholds(thresholds: dict):
 # Disk I/O
 # -------------------------
 def write_to_disk(label_path: Path, boxes_xywhn, class_ids, overwrite):
-    tmp_path = Path(str(label_path) + ".tmp")
-
+    other_lines = []
     if overwrite or not label_path.exists():
         existing_items = []
     else:
@@ -375,13 +376,16 @@ def write_to_disk(label_path: Path, boxes_xywhn, class_ids, overwrite):
             for line in f:
                 parts = line.strip().split()
                 if len(parts) != 5:
+                    if line.strip():
+                        other_lines.append(line.rstrip("\r\n"))
                     continue
                 try:
                     cid = int(parts[0])
                     box = list(map(float, parts[1:]))
                     existing_items.append((cid, box))
                 except Exception:
-                    continue
+                    if line.strip():
+                        other_lines.append(line.rstrip("\r\n"))
 
     new_items = list(zip(class_ids, boxes_xywhn))
 
@@ -402,11 +406,11 @@ def write_to_disk(label_path: Path, boxes_xywhn, class_ids, overwrite):
 
     merged.sort(key=lambda x: (x[0], x[1][0], x[1][1]))
 
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        for cid, b in merged:
-            f.write(f"{cid} {b[0]:.6f} {b[1]:.6f} {b[2]:.6f} {b[3]:.6f}\n")
-
-    os.replace(tmp_path, label_path)
+    lines = other_lines + [
+        f"{cid} {b[0]:.6f} {b[1]:.6f} {b[2]:.6f} {b[3]:.6f}"
+        for cid, b in merged
+    ]
+    write_label_text_atomic(label_path, "\n".join(lines) + ("\n" if lines else ""))
 
 
 def save_review_preview(image_path: Path, out_dir: Path, xyxy_list, scores, labels, class_names):
@@ -474,6 +478,11 @@ def _compiled_yoloe_class_names(model):
 def _validate_compiled_yoloe_classes(model, class_names, model_path):
     embedded = _compiled_yoloe_class_names(model)
     expected = _normalize_class_names(class_names)
+    if len(embedded) != len(set(embedded)):
+        raise ValueError(
+            f"Compiled YOLOE model has ambiguous duplicate class names: {model_path}. "
+            "Use a model with unambiguous embedded class names."
+        )
     if not embedded or not set(expected).issubset(embedded):
         raise ValueError(
             f"Compiled YOLOE model classes {embedded} do not match the selected DarkFusion "
@@ -573,13 +582,17 @@ def run_yoloe_predict(predictor_model, predictor_kind, image_path: Path, class_n
     classes = r.boxes.cls.detach().cpu().tolist()
 
     out = []
-    compiled_names = _compiled_yoloe_class_names(r) if predictor_kind != "pt" else []
-    selected_ids = {name: index for index, name in enumerate(_normalize_class_names(class_names))}
+    compiled_names = getattr(r, "names", None) if predictor_kind != "pt" else None
+    selected_names = _normalize_class_names(class_names)
     for b, s, c in zip(xyxy, confs, classes):
         cls_idx = int(c)
         if predictor_kind != "pt":
-            cls_idx = selected_ids.get(compiled_names[cls_idx], -1) if 0 <= cls_idx < len(compiled_names) else -1
-        if 0 <= cls_idx < len(class_names):
+            if isinstance(compiled_names, dict):
+                name = compiled_names.get(cls_idx, compiled_names.get(str(cls_idx)))
+            else:
+                name = compiled_names[cls_idx] if 0 <= cls_idx < len(compiled_names) else None
+            cls_idx = class_name_index(str(name).strip().lower(), selected_names) if name is not None else None
+        if cls_idx is not None and 0 <= cls_idx < len(class_names):
             out.append({
                 "xyxy": [float(v) for v in b],
                 "score": float(s),
@@ -1358,11 +1371,11 @@ def process_image(
 
     except torch.cuda.OutOfMemoryError as e:
         logger.error("CUDA OOM on %s: %s", image_path, e)
-        return set()
+        raise
 
     except Exception as e:
         logger.error("Error processing %s: %s", image_path, e)
-        return set()
+        raise
 
     finally:
         if inference_image is not None:
@@ -1434,45 +1447,47 @@ def process_images(
         except Exception as e:
             logger.warning("Progress callback failed: %s", e)
 
-    for i in range(0, len(image_paths), BATCH_SIZE):
-        batch = image_paths[i:i + BATCH_SIZE]
+    try:
+        for i in range(0, len(image_paths), BATCH_SIZE):
+            batch = image_paths[i:i + BATCH_SIZE]
 
-        for p in batch:
-            if preview_callback is not None:
-                try:
-                    preview_callback(p, [], [], [], class_names)
-                except Exception as e:
-                    logger.warning("Preview callback failed for %s: %s", p, e)
+            for p in batch:
+                if preview_callback is not None:
+                    try:
+                        preview_callback(p, [], [], [], class_names)
+                    except Exception as e:
+                        logger.warning("Preview callback failed for %s: %s", p, e)
 
-            detected_classes.update(
-                process_image(
-                    image_path=p,
-                    yoloe_model=yoloe_model,
-                    yoloe_kind=yoloe_kind,
-                    dino_model=dino_model,
-                    sam3_model=sam3_model,
-                    class_names=class_names,
-                    class_thresholds=class_thresholds,
-                    overwrite=overwrite,
-                    nms_iou=0.55,
-                    review_dir=review_dir,
-                    preview_callback=preview_callback,
-                    roi_enabled=roi_enabled,
-                    roi_bounds=roi_bounds,
-                    roi_reference_size=roi_reference_size,
-                    project_class_ids=project_class_ids,
+                detected_classes.update(
+                    process_image(
+                        image_path=p,
+                        yoloe_model=yoloe_model,
+                        yoloe_kind=yoloe_kind,
+                        dino_model=dino_model,
+                        sam3_model=sam3_model,
+                        class_names=class_names,
+                        class_thresholds=class_thresholds,
+                        overwrite=overwrite,
+                        nms_iou=0.55,
+                        review_dir=review_dir,
+                        preview_callback=preview_callback,
+                        roi_enabled=roi_enabled,
+                        roi_bounds=roi_bounds,
+                        roi_reference_size=roi_reference_size,
+                        project_class_ids=project_class_ids,
+                    )
                 )
-            )
-            processed += 1
-            if progress_callback is not None:
-                try:
-                    progress_callback(processed, len(image_paths))
-                except Exception as e:
-                    logger.warning("Progress callback failed: %s", e)
-            else:
-                progress.update(1)
+                processed += 1
+                if progress_callback is not None:
+                    try:
+                        progress_callback(processed, len(image_paths))
+                    except Exception as e:
+                        logger.warning("Progress callback failed: %s", e)
+                else:
+                    progress.update(1)
 
-    progress.close()
+    finally:
+        progress.close()
     adjust_thresholds_simple(detected_classes, class_thresholds)
     logger.info("Done.")
     return processed
@@ -1649,19 +1664,3 @@ def run_autolabel(image_directory_path, overwrite, review_dir=None, class_names=
         review_dir=review_dir,
         class_names=class_names
     )
-
-
-def main(image_directory):
-    overwrite = input("Overwrite existing label files? (yes/no): ").strip().lower() == "yes"
-    review_dir = str(Path(image_directory) / "_review_previews")
-    run_groundingdino(image_directory, overwrite, review_dir=review_dir)
-
-
-if __name__ == "__main__":
-    import sys
-
-    if len(sys.argv) < 2:
-        print("Usage: python script.py <image_directory>")
-        raise SystemExit(2)
-
-    main(sys.argv[1])

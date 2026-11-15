@@ -1,4 +1,4 @@
-"""Standalone ONNX Runtime inference backend for DarkFusion.
+"""Shared ONNX Runtime inference backend for DarkFusion.
 
 Inference intentionally has no Ultralytics runtime dependency. Project tracking
 can use the optional adapter for DarkFusion's existing tracker algorithms. It supports
@@ -13,10 +13,9 @@ specific ONNX Runtime build or plugin is an environment/deployment concern.
 
 from __future__ import annotations
 
-import argparse
 import ast
 import importlib
-import json
+import logging
 import math
 import os
 import sys
@@ -194,6 +193,182 @@ def _onnx_image_input_contract(path: str, size: int, modified_ns: int):
     shape = tuple(dim.dim_value if dim.dim_value > 0 else dim.dim_param or None
                   for dim in value.type.tensor_type.shape.dim)
     return value.name, shape, {item.key: item.value for item in graph.metadata_props}
+
+
+@lru_cache(maxsize=64)
+def _onnx_topk_detection_contract(path: str, size: int, modified_ns: int):
+    """Recognize metadata-stripped Ultralytics TopK detections from their graph.
+
+    A six-column shape alone also fits a raw two-class head. Require the final
+    box/score/integer-class concatenation and TopK-index modulo class count,
+    including the grouped TopK index reconstruction used in engine exports.
+    Only retain the small contract, never graph weights or GPU allocations.
+    """
+    del size, modified_ns
+    import onnx
+    from onnx import numpy_helper
+
+    model = onnx.load_model(path, load_external_data=False)
+    if len(model.graph.output) != 1:
+        return None
+    shape = model.graph.output[0].type.tensor_type.shape.dim
+    if len(shape) != 3 or shape[-1].dim_value != 6:
+        return None
+    producers = {output: node for node in model.graph.node for output in node.output}
+    constants = {value.name: value for value in model.graph.initializer}
+
+    def origin(value, transparent=("Cast", "Identity")):
+        node = producers.get(value)
+        while node is not None and node.op_type in transparent and node.input:
+            node = producers.get(node.input[0])
+        return node
+
+    def scalar(value):
+        tensor = constants.get(value)
+        if tensor is None:
+            node = producers.get(value)
+            if node is None or node.op_type != "Constant":
+                return None
+            tensor = next((attr.t for attr in node.attribute if attr.name == "value"), None)
+        if tensor is None:
+            return None
+        value = numpy_helper.to_array(tensor)
+        return value.item() if value.size == 1 else None
+
+    def grouped_indices(value):
+        """Prove group_offset + gathered_local_index shares the selected scores."""
+        node = origin(value)
+        if node is None or node.op_type != "Add" or len(node.input) != 2:
+            return False
+        parts = [origin(name) for name in node.input]
+        multiply = next((part for part in parts if part is not None and part.op_type == "Mul"), None)
+        gather = next((part for part in parts if part is not None and part.op_type == "GatherElements"), None)
+        selected = origin(output.input[1], ("Cast", "Identity", "Unsqueeze", "Squeeze"))
+        if (multiply is None or gather is None or selected is None or selected.op_type != "TopK"
+                or len(selected.output) != 2 or gather.input[1] != selected.output[1]):
+            return False
+        factors = [(origin(name), name) for name in multiply.input]
+        division = next((part for part, _ in factors if part is not None and part.op_type == "Div"), None)
+        width = next((scalar(name) for part, name in factors if part is not division), None)
+        if (division is None or division.input[0] != selected.output[1]
+                or width is None or width <= 0 or width != int(width)):
+            return False
+        flattened = origin(gather.input[0])
+        scores = origin(selected.input[0])
+        if (flattened is None or flattened.op_type != "Flatten"
+                or scores is None or scores.op_type != "Flatten"):
+            return False
+        local = origin(flattened.input[0])
+        score_name = scores.input[0]
+        while (source := producers.get(score_name)) is not None and source.op_type in ("Cast", "Identity"):
+            score_name = source.input[0]
+        if (local is None or local.op_type != "TopK" or len(local.output) != 2
+                or flattened.input[0] != local.output[1]
+                or score_name != local.output[0]
+                or any(next((a.i for a in part.attribute if a.name == "axis"), 1) != 1
+                       for part in (flattened, scores))
+                or next((a.i for a in local.attribute if a.name == "axis"), -1) not in (-1, 2)
+                or next((a.i for a in selected.attribute if a.name == "axis"), -1) not in (-1, 1)
+                or scalar(division.input[1]) != scalar(local.input[1])
+                or not 0 < (scalar(local.input[1]) or 0) <= width):
+            return False
+        # The group width is explicit in the source reshape. Require it rather
+        # than interpreting an arbitrary integer expression as detection IDs.
+        reshaped = origin(local.input[0])
+        if reshaped is None or reshaped.op_type != "Reshape":
+            return False
+        shape = constants.get(reshaped.input[1])
+        if shape is None:
+            return False
+        dimensions = numpy_helper.to_array(shape).reshape(-1)
+        return len(dimensions) == 3 and dimensions[-1] == width and dimensions[-2] > 0
+
+    output = origin(model.graph.output[0].name)
+    if output is None or output.op_type != "Concat" or len(output.input) != 3:
+        return None
+    axis = next((attr.i for attr in output.attribute if attr.name == "axis"), None)
+    if axis not in (-1, 2):
+        return None
+    boxes = origin(output.input[0])
+    classes = origin(output.input[2], ("Cast", "Identity", "Unsqueeze", "Squeeze"))
+    if boxes is None or boxes.op_type != "GatherElements" or classes is None or classes.op_type != "Mod":
+        return None
+    indices = origin(classes.input[0])
+    if indices is None or (indices.op_type != "TopK" and not grouped_indices(classes.input[0])):
+        return None
+    divisor = constants.get(classes.input[1])
+    if divisor is None:
+        constant = producers.get(classes.input[1])
+        if constant is None or constant.op_type != "Constant":
+            return None
+        divisor = next((attr.t for attr in constant.attribute if attr.name == "value"), None)
+    if divisor is None:
+        return None
+    value = numpy_helper.to_array(divisor)
+    if value.size != 1:
+        return None
+    count = int(value.item())
+    if count <= 0 or count > 100000 or count != value.item():
+        return None
+    return {"layout": "end2end", "class_count": count}
+
+
+@lru_cache(maxsize=64)
+def _onnx_normalized_raw_box_scale(path: str, size: int, modified_ns: int):
+    """Identify the explicit pixel-to-normalized division in old YOLO exports.
+
+    Require a channel-first box/score concatenation, a stride-multiplied box
+    branch divided by [input W,H,W,H], and sigmoid class scores. Small predicted
+    coordinates alone never establish units. Model files remain untouched.
+    """
+    del size, modified_ns
+    import onnx
+    model = onnx.load_model(path, load_external_data=False)
+    if len(model.graph.input) != 1 or len(model.graph.output) != 1:
+        return None
+    inputs = model.graph.input[0].type.tensor_type.shape.dim
+    outputs = model.graph.output[0].type.tensor_type.shape.dim
+    if len(inputs) != 4 or len(outputs) != 3 or outputs[1].dim_value < 5:
+        return None
+    height, width = inputs[2].dim_value, inputs[3].dim_value
+    if min(height, width) <= 0:
+        return None
+    producers = {name: node for node in model.graph.node for name in node.output}
+    constants = {value.name: value for value in model.graph.initializer}
+
+    def origin(name):
+        node = producers.get(name)
+        while node is not None and node.op_type in ("Cast", "Identity") and node.input:
+            node = producers.get(node.input[0])
+        return node
+
+    def value(name):
+        tensor = constants.get(name)
+        node = producers.get(name)
+        if tensor is None and node is not None and node.op_type == "Constant":
+            tensor = next((attr.t for attr in node.attribute if attr.name == "value"), None)
+        return None if tensor is None else onnx.numpy_helper.to_array(tensor, base_dir=os.path.dirname(path))
+
+    output = origin(model.graph.output[0].name)
+    if output is None or output.op_type != "Concat" or len(output.input) != 2:
+        return None
+    if next((attr.i for attr in output.attribute if attr.name == "axis"), None) != 1:
+        return None
+    boxes, scores = map(origin, output.input)
+    if boxes is None or boxes.op_type != "Div" or scores is None or scores.op_type != "Sigmoid":
+        return None
+    divisor = value(boxes.input[1])
+    expected = np.asarray([width, height, width, height], dtype=np.float32)
+    if divisor is None or divisor.shape != (1, 4, 1) or not np.array_equal(divisor.reshape(4), expected):
+        return None
+    scaled = origin(boxes.input[0])
+    if scaled is None or scaled.op_type != "Mul":
+        return None
+    strides = [value(name) for name in scaled.input]
+    if not any(item is not None and item.shape in ((1, outputs[2].dim_value), (1, 1, outputs[2].dim_value))
+               and np.isin(item, (8, 16, 32, 64, 128)).all() for item in strides):
+        return None
+    return tuple(float(item) for item in expected)
 
 
 def _directml_nms_padding_plan(model):
@@ -873,7 +1048,10 @@ def _letterbox(image: np.ndarray, target: tuple[int, int], stride: int = 32) -> 
     right = int(round(width_pad / 2.0 + 0.1))
     top = int(round(height_pad / 2.0 - 0.1))
     bottom = int(round(height_pad / 2.0 + 0.1))
-    output = cv2.copyMakeBorder(resized, top, bottom, left, right, cv2.BORDER_CONSTANT, value=(114, 114, 114))
+    # The caller converts into an owned RGB/float tensor immediately. Avoid
+    # copying the whole BGR image when no padding is required.
+    output = (cv2.copyMakeBorder(resized, top, bottom, left, right, cv2.BORDER_CONSTANT, value=(114, 114, 114))
+              if width_pad or height_pad else resized)
     info = LetterboxInfo(
         original_shape=(original_h, original_w),
         input_shape=(target_h, target_w),
@@ -1273,6 +1451,7 @@ class DarkFusionOnnxModel:
         if windows_ml.installed() and chain[0] != "CPUExecutionProvider":
             devices = list(ort.get_ep_devices())
             index = 0 if automatic else self.device_id
+            compiled_source = source
             for provider in chain:
                 if provider == "CPUExecutionProvider":
                     continue
@@ -1284,7 +1463,11 @@ class DarkFusionOnnxModel:
                 values = {key: windows_ml.option_string(value)
                           for key, value in self._provider_options(provider).items() if key != "device_id"}
                 options.add_provider_for_devices([selected[index]], values)
-            return ort.InferenceSession(source, sess_options=options)
+                if provider == 'NvTensorRTRTXExecutionProvider':
+                    compiled_source = windows_ml.compiled_model_path(source, provider, values,
+                        cache_dir=self.cache_dir, device_id=index, runtime_options=self.runtime_options,
+                        session_options=options)
+            return self._session_from_source(source, options, compiled_source)
         registrations = []
         for provider in chain:
             values = self._provider_options(provider)
@@ -1292,6 +1475,16 @@ class DarkFusionOnnxModel:
                 values.pop("device_id", None)
             registrations.append((provider, values) if values else provider)
         return ort.InferenceSession(source, sess_options=options, providers=registrations)
+
+    def _session_from_source(self, source, options, compiled_source):
+        try:
+            return ort.InferenceSession(compiled_source, sess_options=options)
+        except Exception:
+            if compiled_source == source:
+                raise
+            windows_ml.invalidate_compiled_model(compiled_source)
+            logging.getLogger(__name__).warning('Compiled backend cache could not load; retrying original ONNX.', exc_info=True)
+            return ort.InferenceSession(source, sess_options=options)
 
     def _session_model_source(self, chain):
         if "DmlExecutionProvider" not in chain:
@@ -1304,6 +1497,8 @@ class DarkFusionOnnxModel:
         return source
 
     def _create_session(self):
+        if windows_ml._compilation_cancelled():
+            raise windows_ml.ModelCompilationCancelled('Model loading cancelled.')
         values = self.requested_providers.split(",") if isinstance(self.requested_providers, str) else list(self.requested_providers)
         automatic = not values or any(str(value).strip().lower() == "auto" for value in values)
         compare_automatic = (automatic and self.runtime_options["compare_providers"]
@@ -1348,15 +1543,22 @@ class DarkFusionOnnxModel:
                 # DirectML may be selected by the policy; its constraints apply.
                 options.enable_mem_pattern = False
                 options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+                provider_values, entries = {}, {}
                 for provider in available_execution_providers():
+                    provider_values[provider] = {}
                     for key, value in self._provider_options(provider).items():
                         if key == "device_id":
                             continue  # Policy chooses the device, not the manual index.
-                        options.add_session_config_entry(windows_ml.provider_config_prefix(provider) + key,
-                                                         windows_ml.option_string(value))
+                        entry = windows_ml.provider_config_prefix(provider) + key
+                        entries[entry] = windows_ml.option_string(value)
+                        provider_values[provider][key] = entries[entry]
+                        options.add_session_config_entry(entry, entries[entry])
                 policy = windows_ml.POLICIES[self.runtime_options["auto_policy"]]
                 options.set_provider_selection_policy(getattr(ort.OrtExecutionProviderDevicePolicy, policy))
-                self.session = ort.InferenceSession(self.model_path, sess_options=options)
+                source = windows_ml.compiled_model_path(self.model_path, 'auto', provider_values,
+                    cache_dir=self.cache_dir, runtime_options=self.runtime_options,
+                    session_options=options, selection_policy=policy, session_entries=entries)
+                self.session = self._session_from_source(self.model_path, options, source)
                 if any(windows_ml.is_experimental(name) for name in self.session.get_providers()):
                     raise OnnxBackendError("Automatic policy selected an experimental provider; using safe fallback.")
                 source = self._session_model_source(self.session.get_providers())
@@ -1367,6 +1569,8 @@ class DarkFusionOnnxModel:
                     self.session = ort.InferenceSession(source, sess_options=options)
             else:
                 self.session = self._open_session(chain, options, automatic=automatic)
+        except windows_ml.ModelCompilationCancelled:
+            raise
         except Exception as exc:
             if automatic:
                 # Retry only Automatic setup at model load. Manual choices
@@ -1455,6 +1659,12 @@ class DarkFusionOnnxModel:
                 f"Unsupported ONNX task '{self.task}'. Supported tasks: {sorted(self.SUPPORTED_TASKS)}."
             )
         self.names = self.names_override or _normalize_names(self.metadata.get("names", ""))
+        self.names_are_inferred = False
+        if not self.names and self.framework == "darknet" and self.darknet_confs_name:
+            from darkfusion_inference import read_model_class_sidecar
+            shape = next(out.shape for out in self.session.get_outputs() if out.name == self.darknet_confs_name)
+            count = shape[-1] if isinstance(shape[-1], int) and shape[-1] > 0 else None
+            self.names = read_model_class_sidecar(self.model_path, count)
         self._configure_damo_contract()
         self.stride = max(1, int(float(self.metadata.get("stride", 32) or 32)))
         metadata_size = _normalize_imgsz(self.metadata.get("imgsz", ""), (640, 640))
@@ -1472,12 +1682,33 @@ class DarkFusionOnnxModel:
         )
         if self.output_format == "end2end":
             self.end2end = True
+        if (self.task == "detect" and self.output_format == "auto"
+                and not self.end2end and "end2end" not in self.metadata
+                and len(outputs := self.session.get_outputs()) == 1
+                and len(outputs[0].shape) == 3 and outputs[0].shape[-1] == 6):
+            stat = os.stat(self.model_path)
+            inferred = _onnx_topk_detection_contract(self.model_path, stat.st_size, stat.st_mtime_ns)
+            if inferred is not None:
+                if self.names and len(self.names) != inferred["class_count"]:
+                    raise OnnxBackendError("Model class names do not match the class count encoded in its TopK detection graph.")
+                self.end2end = True
+                self._inferred_output_contract = inferred
+                if not self.names:
+                    self.names = {index: str(index) for index in range(inferred["class_count"])}
+                    self.names_are_inferred = True
+        self.raw_box_scale = None
+        if (self.task == "detect" and self.framework in {"auto", "ultralytics"}
+                and self.output_format in {"auto", "ultralytics"} and not self.end2end
+                and not self.metadata):
+            stat = os.stat(self.model_path)
+            self.raw_box_scale = _onnx_normalized_raw_box_scale(self.model_path, stat.st_size, stat.st_mtime_ns)
         if not self.names and self.task != "classify":
             channels = self._output_channel_hint()
             if self.framework == "darknet" and self.darknet_confs_name:
                 shape = next(out.shape for out in self.session.get_outputs() if out.name == self.darknet_confs_name)
                 if isinstance(shape[-1], int):
                     self.names = {index: str(index) for index in range(shape[-1])}
+                    self.names_are_inferred = True
                     return
             if self.framework == "damo":
                 shape = next(out.shape for out in self.session.get_outputs() if out.name == self.damo_scores_name)
@@ -1491,6 +1722,15 @@ class DarkFusionOnnxModel:
             score_offset = 5 if self.output_format == "yolo_objectness" else 4
             count = max(1, channels - score_offset - extra) if channels else 1
             self.names = {index: str(index) for index in range(count)}
+            self.names_are_inferred = True
+        if self.names_are_inferred:
+            from darkfusion_inference import read_model_class_sidecar
+            count = (getattr(self,"_inferred_output_contract",{}).get("class_count")
+                     if self.end2end else len(self.names))
+            resolved = read_model_class_sidecar(self.model_path, count)
+            if resolved:
+                self.names = resolved
+                self.names_are_inferred = False
 
     def _configure_damo_contract(self):
         outputs = self.session.get_outputs()
@@ -2054,7 +2294,10 @@ class DarkFusionOnnxModel:
         selected_rows = rows[source_indices]
         selected_classes = class_ids[source_indices]
         selected_confidences = confidences[source_indices]
-        boxes_input = _xywh_to_xyxy(selected_rows[:, :4])
+        selected_xywh = selected_rows[:, :4]
+        if (box_scale := getattr(self, "raw_box_scale", None)) is not None:
+            selected_xywh = selected_xywh * np.asarray(box_scale, dtype=np.float32)
+        boxes_input = _xywh_to_xyxy(selected_xywh)
         if self.task == "obb" and selected_rows.shape[1] > extra_offset:
             rotated_boxes = np.column_stack(
                 (selected_rows[:, :4], selected_rows[:, extra_offset])
@@ -2371,92 +2614,3 @@ class DarkFusionOnnxModel:
         dummy = np.zeros((target[0], target[1], 3), dtype=np.uint8)
         for _ in range(max(1, int(runs))):
             self.predict(dummy, conf=0.001, max_det=1)
-
-
-def _json_result(result: OrtResult) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "path": result.path,
-        "orig_shape": list(result.orig_shape),
-        "speed": result.speed,
-    }
-    if result.boxes is not None:
-        payload["boxes"] = result.boxes.data.tolist()
-        if result.boxes.id is not None:
-            payload["track_ids"] = result.boxes.id.tolist()
-    if result.obb is not None:
-        payload["obb"] = result.obb.data.tolist()
-        payload["obb_corners"] = result.obb.xyxyxyxy.tolist()
-    if result.keypoints is not None:
-        payload["keypoints"] = result.keypoints.data.tolist()
-    if result.masks is not None:
-        payload["mask_polygons"] = [polygon.tolist() for polygon in result.masks.xy]
-    if result.probs is not None:
-        payload["top1"] = result.probs.top1
-        payload["top1_confidence"] = result.probs.top1conf
-    return payload
-
-
-def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Standalone DarkFusion ONNX Runtime inference backend")
-    parser.add_argument("--list-providers", action="store_true")
-    parser.add_argument("--model")
-    parser.add_argument("--source", action="append")
-    parser.add_argument("--provider", default="auto", help="Alias/canonical EP or comma-separated priority list")
-    parser.add_argument("--provider-fallback", action="store_true", help="Fall back instead of rejecting a missing EP")
-    parser.add_argument("--task", choices=sorted(DarkFusionOnnxModel.SUPPORTED_TASKS))
-    parser.add_argument("--output-format", default="auto", choices=("auto", "ultralytics", "yolo_objectness", "end2end"))
-    parser.add_argument("--framework", default="auto", choices=("auto", "ultralytics", "darknet", "damo"))
-    parser.add_argument("--damo-resize", default="auto", choices=("auto", "stretch", "letterbox"))
-    parser.add_argument("--cache-dir", help="TensorRT/TensorRT RTX engine and timing cache directory")
-    parser.add_argument("--imgsz", type=int)
-    parser.add_argument("--conf", type=float, default=0.25)
-    parser.add_argument("--iou", type=float, default=0.7)
-    parser.add_argument("--max-det", type=int, default=300)
-    parser.add_argument("--warmup", type=int, default=0)
-    parser.add_argument("--output-json")
-    args = parser.parse_args(argv)
-    if args.list_providers:
-        print(json.dumps(provider_status(), indent=2))
-        if not args.model:
-            return 0
-    if not args.model:
-        parser.error("--model is required unless only --list-providers is requested")
-    model = DarkFusionOnnxModel(
-        args.model,
-        providers=args.provider,
-        strict_provider=not args.provider_fallback,
-        task=args.task,
-        imgsz=args.imgsz,
-        output_format=args.output_format,
-        framework=args.framework,
-        runtime_options={"damo_resize": args.damo_resize},
-        cache_dir=args.cache_dir,
-    )
-    if args.warmup:
-        model.warmup(args.warmup, args.imgsz)
-    payload = {"backend": model.info(), "results": []}
-    if args.source:
-        payload["results"] = [
-            _json_result(result)
-            for result in model.predict(
-                args.source,
-                conf=args.conf,
-                iou=args.iou,
-                max_det=args.max_det,
-            )
-        ]
-    rendered = json.dumps(payload, indent=2)
-    if args.output_json:
-        output = os.path.abspath(args.output_json)
-        os.makedirs(os.path.dirname(output), exist_ok=True)
-        temporary = f"{output}.{os.getpid()}.tmp"
-        with open(temporary, "w", encoding="utf-8") as handle:
-            handle.write(rendered)
-        os.replace(temporary, output)
-    else:
-        print(rendered)
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

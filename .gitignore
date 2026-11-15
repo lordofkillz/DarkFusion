@@ -102,6 +102,8 @@ mobileclip2_b.ts
 UltraDarkFusion/styles/gifs/darkfusion (2).gif
 
 # Local development/scratch directories
+/ApexSyntheticSimulator_UE5_Starter/
+/UltraDarkFusion/output/
 # Theme exports/source variants remain local; retain only runtime artwork.
 UltraDarkFusion/styles/df-assets/**
 !UltraDarkFusion/styles/df-assets/**/

@@ -54,7 +54,7 @@ def save_extraction_outputs(image_path, image, image_writer, *, label_path=None,
             ok = writer(str(stage), content) if target == image_path else writer(str(stage), content, mode="w")
             if not ok:
                 raise ExtractionWriteError(f"Could not save {'image' if target == image_path else 'labels'}: {target}")
-            if not stage.is_file() or stage.stat().st_size == 0:
+            if not stage.is_file() or (stage.stat().st_size == 0 and (target == image_path or bool(content))):
                 raise ExtractionWriteError(f"Writer did not produce a complete output: {target}")
         # Review may have saved an annotation while inference/encoding ran.
         if reviewed_pair():

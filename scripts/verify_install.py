@@ -28,7 +28,6 @@ REQUIRED_FILES = (
     "darkfusion_environment.py",
     "darkfusion_gpu_memory.py",
     "darkfusion_image_loading.py",
-    "darkfusion_file_reveal.py",
     "darkfusion_ultralytics_batch.py",
     "darkfusion_ultralytics_cli.py",
     "darkfusion_ultralytics_train.py",
@@ -44,14 +43,30 @@ REQUIRED_FILES = (
     "darkfusion_onnx_settings.py",
     "darkfusion_onnx_performance.py",
     "darkfusion_media_tools.py",
+    "darkfusion_video_links.py",
     "darkfusion_desktop_capture.py",
     "darkfusion_video_capture.py",
+    "darkfusion_video_inference.py",
     "darkfusion_video_decode.py",
     "darkfusion_video_display.py",
-    "darkfusion_video_preparation.py",
     "darkfusion_video_window.py",
     "darkfusion_dataset_operations.py",
+    "darkfusion_dataset_workers.py",
+    "darkfusion_dataset_analysis.py",
+    "darkfusion_annotation_style.py",
+    "darkfusion_settings.py",
+    "darkfusion_class_editor.py",
+    "darkfusion_autolabel.py",
+    "darkfusion_dataset_review.py",
+    "darkfusion_annotation_items.py",
+    "darkfusion_canvas.py",
+    "darkfusion_dataset_split.py",
+    "darkfusion_annotations.py",
+    "darkfusion_tiling.py",
     "darkfusion_propagation.py",
+    "darkfusion_sam.py",
+    "darkfusion_augmentations.py",
+    "darkfusion_darknet.py",
     "darkfusion_object_clarity.py",
     "darkfusion_clarity_augmentation.py",
     "licenses/Real-ESRGAN.txt",
@@ -70,6 +85,10 @@ REQUIRED_FILES = (
     "darkfusion_review_settings.py",
     "darkfusion_translation.py",
     "darkfusion_training_size.py",
+    "darkfusion_training_widgets.py",
+    "darkfusion_training_dialog.py",
+    "darkfusion_image_viewers.py",
+    "darkfusion_ui_controls.py",
     "darkfusion_tune_monitor.py",
     "darkfusion_tune_settings.py",
     "darkfusion_training_runs.py",
@@ -81,6 +100,7 @@ REQUIRED_FILES = (
     "darkfusion_dinov3/vision_transformer.py",
     "darkfusion_dinov3/LICENSE.md",
     "darkfusion_system_metrics.py",
+    "darkfusion_system_monitor.py",
     "training_eta.py",
     "botsort.yaml",
     "Sam/FSRCNN_x4.pb",
@@ -103,11 +123,13 @@ REQUIRED_IMPORTS = (
     "numpy",
     "onnx",
     "onnxruntime",
+    "optuna",
     "pandas",
     "plotly",
     "psutil",
     "pynvml",
     "pyautogui",
+    "pyaudio",
     "pyqtgraph",
     "qt_material",
     "sahi",
@@ -224,6 +246,38 @@ def verify_qt_material_backend() -> list[str]:
     return []
 
 
+def verify_ultralytics_compatibility() -> int:
+    """Exercise a candidate package without weights, exports or dataset writes."""
+    from darkfusion_environment import configure_runtime
+    configure_runtime()
+    import numpy as np
+    from ultralytics import YOLO, YOLOE, SAM
+    from ultralytics.cfg import get_cfg
+    from ultralytics.trackers.track import TRACKER_MAP
+    from ultralytics.trackers.utils.reid import ReID
+    from ultralytics.nn.autobackend import AutoBackend
+    from darkfusion_tune_settings import training_hyperparameter_groups
+    # Schema and native entry points used by the current application.
+    get_cfg(overrides=dict(amp="bf16", quantize=8, compile=False, multi_scale=.25))
+    assert {"botsort", "bytetrack", "ocsort", "deepocsort", "tracktrack"} <= set(TRACKER_MAP)
+    assert callable(ReID) and callable(YOLOE) and callable(SAM)
+    assert callable(AutoBackend.forward) and callable(AutoBackend.warmup)
+    assert "quantize" in training_hyperparameter_groups()["Precision and performance"]
+    image = np.zeros((224, 224, 3), dtype=np.uint8)
+    for task, name in (("detect", "yolo11n.yaml"), ("segment", "yolo11n-seg.yaml"),
+                       ("pose", "yolo11n-pose.yaml"), ("obb", "yolo11n-obb.yaml")):
+        model = YOLO(name, task=task)
+        result = model.predict(image, imgsz=224, device="cpu", verbose=False, save=False)
+        assert len(result) == 1 and result[0].orig_shape == (224, 224), task
+        field = {"detect": "boxes", "segment": "boxes", "pose": "keypoints", "obb": "obb"}[task]
+        assert getattr(result[0], field) is not None, task
+        print(f"Ultralytics {task}: model construction and native CPU prediction passed.", flush=True)
+        del model, result
+    print("Ultralytics training schema, task results and tracker/ReID APIs verified.")
+    print("GPU providers, real weights and training still need release acceptance checks.")
+    return 0
+
+
 def main() -> int:
     if sys.version_info[:2] != (3, 12):
         print(f"ERROR: Python 3.12 is required; found {sys.version.split()[0]}.")
@@ -334,4 +388,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(verify_ultralytics_compatibility() if "--ultralytics-compat" in sys.argv else main())

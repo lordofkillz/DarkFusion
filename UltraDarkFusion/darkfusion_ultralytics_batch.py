@@ -2,7 +2,6 @@ import argparse
 import inspect
 import json
 import os
-import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -14,8 +13,6 @@ from ultralytics.utils.autobatch import check_train_batch_size
 
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
-SAFE_MAX_BATCH = 32
-MIN_STEPS_PER_EPOCH = 4
 
 
 def norm(path):
@@ -23,50 +20,16 @@ def norm(path):
 
 
 def truthy(value):
-    return str(value).strip().lower() in {"1", "true", "yes", "on"}
-
-
-def model_safe_batch_limit(model_path="", max_batch=SAFE_MAX_BATCH):
-    name = Path(str(model_path or "")).stem.lower()
-    limit = max(1, int(max_batch or SAFE_MAX_BATCH))
-    if re.search(r"(^|[^a-z])x([^a-z]|$)|xlarge", name):
-        return min(limit, 8)
-    if re.search(r"(^|[^a-z])l([^a-z]|$)|large", name):
-        return min(limit, 16)
-    return limit
-
-
-def safe_batch_limit(dataset_size=0, max_batch=SAFE_MAX_BATCH, model_path=""):
-    try:
-        limit = max(1, int(max_batch or SAFE_MAX_BATCH))
-    except Exception:
-        limit = SAFE_MAX_BATCH
-    limit = model_safe_batch_limit(model_path, limit)
-
-    try:
-        dataset_size = int(dataset_size or 0)
-    except Exception:
-        dataset_size = 0
-
-    if dataset_size > 0:
-        if dataset_size >= MIN_STEPS_PER_EPOCH:
-            dataset_limit = max(1, dataset_size // MIN_STEPS_PER_EPOCH)
-        else:
-            dataset_limit = dataset_size
-        limit = min(limit, dataset_limit)
-    return max(1, limit)
+    return str(value).strip().lower() in {"1", "true", "yes", "on", "fp16", "bf16"}
 
 
 def clamp_batch(batch, dataset_size=0, model_path=""):
-    try:
-        batch = int(batch or 0)
-    except Exception:
-        batch = 0
+    """Retain the measured result, bounded only by the available images."""
+    batch = int(batch)
     if batch <= 0:
-        return 0, safe_batch_limit(dataset_size, model_path=model_path)
-
-    limit = safe_batch_limit(dataset_size, model_path=model_path)
-    return max(1, min(batch, limit)), limit
+        raise ValueError("Ultralytics AutoBatch did not produce a positive batch size.")
+    limit = int(dataset_size or batch)
+    return min(batch, limit), limit
 
 
 def dataset_root_from_yaml(data, yaml_dir):
@@ -208,8 +171,7 @@ def main():
         result["batch"] = batch
         if raw_batch != batch:
             result["batch_note"] = (
-                f"Clamped auto-batch from {raw_batch} to {batch} to avoid a full-dataset "
-                f"or oversized training batch."
+                f"Limited auto-batch from {raw_batch} to the {batch} training images available."
             )
     except Exception as e:
         result["error"] = str(e)

@@ -300,6 +300,12 @@ Confirm the preview is showing the intended source before saving frames. Use
 the same aspect ratio and visual conditions expected during inference whenever
 possible.
 
+**Settings → Video → Prioritize camera FPS** is optional and off by default.
+Leave it off to keep automatic exposure. Turning it on limits exposure time to
+the requested frame interval on supported cameras, which can raise capture FPS
+in dim scenes but make the image darker or noisier. It applies the next time you
+start the camera and restores the previous exposure mode when capture stops.
+
 With video detection enabled, each completed prediction is displayed on the
 exact frame that was analyzed. Capture continues normally with at most one
 latest pending inference frame. New frames replace older pending work, not
@@ -739,6 +745,70 @@ selected dataset YAML and subsequent training reads them automatically. Changing
 datasets or configurations while tuning runs does not redirect its results or
 replace the new setup. Stop/Resume and the run-folder buttons continue to target
 training, even when a validation or tuning job was launched more recently.
+
+Expand **Hyperparameters** to inspect the current training configuration.
+**Generate Files + Parameters** fills its controls with the generated/retained
+YAML values. Additional supported options show their Ultralytics defaults, so
+the editor includes options that have not yet been set explicitly.
+
+**Hyperparameters** uses sliders and named choices for every supported option.
+Learning, Training, Appearance, Image mixing, Task settings, and Run controls
+use the available width. Wide windows show three columns; narrower windows use
+two columns or a single stack. Resizing keeps your unsaved changes. Each
+section can also be collapsed.
+
+It provides plain-language choices:
+
+- **Learning mode:** Automatic chooses the optimizer and learning rate for you.
+- **Learning pace:** gentle/slower learning to larger/faster steps. This changes
+  learning rate; it does not change how fast each training batch runs.
+- **Momentum:** react quickly to new batches or keep smoother updates that
+  change direction more slowly.
+- **Augmentation presets:** a lighter workload, Ultralytics defaults, or more
+  image mixing and size variation. Selecting a preset does nothing until you
+  press **Use preset**; it then stages the changes for **Save to YAML**.
+- **Augmentation sliders:** brightness, saturation, zoom, position, flips,
+  mosaic, MixUp, CutMix and task-specific copy/paste. Percentages show how often
+  an effect is used or its strength; hover for its meaning.
+- **Repeatability or speed**, training precision, training-data subset, and
+  segmentation mask-detail choices are also available.
+- Additional controls cover warmup, learning schedules, regularization,
+  rotation, slant, perspective, task-loss emphasis, classification policies,
+  compilation, memory layout, checkpoint frequency, and training time limits.
+- **Prepare for INT8 export (QAT):** fine-tunes with simulated quantization for
+  later INT8 export. FP16/BF16/FP32 still controls training precision. Requires
+  NVIDIA ModelOpt, with **Training compilation** off.
+
+Start with Automatic if unsure. Moving Learning pace or Momentum from Automatic
+selects manual AdamW settings so your choices take effect. Moving Momentum alone
+starts manual learning at 0.001; Learning pace chooses a rate from its slider.
+The Automatic option returns control to Ultralytics. More aggressive learning
+or augmentation is a choice to validate, rather than a guarantee of better results.
+
+Opening Hyperparameters preserves the generated values, including precise
+values between slider steps, custom zoom ranges and image-count subsets.
+Loaded values outside a slider's convenient range or a choice's presets are
+shown as custom settings and retained until you adjust that control. These
+augmentations run during training; the controls do not generate edited copies
+of your dataset.
+
+Edit values and press **Save to YAML** to overwrite the currently selected
+training configuration. It preserves unrelated settings and updates the visible
+summary. **Reload YAML** discards pending edits and reads the file again. Opening
+or expanding the editor only reads it. **Recommended Args** must be enabled to
+use and edit that configuration; the dataset `obj.yaml` is a separate file.
+
+Training precision offers FP16 AMP, BF16 AMP and FP32. **INT8 QAT** fine-tunes
+with simulated quantization for INT8 deployment; it uses the installed NVIDIA
+ModelOpt dependency and requires compilation to be off. Export and validate the
+trained model separately. These controls describe configured values, not a
+guarantee of better accuracy or faster training.
+
+Training batch accepts **-1** or **Auto**, a fixed positive integer, or a GPU
+memory fraction such as **0.7**. The field displays **Auto** for -1. Generation
+and training preserve that automatic request, and reopening the trainer keeps
+the user's Auto choice rather than replacing it with a previous run's fixed
+batch. Ultralytics reports the batch it actually uses when AutoBatch starts.
 
 Larger image sizes preserve more pixels for small targets but consume more
 VRAM and training time. Batch size mainly affects memory use and optimization;

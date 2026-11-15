@@ -1,4 +1,4 @@
-# DarkFusion standalone ONNX Runtime backend
+# DarkFusion ONNX Runtime backend
 
 `darkfusion_onnx_runtime.py` performs inference without importing Ultralytics.
 
@@ -27,7 +27,7 @@ so video frames are not coalesced with unrelated GUI updates. The compatible
 graphics-view GPU and CPU renderers remain automatic fallbacks. Existing display
 quality interpolation and full-source Label Frame snapshots remain separate;
 image editor/review thumbnail loading is unchanged. GUI startup also gives OpenCV
-a bounded resizing thread budget; standalone inference and training workers keep
+a bounded resizing thread budget; inference and training workers keep
 their own settings. These changes add no CUDA graph layer around Ultralytics.
 
 Large native video frames use reusable RGBA upload storage to reduce packed-RGB
@@ -59,7 +59,7 @@ handoff from the coordinator. Session execution remains serialized on the
 caller. Closing a prediction stream drains its active preparation; idle CPU
 workers are reused until their model is released. These workers hold no GPU
 session or buffers. Single-image, live-array and CPU calls retain their existing
-loading path. This adds no Ultralytics or PyTorch dependency to standalone inference.
+loading path. This adds no Ultralytics or PyTorch dependency to the ONNX backend.
 
 The application's video worker can also prepare the next owned full frame on
 one CPU worker for TensorRT RTX and DirectML. It follows the existing latest
@@ -93,20 +93,14 @@ prepares them at model load or through the setup button. A manual provider is ve
 creation; a failed GPU provider cannot silently fall back to CPU in strict
 mode.
 
-Inspect the providers registered by the installed runtime:
+Open **Auto Label → Weights → ONNX provider setup** to inspect and refresh
+providers in DarkFusion. Integration code can use the same backend API:
 
-```powershell
-python darkfusion_onnx_runtime.py --list-providers
-```
+```python
+from pprint import pprint
+from darkfusion_onnx_runtime import provider_status
 
-Run an isolated prediction:
-
-```powershell
-python darkfusion_onnx_runtime.py `
-  --model best.onnx `
-  --source image.png `
-  --provider directml `
-  --conf 0.25
+pprint(provider_status())
 ```
 
 The Windows source requirements use `onnxruntime-windowsml`, with matching
@@ -278,7 +272,7 @@ settings adjustable at runtime.
 ## DarkFusion UI integration
 
 Open **Auto Label → Weights** to select the ONNX execution provider.
-**Automatic** uses this standalone backend for `.onnx`
+**Automatic** uses this shared backend for `.onnx`
 models, Ultralytics for `.pt` and `.engine`, and the existing OpenCV DNN path
 for Darknet `.weights` + `.cfg`.
 
@@ -351,6 +345,6 @@ FastTrack, TrackTrack or ReID preset when switching to ONNX inference. A small
 tracking adapter reuses the existing Ultralytics tracker algorithms and YAML;
 it does not run a second detection model or change the selected ONNX provider.
 Tracked mask, skeleton and OBB rows retain their matching source detections.
-ReID presets still use their separate appearance encoder. The standalone
-runtime's default `simple_iou` tracker remains available for dependency-free
+ReID presets still use their separate appearance encoder. The backend's
+default `simple_iou` tracker remains available for dependency-free
 use; the GUI does not silently substitute it for a selected project tracker.

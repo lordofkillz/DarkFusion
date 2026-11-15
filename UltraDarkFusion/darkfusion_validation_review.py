@@ -535,7 +535,17 @@ def write_report(path, report):
     try:
         with open(temporary, "w", encoding="utf-8") as handle:
             json.dump(report, handle, indent=2)
-        os.replace(temporary, path)
+        # Windows readers (including the live review dialog) can briefly deny
+        # replacement while a report is open. Keep the previous complete JSON
+        # intact and retry the atomic replacement instead of aborting the scan.
+        for attempt in range(10):
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError:
+                if attempt == 9:
+                    raise
+                time.sleep(min(0.025 * 2 ** attempt, 0.5))
     finally:
         if os.path.exists(temporary):
             try:

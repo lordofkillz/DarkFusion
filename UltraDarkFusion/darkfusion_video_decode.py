@@ -1,5 +1,8 @@
 """Optional NVDEC decoding with verified BGR output and native seek fallback."""
 import ctypes
+from collections import OrderedDict
+from fractions import Fraction
+import json
 import math
 import os
 import shutil
@@ -8,6 +11,124 @@ import threading
 
 import cv2
 import numpy as np
+
+
+_CLOCK_CACHE = OrderedDict()
+_CLOCK_LOCK = threading.Lock()
+
+
+def _remember_frame_clock(key, value):
+    with _CLOCK_LOCK:
+        _CLOCK_CACHE[key] = value
+        _CLOCK_CACHE.move_to_end(key)
+        while len(_CLOCK_CACHE) > 32:
+            _CLOCK_CACHE.popitem(last=False)
+    return value
+
+
+def _clock_probe_command(source, executable):
+    return [os.path.join(os.path.dirname(executable), 'ffprobe.exe'),
+        '-v', 'error', '-select_streams', 'v:0',
+        '-show_entries', 'stream=avg_frame_rate,r_frame_rate,time_base,start_pts,nb_frames:packet=pts',
+        '-of', 'json', source]
+
+
+def _clock_metadata_is_constant(data, count, fps):
+    stream, = data['streams']
+    rate = Fraction(stream['avg_frame_rate'])
+    tick = Fraction(stream['time_base'])
+    if (rate <= 0 or tick <= 0 or rate != Fraction(stream['r_frame_rate'])
+            or int(stream['start_pts']) != 0 or int(stream['nb_frames']) != count
+            or not math.isclose(float(rate), fps, rel_tol=1e-8)):
+        return False
+    step = 1 / (rate * tick)
+    if step.denominator != 1:
+        return False
+    timestamps = sorted(int(packet['pts']) for packet in data['packets'])
+    return len(timestamps) == count and all(value == index * step.numerator
+        for index, value in enumerate(timestamps))
+
+
+def _constant_frame_clock(source, size, modified_ns, executable, count, fps):
+    """Validate packet timestamps without decoding or writing the source video."""
+    key = (source, size, modified_ns, executable, count, fps)
+    with _CLOCK_LOCK:
+        if key in _CLOCK_CACHE:
+            value = _CLOCK_CACHE[key]
+            _CLOCK_CACHE.move_to_end(key)
+            return value
+    if count <= 0 or count > 1_000_000:
+        return False
+    command = _clock_probe_command(source, executable)
+    if not os.path.isfile(command[0]):
+        return False
+    try:
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=10, check=True, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        return _remember_frame_clock(key, _clock_metadata_is_constant(json.loads(result.stdout), count, fps))
+    except (OSError, ValueError, KeyError, TypeError, ZeroDivisionError, subprocess.SubprocessError):
+        return _remember_frame_clock(key, False)
+
+
+def _clear_frame_clocks():
+    with _CLOCK_LOCK:
+        _CLOCK_CACHE.clear()
+
+
+_constant_frame_clock.cache_clear = _clear_frame_clocks
+
+
+class _FrameClockProbe:
+    """Prevalidate a local file while it plays; cancellation owns its subprocess."""
+
+    def __init__(self, key):
+        self.key = key
+        self._lock = threading.Lock()
+        self._process = None
+        self._cancelled = False
+        self._done = threading.Event()
+        self._result = False
+        threading.Thread(target=self._run, name='video-frame-clock', daemon=True).start()
+
+    def _run(self):
+        process = None
+        try:
+            source, _, _, executable, count, fps = self.key
+            with self._lock:
+                if self._cancelled:
+                    return
+                process = subprocess.Popen(_clock_probe_command(source, executable),
+                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+                self._process = process
+            output, _ = process.communicate(timeout=10)
+            result = process.returncode == 0 and _clock_metadata_is_constant(json.loads(output), count, fps)
+            with self._lock:
+                if not self._cancelled:
+                    self._result = _remember_frame_clock(self.key, result)
+        except (OSError, ValueError, KeyError, TypeError, ZeroDivisionError, subprocess.SubprocessError):
+            pass  # An unverified clock retains native exact seeking.
+        finally:
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.communicate()
+            with self._lock:
+                self._process = None
+            self._done.set()
+
+    def result(self):
+        self._done.wait(11)
+        return self._result
+
+    def close(self):
+        with self._lock:
+            self._cancelled = True
+            if self._process is not None and self._process.poll() is None:
+                try:
+                    self._process.terminate()
+                except OSError:
+                    pass  # A completed probe may race capture shutdown.
+        self._done.set()
 
 
 def _popen_with_video_pipe(args, pipe_bytes):
@@ -33,7 +154,12 @@ def _popen_with_video_pipe(args, pipe_bytes):
 def hardware_capture(capture, source):
     """Only finite, 8-bit planar video; unsupported inputs keep their capture."""
     try:
-        if os.name != 'nt' or not shutil.which('ffmpeg'):
+        if os.name != 'nt':
+            return capture
+        from darkfusion_media_tools import bundle_directory
+        bundled = os.path.join(bundle_directory(), 'ffmpeg', 'ffmpeg.exe')
+        executable = bundled if os.path.isfile(bundled) else shutil.which('ffmpeg')
+        if not executable:
             return capture
         if not isinstance(source, str) or not (os.path.isfile(source) or source.startswith(('http://','https://'))):
             return capture
@@ -50,7 +176,7 @@ def hardware_capture(capture, source):
         # Loading a driver is cheap; a missing/unsupported FFmpeg decoder still
         # falls back on its first read without changing the returned frame.
         ctypes.WinDLL('nvcuda.dll')
-        return CudaVideoCapture(capture, source, codec, shutil.which('ffmpeg'))
+        return CudaVideoCapture(capture, source, codec, executable)
     except (OSError, ValueError, cv2.error):
         return capture
 
@@ -58,11 +184,16 @@ def hardware_capture(capture, source):
 class CudaVideoCapture:
     """Own one hidden decoder process; never retain a model or Qt object.
 
-    A restart/seek compares its first decoded frame with the original capture.
+    The first hardware frame is compared with the original capture. Seeks also
+    verify pixels unless the complete local-file timestamp clock was validated.
     Any mismatch, unsupported codec/driver, partial frame or subprocess failure
     resumes the native capture at the next logical frame. File labels and
     thumbnails never consume this decoder's buffers.
     """
+
+    # read() allocates a new array for each hardware frame; the native fallback
+    # also uses VideoCapture.read() without a caller-supplied reusable array.
+    _darkfusion_owns_frame_buffers = True
 
     def __init__(self, capture, source, codec, executable):
         self._capture, self._source, self._codec, self._executable = capture, source, codec, executable
@@ -77,9 +208,28 @@ class CudaVideoCapture:
         self._process_lock = threading.Lock()
         self._stopping = threading.Event()
         self._verify_next = True
+        self._pixels_verified = False
         self._fallback = False
+        self._read_seek_frame = False
         self._closed = False
         self.hardware_frames = 0
+        self._clock_probe = None
+        self._begin_clock_probe()
+
+    def _begin_clock_probe(self):
+        if self._clock_probe is not None or not 0 < self._count <= 1_000_000:
+            return
+        try:
+            if not os.path.isfile(self._source):
+                return
+            stat = os.stat(self._source)
+            key = (self._source, stat.st_size, stat.st_mtime_ns, self._executable, self._count, self._fps)
+            with _CLOCK_LOCK:
+                cached = key in _CLOCK_CACHE
+            if not cached and os.path.isfile(_clock_probe_command(self._source, self._executable)[0]):
+                self._clock_probe = _FrameClockProbe(key)
+        except OSError:
+            pass  # The normal decoder/fallback handles a disappearing source.
 
     def __getattr__(self, name):
         return getattr(self._capture, name)
@@ -88,11 +238,13 @@ class CudaVideoCapture:
         # Two filter workers outperformed both one and larger pools on the
         # validated AV1 path; the raw-video output encoder stays single-threaded.
         args = [self._executable,'-hide_banner','-loglevel','error','-nostdin','-filter_threads','2',
-                '-hwaccel','cuda','-c:v',self._codec]
-        if self._position > 0:
-            args += ['-ss',format(self._position/self._fps,'.12f')]
+                '-hwaccel','cuda','-hwaccel_output_format','cuda','-c:v',self._codec]
+        # Explicit zero seeking also discards negative-timestamp preroll from
+        # cut MP4 files, matching OpenCV's logical first frame. CUVID otherwise
+        # emits those earlier frames and the pixel guard falls back to CPU.
+        args += ['-ss',format(self._position/self._fps,'.12f')]
         args += ['-i',self._source,'-an','-sn','-fps_mode','passthrough',
-                 '-vf','format=yuv420p,scale=in_color_matrix=bt601:out_color_matrix=bt601:flags=bilinear',
+                 '-vf','hwdownload,format=nv12,format=yuv420p,scale=in_color_matrix=bt601:out_color_matrix=bt601:flags=bilinear',
                  '-pix_fmt','bgr24','-threads:v','1','-f','rawvideo','pipe:1']
         with self._process_lock:
             if self._stopping.is_set():
@@ -118,6 +270,8 @@ class CudaVideoCapture:
     def interrupt(self):
         # Terminating our own child also unblocks an outstanding pipe read.
         self._stopping.set()
+        if self._clock_probe is not None:
+            self._clock_probe.close()
         with self._process_lock:
             process = self._process
             if process is not None and process.poll() is None:
@@ -153,6 +307,9 @@ class CudaVideoCapture:
     def read(self):
         if self._stopping.is_set():
             return False, None
+        if self._read_seek_frame:
+            self._read_seek_frame = False
+            return self._native_read()
         if self._fallback:
             return self._native_read()
         try:
@@ -181,6 +338,7 @@ class CudaVideoCapture:
                     self._stop_process()
                     self._position = self._capture.get(cv2.CAP_PROP_POS_FRAMES)
                     return ok, expected
+                self._pixels_verified = True
             self._position += 1
             self.hardware_frames += 1
             return True, image
@@ -195,14 +353,44 @@ class CudaVideoCapture:
         return self._position if prop == cv2.CAP_PROP_POS_FRAMES else self._capture.get(prop)
 
     def set(self, prop, value):
+        if self._stopping.is_set():
+            return False
+        if (prop == cv2.CAP_PROP_POS_FRAMES and self._process is not None
+                and not self._fallback and not self._read_seek_frame
+                and value == self._position and not self._stopping.is_set()):
+            return True  # Next Frame already points at the next unread GPU frame.
+        if (prop == cv2.CAP_PROP_POS_FRAMES and self._pixels_verified and not self._fallback
+                and not self._stopping.is_set() and os.path.isfile(self._source)):
+            target = float(value)
+            if math.isfinite(target) and target.is_integer() and 0 <= target < self._count:
+                stat = os.stat(self._source)
+                key = (self._source, stat.st_size, stat.st_mtime_ns, self._executable, self._count, self._fps)
+                if self._clock_probe is not None and self._clock_probe.key == key:
+                    constant = self._clock_probe.result()
+                else:
+                    constant = _constant_frame_clock(*key)
+                if self._stopping.is_set():
+                    return False
+                if constant:
+                    # Accurate input seeking decodes from the preceding keyframe
+                    # on NVDEC. Avoid paying for a second full software seek.
+                    # First-frame pixel parity and a complete CFR timestamp check
+                    # are required; other inputs retain native seeking below.
+                    self._stop_process()
+                    self._position = int(target)
+                    self._verify_next = False
+                    self._read_seek_frame = False
+                    return True
         result = self._capture.set(prop,value)
         if result and prop == cv2.CAP_PROP_POS_FRAMES:
             self._stop_process()
             self._position = self._capture.get(prop)
             self._verify_next = True
-            # Scrubbing/stepping must not pay a fresh CUDA-process startup for
-            # each frame. The already-open software decoder has the exact seek.
-            self._fallback = True
+            # Step once with the already-open exact software seek. If playback
+            # continues, restart/verify NVDEC at the next logical frame instead
+            # of permanently losing GPU decoding after the first timeline jump.
+            # An actual decoder failure keeps its permanent fallback intact.
+            self._read_seek_frame = True
         return result
 
     def release(self):

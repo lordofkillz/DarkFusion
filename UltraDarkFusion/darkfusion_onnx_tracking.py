@@ -6,9 +6,80 @@ Detection and provider selection remain in DarkFusion's shared ONNX runtime.
 from __future__ import annotations
 
 import os
+import hashlib
+import logging
 from pathlib import Path
 
 import numpy as np
+
+
+def prepare_reid_tracker_config(config, max_det=300):
+    """Prepare a cached ONNX encoder without changing Ultralytics' tracker/encoder.
+
+    Called by the live worker, never by a settings widget. Only the generated
+    tracker copy's model path changes; the original YAML and model stay intact.
+    """
+    path = Path(str(config))
+    if not path.is_file():
+        return config
+    import yaml
+    settings = yaml.safe_load(path.read_text(encoding='utf-8'))
+    if not isinstance(settings, dict) or not settings.get('with_reid'):
+        return config
+    source = Path(str(settings.get('model', 'auto')))
+    if source.suffix.lower() != '.onnx':
+        return config
+    if not source.is_file():
+        from darkfusion_environment import APP_DIR
+        candidates = [path.parent / source, Path(APP_DIR) / source, Path(APP_DIR) / 'weights' / source.name]
+        source = next((candidate for candidate in candidates if candidate.is_file()), source)
+    if not source.is_file():
+        return config  # Retain Ultralytics' asset download/error handling.
+    import darkfusion_windows_ml as runtime
+    if not runtime.installed():
+        return config
+    provider = 'NvTensorRTRTXExecutionProvider'
+    # Preserve other explicitly selected encoders and already prepared copies.
+    import onnx
+    graph = onnx.load_model(str(source), load_external_data=False)
+    if any(node.op_type == 'EPContext' for node in graph.graph.node):
+        return config
+    inputs = [item for item in graph.graph.input if item.name not in {value.name for value in graph.graph.initializer}]
+    if len(inputs) != 1 or len(inputs[0].type.tensor_type.shape.dim) != 4:
+        return config
+    dims = [value.dim_value or None for value in inputs[0].type.tensor_type.shape.dim]
+    if dims[1] not in (None, 3):
+        return config
+    height = dims[2] or 224
+    width = dims[3] or height
+    batch = dims[0] or max(1, int(max_det))
+    minimum = dims[0] or 1
+    shape = lambda count: f'{inputs[0].name}:{count}x3x{height}x{width}'
+    cache_dir = path.parent / 'reid-cache'
+    values = dict(nv_profile_min_shapes=shape(minimum), nv_profile_opt_shapes=shape(minimum),
+        nv_profile_max_shapes=shape(batch), nv_runtime_cache_path=str(cache_dir.resolve() / 'kernels'))
+    try:
+        runtime.prepare(provider)
+        ort = runtime.get_ort()
+        options = ort.SessionOptions()
+        options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        options.log_severity_level = 3
+        compiled = runtime.compiled_model_path(str(source), provider, values,
+            cache_dir=str(cache_dir), session_options=options)
+        if os.path.abspath(compiled) == str(source.resolve()):
+            return config
+        settings['model'] = compiled
+        text = yaml.safe_dump(settings, sort_keys=False)
+        target = Path(compiled).with_name('tracker-' + hashlib.sha256(text.encode()).hexdigest()[:16] + '.yaml')
+        if not target.exists() or target.read_text(encoding='utf-8') != text:
+            from darkfusion_dataset_operations import _atomic_bytes
+            _atomic_bytes(str(target), text.encode('utf-8'))
+        return str(target)
+    except runtime.ModelCompilationCancelled:
+        raise
+    except Exception as error:
+        logging.getLogger(__name__).warning('ReID cache unavailable; retaining original encoder: %s', error)
+        return config
 
 
 def tracker_config_key(config, device):
@@ -70,7 +141,10 @@ class ProjectTrackerAdapter:
             raise OnnxBackendError("The project tracker returned invalid detection indices.")
 
         if result.masks is not None:
-            result.masks = OrtMasks(result.masks.data.numpy()[indices], result.orig_shape)
+            masks = result.masks
+            result.masks = OrtMasks(masks.data.numpy()[indices], result.orig_shape)
+            if getattr(masks, '_xy', None) is not None:
+                result.masks._xy = [masks._xy[index] for index in indices]
         if result.keypoints is not None:
             result.keypoints = OrtKeypoints(result.keypoints.data.numpy()[indices], result.orig_shape)
         if oriented:
