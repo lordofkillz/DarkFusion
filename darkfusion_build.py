@@ -73,6 +73,10 @@ def _committed_files():
                     continue
                 with archive.extractfile(member) as stream:
                     yield name, stream.read()
+        # TAR readers stop at the end marker. Git may still be writing padding;
+        # drain it before waiting so a full Windows stdout pipe cannot deadlock.
+        while process.stdout.read(1024 * 1024):
+            pass
         if process.wait() != 0:
             raise RuntimeError("Cannot read committed application source")
     finally:
