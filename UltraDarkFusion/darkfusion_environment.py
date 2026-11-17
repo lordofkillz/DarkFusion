@@ -2,6 +2,34 @@
 import os
 import site
 import sys
+import logging
+
+
+def configure_opencv_dnn_cache():
+    """Prepare persistent OpenCL convolution tuning before the first DNN run.
+
+    OpenCV does not create this directory itself. Respect an explicit path (or
+    an empty value disabling the cache), and keep a cache failure non-fatal.
+    No OpenCV/model imports or machine-wide environment changes are needed.
+    """
+    key = 'OPENCV_OCL4DNN_CONFIG_PATH'
+    configured = os.environ.get(key)
+    if configured is not None and not configured.strip():
+        return None
+    if configured is None:
+        root = (os.environ.get('LOCALAPPDATA') or os.environ.get('XDG_CACHE_HOME')
+                or os.path.join(os.path.expanduser('~'), '.cache'))
+        path = os.path.join(root, 'DarkFusion', 'opencv-dnn')
+    else:
+        path = os.path.expandvars(os.path.expanduser(configured))
+    try:
+        os.makedirs(path, exist_ok=True)
+    except OSError as error:
+        logging.getLogger('UltraDarkFusionLogger').warning(
+            'OpenCV DNN tuning cache unavailable at %s: %s', path, error)
+        return None
+    os.environ[key] = path
+    return path
 
 
 def configure_gui_opencv_threads():
@@ -46,4 +74,13 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 APP_SETTINGS_FILE = "settings.json"
 
 
-APP_SETTINGS_PATH = os.path.join(APP_DIR, APP_SETTINGS_FILE)
+APP_SETTINGS_PATH = os.environ.get(
+    "DARKFUSION_SETTINGS_PATH", os.path.join(APP_DIR, APP_SETTINGS_FILE))
+
+
+def model_directory(default=None):
+    """Use the persistent pip model store; retain existing source/EXE paths."""
+    configured = os.environ.get("DARKFUSION_MODEL_DIR")
+    if configured:
+        return os.path.abspath(os.path.expandvars(os.path.expanduser(configured)))
+    return os.fspath(default) if default is not None else os.path.join(APP_DIR, "Sam")

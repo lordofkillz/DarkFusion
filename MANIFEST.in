@@ -1,0 +1,8 @@
+include VERSION LICENSE.txt requirements.txt darkfusion_build.py
+include distribution/README.md
+include distribution/requirements-*.txt
+recursive-include distribution/ultradarkfusion *.py *.json *.zip VERSION
+prune UltraDarkFusion
+prune installer
+prune .git
+global-exclude __pycache__ *.pyc

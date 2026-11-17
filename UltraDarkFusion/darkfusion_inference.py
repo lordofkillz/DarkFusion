@@ -13,6 +13,34 @@ from contextlib import nullcontext
 from pathlib import Path
 
 
+def iter_opencv_dnn_candidates(outputs, active_class_ids, confidence_threshold,
+                               scores_include_objectness=False):
+    """Filter Region/raw DNN rows in bulk, preserving source order and scores.
+
+    Geometry, size limits, clipping and NMS remain with the caller. Float64
+    multiplication matches the original Python-float confidence calculation,
+    including values very close to the threshold.
+    """
+    import numpy as np
+
+    active_ids = tuple(active_class_ids or ())
+    for output in outputs:
+        output = np.asarray(output)
+        if output.ndim == 1:
+            output = output.reshape(1, -1)
+        if output.shape[1] < 6:
+            continue
+        classes = np.argmax(output[:, 5:], axis=1)
+        confidences = output[np.arange(len(output)), classes + 5].astype(np.float64)
+        if not scores_include_objectness:
+            confidences *= output[:, 4].astype(np.float64)
+        keep = ~(confidences < confidence_threshold)
+        if active_ids:
+            keep &= np.isin(classes, active_ids)
+        for index in np.flatnonzero(keep):
+            yield output[index], int(classes[index]), float(confidences[index])
+
+
 def normalize_inference_backend(value):
     value = str(value or "auto").strip().lower().replace("_", "").replace(" ", "").replace("-", "")
     return {"ort": "onnxruntime", "onnx": "onnxruntime", "onnxruntime": "onnxruntime",

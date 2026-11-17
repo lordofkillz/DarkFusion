@@ -5,6 +5,7 @@ not construct predictors or start warmup jobs.
 """
 
 import cv2
+from darkfusion_environment import model_directory
 import logging
 import math
 import numpy as np
@@ -958,7 +959,10 @@ def _sam_predict_kwargs(self, imgsz=None, device=None):
 
 
 def _sam_model_path(self):
-    return getattr(self, "sam_model_path", "Sam/sam3.pt")
+    default = "Sam/sam3.pt"
+    if os.environ.get("DARKFUSION_MODEL_DIR"):
+        default = os.path.join(model_directory(), "sam3.pt")
+    return getattr(self, "sam_model_path", default)
 
 
 def _get_sam_model(self):

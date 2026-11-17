@@ -3008,7 +3008,8 @@ def _object_clarity(self):
     if controller is None:
         from darkfusion_object_clarity import ObjectClarityController
         self._object_clarity_annotation_types = (BoundingBoxDrawer, SegmentationDrawer, OBBDrawer)
-        controller = ObjectClarityController(self, os.path.join(APP_DIR, "models", "object_clarity"))
+        from darkfusion_environment import model_directory
+        controller = ObjectClarityController(self, os.path.join(model_directory(os.path.join(APP_DIR, "models")), "object_clarity"))
         controller.status_changed.connect(lambda message: self.statusBar().showMessage(message, 6000))
         self._object_clarity_controller = controller
         current_file = getattr(self, "current_file", None)

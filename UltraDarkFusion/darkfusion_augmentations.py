@@ -7,6 +7,7 @@ and GPU services. Importing this module does not start a job or load weights.
 import concurrent.futures
 import contextlib
 import cv2
+from darkfusion_environment import model_directory
 import json
 import logging
 import math
@@ -91,7 +92,7 @@ class ImageProcessingThread(QThread):
 
     def load_sam_model(self):
         try:
-            sam_path = os.path.join("Sam", "sam3.pt")
+            sam_path = os.path.join(model_directory("Sam"), "sam3.pt")
             model = SAM(sam_path)
             logger.info(
                 "Loaded SAM3 for negative-image generation at imgsz=%s, fp16=%s.",

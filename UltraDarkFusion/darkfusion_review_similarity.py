@@ -18,6 +18,7 @@ import sqlite3
 import time
 
 import numpy as np
+from darkfusion_environment import model_directory
 from PIL import Image
 
 from darkfusion_dinov3.config import MODEL_CONFIGS, SOURCE_COMMIT
@@ -60,7 +61,7 @@ class ReviewEmbeddingMatcher:
         if model_key not in (*MODEL_CONFIGS, "visual"):
             raise ValueError(f"Unknown review similarity model: {model_key!r}")
         self.model_key = model_key
-        self.models_dir = Path(models_dir) if models_dir is not None else Path(__file__).resolve().parent / "Sam"
+        self.models_dir = Path(models_dir) if models_dir is not None else Path(model_directory(Path(__file__).resolve().parent / "Sam"))
         self.model_label = "DINOv2" if model_key == "visual" else MODEL_CONFIGS[model_key]["label"]
         self.embedding_size = EMBEDDING_SIZE if model_key == "visual" else MODEL_CONFIGS[model_key]["embedding_size"]
         self.checkpoint_path = None

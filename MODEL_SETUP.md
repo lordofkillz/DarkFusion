@@ -6,6 +6,14 @@ individual files larger than 100 MB.
 
 ## Required DarkFusion model bundle
 
+For the **pip package**, the first `darkfusion` launch automatically installs and
+verifies SAM3, GroundingDINO, DINOv3 Base and DINOv3 Large before opening the GUI.
+The shared location is `%LOCALAPPDATA%\DarkFusion\pip\models`; package updates
+reuse these files. Run `darkfusion --setup-models` for setup without the GUI, or
+add `--models-from "C:\DarkFusion\UltraDarkFusion\Sam"` to import and verify an
+existing installation's required checkpoints. The source and EXE paths below
+remain unchanged. See [pip setup](distribution/README.md) for details.
+
 The recommended Windows **DarkFusionSetup.exe** downloads and installs this
 bundle automatically before setup finishes. The installed checkpoints are at
 `<installation folder>\app\UltraDarkFusion\Sam\sam3.pt` and

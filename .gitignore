@@ -183,6 +183,17 @@ eagle/
 unfinished_Scripts/
 low_latency_vision_app/
 ik_build_optimizer/
+
+# Generated PyPI payloads and build products; never track user runtime state.
+/build/
+/dist/
+/*.egg-info/
+/distribution/*.egg-info/
+/distribution/requirements-*.txt
+/distribution/.themes-build/
+/distribution/ultradarkfusion/application.zip
+/distribution/ultradarkfusion/manifest.json
+/distribution/ultradarkfusion/VERSION
 UltraDarkFusion/Ultralytics/
 UltraDarkFusion/weights/
 UltraDarkFusion/documents/

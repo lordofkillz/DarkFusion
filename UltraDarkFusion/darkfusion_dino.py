@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 import torch
+from darkfusion_environment import model_directory
 from tqdm import tqdm
 from PIL import Image, ImageDraw
 from ultralytics import YOLO, YOLOE, SAM
@@ -33,10 +34,10 @@ BASE_DIR = Path(__file__).resolve().parent
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 CUDA_DEVICE_STR = "cuda:0" if DEVICE.type == "cuda" else "cpu"
 
-SAM_DIR = BASE_DIR / "Sam"
+SAM_DIR = Path(model_directory(BASE_DIR / "Sam"))
 SAM_DIR.mkdir(parents=True, exist_ok=True)
 
-CACHE_DIR = BASE_DIR / "hf_cache"
+CACHE_DIR = Path(os.environ.get("HF_HOME", BASE_DIR / "hf_cache")) if os.environ.get("DARKFUSION_MODEL_DIR") else BASE_DIR / "hf_cache"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 THRESHOLD_FILE = BASE_DIR / "class_thresholds.json"

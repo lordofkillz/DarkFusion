@@ -47,6 +47,7 @@ from darkfusion_image_loading import (
 from darkfusion_inference import (
     TRACKER_PRESETS, ULTRALYTICS_TRACKER_TYPES, tracker_preset_key,
     tracking_dependencies_available, ultralytics_kwargs_use_fp16,
+    iter_opencv_dnn_candidates,
 )
 from darkfusion_ui_controls import blocked_signals, snap_int_to_multiple
 from darkfusion_video_capture import (
@@ -833,59 +834,39 @@ class VideoInferenceThread(QThread):
         conf_threshold = float(config["conf_threshold"])
         combined_scores = bool(config.get("scores_include_objectness", False))
 
-        for output in outputs:
-            output = np.asarray(output)
-            if output.ndim == 1:
-                output = output.reshape(1, -1)
+        for detection, class_id, confidence in iter_opencv_dnn_candidates(
+                outputs, active_class_ids, conf_threshold, combined_scores):
+            width = float(detection[2]) * img_w
+            height = float(detection[3]) * img_h
+            if width <= 0 or height <= 0:
+                continue
 
-            for detection in output:
-                if len(detection) < 6:
-                    continue
+            center_x = float(detection[0]) * img_w
+            center_y = float(detection[1]) * img_h
+            xyxy = (
+                center_x - width / 2.0,
+                center_y - height / 2.0,
+                center_x + width / 2.0,
+                center_y + height / 2.0,
+            )
+            if not prediction_size_allowed_xyxy(
+                xyxy,
+                img_w,
+                img_h,
+                min_size_px=min_size,
+                max_percent=max_percent,
+            ):
+                skipped_size_count += 1
+                continue
 
-                scores = detection[5:]
-                if scores.size == 0:
-                    continue
+            x = max(0, min(img_w - 1, int(round(center_x - width / 2))))
+            y = max(0, min(img_h - 1, int(round(center_y - height / 2))))
+            w = max(1, min(img_w - x, int(round(width))))
+            h = max(1, min(img_h - y, int(round(height))))
 
-                class_id = int(np.argmax(scores))
-                if active_class_ids and class_id not in active_class_ids:
-                    continue
-
-                class_score = float(scores[class_id])
-                confidence = class_score if combined_scores else float(detection[4]) * class_score
-                if confidence < conf_threshold:
-                    continue
-
-                width = float(detection[2]) * img_w
-                height = float(detection[3]) * img_h
-                if width <= 0 or height <= 0:
-                    continue
-
-                center_x = float(detection[0]) * img_w
-                center_y = float(detection[1]) * img_h
-                xyxy = (
-                    center_x - width / 2.0,
-                    center_y - height / 2.0,
-                    center_x + width / 2.0,
-                    center_y + height / 2.0,
-                )
-                if not prediction_size_allowed_xyxy(
-                    xyxy,
-                    img_w,
-                    img_h,
-                    min_size_px=min_size,
-                    max_percent=max_percent,
-                ):
-                    skipped_size_count += 1
-                    continue
-
-                x = max(0, min(img_w - 1, int(round(center_x - width / 2))))
-                y = max(0, min(img_h - 1, int(round(center_y - height / 2))))
-                w = max(1, min(img_w - x, int(round(width))))
-                h = max(1, min(img_h - y, int(round(height))))
-
-                boxes.append([x, y, w, h])
-                confidences.append(confidence)
-                class_ids.append(class_id)
+            boxes.append([x, y, w, h])
+            confidences.append(confidence)
+            class_ids.append(class_id)
 
         overlay = {
             "frame_shape": (int(img_h), int(img_w)),

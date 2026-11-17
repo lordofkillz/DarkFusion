@@ -28,7 +28,7 @@ from darkfusion_dataset_operations import (
     label_file_version, read_json_file, resolve_dataset_classes_path,
     resolve_dataset_metadata_path, resolve_dataset_pose_schema_path,
 )
-from darkfusion_environment import APP_DIR
+from darkfusion_environment import APP_DIR, configure_opencv_dnn_cache
 from darkfusion_gpu_memory import (
     GpuWorkBusy, auto_label_resources, ensure_detector as ensure_gpu_detector, gpu_work,
     model_allowed as gpu_model_allowed,
@@ -36,7 +36,7 @@ from darkfusion_gpu_memory import (
 from darkfusion_inference import (
     inference_backend_for_path, load_inference_model,
     normalize_inference_backend as _normalize_inference_backend, read_onnx_model_names,
-    read_model_class_sidecar,
+    read_model_class_sidecar, iter_opencv_dnn_candidates,
 )
 from darkfusion_propagation import (
     compute_yolo_box_gap_proposals, find_yolo_box_gaps, run_propagation_worker,
@@ -1830,7 +1830,8 @@ class AutoLabelDialog(QDialog):
             )
 
             self.yoloe_model_edit.setText(str(self.auto_settings.value("yoloe_model_name", "yoloe-26s-seg.pt")))
-            self.dino_weights_edit.setText(str(self.auto_settings.value("dino_weights_path", str(Path("Sam") / "groundingdino_swint_ogc.pth"))))
+            from darkfusion_environment import model_directory
+            self.dino_weights_edit.setText(str(self.auto_settings.value("dino_weights_path", str(Path(model_directory("Sam")) / "groundingdino_swint_ogc.pth"))))
             self.dino_config_edit.setText(str(self.auto_settings.value("dino_config_path", "")))
             self.yoloe_conf_spin.setValue(float(self.auto_settings.value("yoloe_conf", 0.15)))
             self.yoloe_iou_spin.setValue(float(self.auto_settings.value("yoloe_iou", 0.45)))
@@ -4474,29 +4475,31 @@ def set_floating_point_mode(self, mode):
 
 
 def apply_backend_and_target(self):
-    """
-        Sets the preferable backend and target based on the system's hardware capabilities.
-
-        This function checks the available hardware acceleration options and configures the neural network accordingly.
-        """
+    """Use a supported DNN target, rather than general CUDA device presence."""
     if not hasattr(self, "net") or self.net is None:
         logger.warning("OpenCV DNN network is not initialized.")
         return
 
-    if cv2.cuda.getCudaEnabledDeviceCount() > 0:
+    try:
+        cuda_targets = set(cv2.dnn.getAvailableTargets(cv2.dnn.DNN_BACKEND_CUDA))
+    except cv2.error as error:
+        logger.debug("OpenCV DNN CUDA target discovery failed: %s", error)
+        cuda_targets = set()
+
+    prefer_fp16 = bool(getattr(self, "yolo_floating_point", 0))
+    cuda_target = (cv2.dnn.DNN_TARGET_CUDA_FP16 if prefer_fp16 and
+                   cv2.dnn.DNN_TARGET_CUDA_FP16 in cuda_targets else cv2.dnn.DNN_TARGET_CUDA)
+    if cuda_target in cuda_targets:
         self.net.setPreferableBackend(cv2.dnn.DNN_BACKEND_CUDA)
-
-        target = cv2.dnn.DNN_TARGET_CUDA_FP16 if self.yolo_floating_point else cv2.dnn.DNN_TARGET_CUDA
-        logger.info(f"Using OpenCV DNN CUDA target: {'FP16' if self.yolo_floating_point else 'FP32'}")
-
-        self.net.setPreferableTarget(target)
-
-    elif cv2.ocl.haveOpenCL():
-        logger.info("Using OpenCV DNN OpenCL target")
-
+        self.net.setPreferableTarget(cuda_target)
+        precision = 'FP16' if cuda_target == cv2.dnn.DNN_TARGET_CUDA_FP16 else 'FP32'
+        logger.info("Using OpenCV DNN CUDA target: %s", precision)
+    elif (cv2.ocl.haveOpenCL() and cv2.ocl.useOpenCL()
+          and cv2.ocl.Device_getDefault().type() & cv2.ocl.Device_TYPE_GPU):
+        configure_opencv_dnn_cache()
         self.net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
         self.net.setPreferableTarget(cv2.dnn.DNN_TARGET_OPENCL)
-
+        logger.info("Using OpenCV DNN OpenCL FP32 target: %s", cv2.ocl.Device_getDefault().name())
     else:
         logger.info("Using OpenCV DNN CPU target")
 
@@ -4536,7 +4539,10 @@ def initialize_yolo(self):
             logger.warning(f"CFG file does not exist: {self.cfg_file_path}")
             return False
 
-        self.net = cv2.dnn.readNetFromDarknet(self.cfg_file_path, self.weights_file_path)
+        cfg_path, weights_path = self.cfg_file_path, self.weights_file_path
+        self.net = _construct_model_without_blocking_gui(
+            self, lambda: cv2.dnn.readNetFromDarknet(cfg_path, weights_path)
+        )
 
         self.yolo_floating_point = 1 if int(getattr(self, "fp_mode", 0) or 0) == 1 else 0
 
@@ -5000,67 +5006,45 @@ def run_opencv_dnn_inference(self, image, inference_context=None) -> List[Boundi
     combined_scores = (inference_context.get("scores_include_objectness", False) if inference_context
                        else getattr(self, "_opencv_scores_include_objectness", False))
 
-    for output in outputs:
-        output = np.asarray(output)
-        if output.ndim == 1:
-            output = output.reshape(1, -1)
+    for detection, class_id, confidence in iter_opencv_dnn_candidates(
+            outputs, active_class_ids, conf_threshold, combined_scores):
+        center_x = float(detection[0]) * img_w
+        center_y = float(detection[1]) * img_h
+        width = float(detection[2]) * img_w
+        height = float(detection[3]) * img_h
 
-        for detection in output:
-            if len(detection) < 6:
-                continue
+        if width <= 0 or height <= 0:
+            continue
 
-            scores = detection[5:]
-            if scores.size == 0:
-                continue
+        xyxy = (
+            center_x - width / 2.0,
+            center_y - height / 2.0,
+            center_x + width / 2.0,
+            center_y + height / 2.0,
+        )
+        if not prediction_size_allowed_xyxy(
+            xyxy,
+            img_w,
+            img_h,
+            min_size_px=min_size_px,
+            max_percent=max_percent,
+        ):
+            skipped_size_count += 1
+            continue
 
-            class_id = int(np.argmax(scores))
-            if active_class_ids and class_id not in active_class_ids:
-                continue
+        x = int(round(center_x - width / 2))
+        y = int(round(center_y - height / 2))
+        w = int(round(width))
+        h = int(round(height))
 
-            class_score = float(scores[class_id])
-            objectness = float(detection[4]) if len(detection) > 4 else 1.0
-            confidence = class_score if combined_scores else objectness * class_score
+        x = max(0, min(x, img_w - 1))
+        y = max(0, min(y, img_h - 1))
+        w = max(1, min(w, img_w - x))
+        h = max(1, min(h, img_h - y))
 
-            if confidence < conf_threshold:
-                continue
-
-            center_x = float(detection[0]) * img_w
-            center_y = float(detection[1]) * img_h
-            width = float(detection[2]) * img_w
-            height = float(detection[3]) * img_h
-
-            if width <= 0 or height <= 0:
-                continue
-
-            xyxy = (
-                center_x - width / 2.0,
-                center_y - height / 2.0,
-                center_x + width / 2.0,
-                center_y + height / 2.0,
-            )
-            if not prediction_size_allowed_xyxy(
-                xyxy,
-                img_w,
-                img_h,
-                min_size_px=min_size_px,
-                max_percent=max_percent,
-            ):
-                skipped_size_count += 1
-                continue
-
-            x = int(round(center_x - width / 2))
-            y = int(round(center_y - height / 2))
-            w = int(round(width))
-            h = int(round(height))
-
-            x = max(0, min(x, img_w - 1))
-            y = max(0, min(y, img_h - 1))
-            w = max(1, min(w, img_w - x))
-            h = max(1, min(h, img_h - y))
-
-            boxes.append([x, y, w, h])
-            confidences.append(float(confidence))
-            class_ids.append(class_id)
+        boxes.append([x, y, w, h])
+        confidences.append(float(confidence))
+        class_ids.append(class_id)
 
     if skipped_size_count:
         self.record_prediction_size_filter_skip("OpenCV DNN", skipped_size_count)

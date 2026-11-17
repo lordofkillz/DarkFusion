@@ -1,4 +1,4 @@
-# UltraDarkFusion 5.4.0
+# UltraDarkFusion 5.4.1
 
 > [!IMPORTANT]
 > **Before installing or using GPU inference, update Windows and your GPU driver.**
@@ -49,9 +49,32 @@ are needed for GPU features.
 
 ### Prefer to manage Python yourself?
 
+The `ultradarkfusion` Python package provides the same desktop application on
+64-bit Windows with Python 3.12, without Anaconda or the EXE installer:
+
+```powershell
+python -m pip install ultradarkfusion
+darkfusion
+```
+
+First launch automatically downloads and verifies the required SAM3,
+GroundingDINO and DINOv3 checkpoints. They stay in a shared per-user model folder
+and are reused across updates. See the [pip installation guide](distribution/README.md)
+for virtual environments, NVIDIA PyTorch wheels, offline model reuse and media tools.
+The EXE and manual source installation methods remain available.
+
 The [Python installation method](#python-installation) remains available below.
 GitHub's **Code → Download ZIP** provides the source for that method. For the
 recommended setup experience, use the **Download DarkFusionSetup.exe** link above.
+
+## What changed in 5.4.1
+
+- Added pip packaging and the `darkfusion` command, with verified first-launch
+  installation of required SAM3, GroundingDINO and DINOv3 checkpoints.
+- Source, EXE and pip installations keep their own application files; pip updates
+  preserve shared settings and downloaded models.
+- OpenCV DNN shares vectorized confidence filtering between image and video
+  inference and keeps an OpenCL tuning cache across launches.
 
 ## What changed in 5.4.0
 

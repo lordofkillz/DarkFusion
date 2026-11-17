@@ -5,6 +5,7 @@ in their existing shared modules. The main window supplies the same parent API.
 """
 
 import cv2
+from darkfusion_environment import model_directory
 import hashlib
 import html
 import json
@@ -1255,7 +1256,7 @@ class ScanAnnotations(QObject):
                 ),
                 cancelled=should_cancel,
                 model_key="dinov3_base",
-                models_dir=os.path.join(app_dir, "Sam"),
+                models_dir=model_directory(os.path.join(app_dir, "Sam")),
                 progress=(
                     lambda completed, total: progress_callback(
                         int(completed), max(1, int(total) + 1),

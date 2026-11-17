@@ -1,6 +1,7 @@
 """Dataset list/grid models, annotated thumbnails, and review scan workers."""
 
 import cv2
+from darkfusion_environment import model_directory
 import hashlib
 import json
 import logging
@@ -4045,7 +4046,7 @@ def _start_review_similarity_filter(self, reference=None):
         appearance_similarity=self._propagation_mask_similarity,
         parent=self,
         matching_method=review_method(self.settings),
-        models_dir=os.path.join(os.path.dirname(os.path.abspath(__file__)), "Sam"),
+        models_dir=model_directory(os.path.join(os.path.dirname(os.path.abspath(__file__)), "Sam")),
         cache_dir=os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                ".darkfusion_cache", "review_similarity"),
     )
