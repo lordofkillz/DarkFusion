@@ -8,6 +8,11 @@ on:
         type: boolean
         required: true
         default: false
+      bootstrap:
+        description: Activate the first pending publisher without uploading files
+        type: boolean
+        required: true
+        default: false
 
 permissions:
   contents: read
@@ -18,6 +23,7 @@ concurrency:
 
 jobs:
   build:
+    if: ${{ !inputs.bootstrap }}
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
@@ -55,18 +61,43 @@ jobs:
           if-no-files-found: error
 
   publish:
-    if: ${{ inputs.publish }}
+    if: ${{ always() && inputs.publish && (inputs.bootstrap || needs.build.result == 'success') }}
     needs: build
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
       id-token: write
     steps:
+      - name: Activate a pending publisher without uploading distributions
+        if: ${{ inputs.bootstrap }}
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request, urllib.error
+          try:
+              request = urllib.request.Request(
+                  os.environ['ACTIONS_ID_TOKEN_REQUEST_URL'] + '&audience=pypi',
+                  headers={'Authorization': 'Bearer ' + os.environ['ACTIONS_ID_TOKEN_REQUEST_TOKEN']})
+              with urllib.request.urlopen(request, timeout=30) as stream:
+                  identity = json.load(stream)
+              request = urllib.request.Request('https://pypi.org/_/oidc/mint-token',
+                  data=json.dumps({'token': identity['value']}).encode(),
+                  headers={'Content-Type': 'application/json'}, method='POST')
+              with urllib.request.urlopen(request, timeout=30) as stream:
+                  result = json.load(stream)
+              if not result.get('token'):
+                  raise SystemExit('PyPI did not activate the pending publisher.')
+          except urllib.error.HTTPError as error:
+              raise SystemExit(f'Publisher activation failed: HTTP {error.code}') from None
+          # Ephemeral credentials are neither printed nor saved to an artifact.
+          print('Pending publisher activated. No distribution files uploaded.')
+          PY
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: ${{ !inputs.bootstrap }}
         with:
           name: python-distributions
           path: dist/
       - name: Publish verified distributions using PyPI Trusted Publishing
+        if: ${{ !inputs.bootstrap }}
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # release/v1
         with:
           packages-dir: dist/

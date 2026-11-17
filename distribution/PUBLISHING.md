@@ -14,8 +14,8 @@ uncommitted translations are excluded.
 
 ## Account configuration
 
-Register these two pending GitHub Trusted Publishers in the PyPI account's
-Publishing page. This authorization is separate from linking the GitHub account:
+Register these GitHub Trusted Publishers in the PyPI account's Publishing page.
+This authorization is separate from linking the GitHub account:
 
 | Field | Application | Resource companion |
 | --- | --- | --- |
@@ -28,9 +28,18 @@ Publishing page. This authorization is separate from linking the GitHub account:
 An account owner must approve this publishing access. No password or long-lived
 PyPI API token needs to be sent to an assistant or committed to GitHub.
 
+PyPI permits only one pending project per identical publisher configuration.
+For the first release, register `ultradarkfusion` first, then dispatch the workflow
+with **publish checked** and **bootstrap checked**. This exchanges an ephemeral
+OIDC credential to activate that project without uploading distributions. Now
+register the pending `ultradarkfusion-themes` publisher with the same fields.
+The ordinary publish run activates the companion and publishes both together.
+After the first release, both projects reuse this one workflow and environment.
+
 ## Build and publish
 
-The workflow runs only when dispatched. First run it with **publish unchecked**.
+The workflow runs only when dispatched. First run it with **publish unchecked**
+and **bootstrap unchecked**.
 It builds all four distributions, checks their metadata and sizes, installs the
 wheels in a clean Windows Python environment, checks dependencies, verifies the
 prepared application bytes, opens the main window offscreen and verifies settings
@@ -38,7 +47,7 @@ saving and shutdown. This smoke check disables background model warmup in its
 own test settings and does not load models or use the user's datasets.
 
 Review the passing build and artifacts. Once both Trusted Publishers are
-configured, dispatch the workflow with **publish checked**. The publish job uses
+configured, dispatch the workflow with **publish checked** and **bootstrap unchecked**. The publish job uses
 short-lived GitHub/PyPI credentials. It does not rebuild an EXE or run the manual
 source installer. PyPI descriptions come from `distribution/README.md`.
 
