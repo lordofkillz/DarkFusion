@@ -35,7 +35,10 @@ assert hasattr(cv2, "dnn_superres"), "Contrib OpenCV features must survive depen
 report = {"app": str(desktop.__file__), "import_seconds": round(time.perf_counter()-start, 3),
           "settings": str(settings), "model_directory": model_directory(), "opencv_contrib": True}
 app = desktop.QApplication([])
+app.setQuitOnLastWindowClosed(True)
 window = desktop.MainWindow()
+app.main_window = window
+window.show()
 report["main_window_created"] = True
 
 def finish():
@@ -48,15 +51,23 @@ def finish():
         report["settings_saved"] = True
         report["sam_warmup_disabled"] = True
         report["saved_settings_count"] = len(saved)
-        window.close()
-        report["closed"] = True
     except Exception:
         report["error"] = traceback.format_exc()
     finally:
-        (base / "startup-report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
-        app.quit()
+        # closeEvent may defer closing while device discovery finishes. Let its
+        # normal retry and cleanup run; app.quit() would bypass those safeguards.
+        accepted = window.close()
+        report["initial_close_accepted"] = bool(accepted)
+
+
+def timeout():
+    report["error"] = "Desktop did not finish its normal shutdown within 60 seconds."
+    app.exit(1)
 
 desktop.QTimer.singleShot(3500, finish)
-app.exec_()
+desktop.QTimer.singleShot(60000, timeout)
+exit_code = app.exec_()
+report["closed"] = not window.isVisible()
+(base / "startup-report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
 print(json.dumps(report, indent=2))
-sys.exit(1 if "error" in report else 0)
+sys.exit(1 if "error" in report or not report["closed"] else exit_code)
