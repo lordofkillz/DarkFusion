@@ -1,5 +1,7 @@
 from darkfusion_environment import configure_runtime
 configure_runtime()
+# Initialize PyTorch's Windows runtime before Qt loads its bundled DLLs.
+import torch
 from darkfusion_version import APP_VERSION
 from darkfusion_environment import configure_gui_opencv_threads
 
@@ -147,7 +149,6 @@ from pathlib import Path
 from urllib.parse import urlparse
 from ultralytics import YOLO
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_PATH
-import torch
 import numpy as np
 import yaml
 import psutil

@@ -33,7 +33,9 @@ PyPI API token needs to be sent to an assistant or committed to GitHub.
 The workflow runs only when dispatched. First run it with **publish unchecked**.
 It builds all four distributions, checks their metadata and sizes, installs the
 wheels in a clean Windows Python environment, checks dependencies, verifies the
-prepared application bytes and imports the desktop entry point.
+prepared application bytes, opens the main window offscreen and verifies settings
+saving and shutdown. This smoke check disables background model warmup in its
+own test settings and does not load models or use the user's datasets.
 
 Review the passing build and artifacts. Once both Trusted Publishers are
 configured, dispatch the workflow with **publish checked**. The publish job uses

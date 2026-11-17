@@ -39,12 +39,13 @@ jobs:
           python -m pip check
           darkfusion --version
           darkfusion --check
-      - name: Record an import-only desktop smoke check
+      - name: Verify desktop startup and settings saving
         shell: pwsh
         env:
           QT_QPA_PLATFORM: offscreen
         run: |
-          python -c "import os,sys; from pathlib import Path; from ultradarkfusion import prepare; p=prepare()/'UltraDarkFusion'; os.chdir(p); sys.path.insert(0,str(p)); import UltraDarkFusion; print('Packaged desktop imports passed')"
+          $env:DARKFUSION_DATA_DIR = Join-Path $env:RUNNER_TEMP "darkfusion-startup-test"
+          python distribution/check_install.py
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: python-distributions
